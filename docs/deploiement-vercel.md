@@ -23,8 +23,8 @@ Conserver les secrets d’origine : les remplacer rendrait illisibles les jetons
 
 ## Publications suivantes
 
-Le compte Vercel ne dispose pas encore de connexion GitHub pour `TheooLeroux/Vigie`. Le premier déploiement utilise donc les fichiers du commit publié, sans envoyer de fichier privé local. Le SHA est enregistré dans les métadonnées du déploiement. Un push seul ne déclenche pas encore de déploiement.
+Le dépôt GitHub `TheooLeroux/Vigie` est relié au projet Vercel `vigie`. La branche de production est `main` : chaque push sur cette branche déclenche automatiquement la construction et la publication sur `https://vigie-azure.vercel.app`. Le commit et la branche sont visibles dans les métadonnées du déploiement Vercel.
 
-Pour activer les déploiements automatiques, relier ce dépôt depuis les paramètres Git de Vercel après connexion du compte GitHub. Garder `main` comme branche de production. Les prévisualisations devront utiliser une base et une origine OAuth dédiées avant d’être exploitables.
+La connexion d’identité GitHub et l’installation de l’application Vercel ont été autorisées le 22 octobre 2026. L’installation sur le compte `TheooLeroux` est limitée au dépôt `Vigie`. Les variables sensibles restent définies dans l’environnement de production Vercel. Les prévisualisations devront utiliser une base et une origine OAuth dédiées avant d’être exploitables.
 
 Avant toute publication contenant une modification du schéma, appliquer `npm run db:migrate` sur la base cible puis déployer le commit testé. Vérifier la page de connexion, le refus des API anonymes, le retour OAuth, puis les lectures du parc et des connexions. Ne lancer une synchronisation distante que si elle est nécessaire.
