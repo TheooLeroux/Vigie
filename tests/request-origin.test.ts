@@ -6,6 +6,8 @@ import { proxy } from "../src/proxy";
 
 test("Vercel : domaine HTTPS exact, protections CSRF et garde des pages", () => {
   const previous = process.env.BETTER_AUTH_URL;
+  const previousVercel = process.env.VERCEL;
+  delete process.env.VERCEL;
   process.env.BETTER_AUTH_URL = "https://vigie.example.com";
   try {
     const origin = "https://vigie.example.com";
@@ -32,8 +34,17 @@ test("Vercel : domaine HTTPS exact, protections CSRF et garde des pages", () => 
     assert.equal(anonymous.status, 307);
     assert.equal(anonymous.headers.get("location"), `${origin}/connexion`);
     assert.equal(proxy(new NextRequest("https://evil.example.com/connexion")).status, 403);
+    process.env.VERCEL = "1";
+    assert.doesNotThrow(() => assertLocal(new Request("http://localhost:3000/api/workspace", {
+      headers: { host: "vigie.example.com", "x-forwarded-host": "vigie.example.com", "x-forwarded-proto": "https", forwarded: "for=proxy" },
+    })));
+    assert.throws(() => assertLocal(new Request("http://localhost:3000/api/workspace", {
+      headers: { host: "evil.example.com", "x-forwarded-proto": "https" },
+    })), /Hôte/);
   } finally {
     if (previous === undefined) delete process.env.BETTER_AUTH_URL;
     else process.env.BETTER_AUTH_URL = previous;
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
   }
 });
