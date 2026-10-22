@@ -1,0 +1,225 @@
+.vercel-section {
+  margin-bottom: 34px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--line);
+}
+.vercel-tools {
+  display: flex;
+  gap: 12px;
+  margin: 20px 0 5px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.vercel-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 180px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 12px;
+  background: var(--paper);
+}
+.vercel-search input {
+  border: 0;
+  padding-left: 0;
+  background: none;
+  width: 100%;
+}
+.vercel-tools select {
+  font-size: 12px;
+}
+.vercel-project {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.vercel-project-text {
+  min-width: 0;
+}
+.vercel-project strong {
+  font-size: 14px;
+}
+.vercel-project .vercel-name {
+  padding: 0;
+  text-align: left;
+}
+.vercel-project p {
+  font-size: 12px;
+  color: var(--text);
+  margin: 6px 0;
+}
+.vercel-project small {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.vercel-badges,
+.vercel-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.vercel-row-actions {
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+.vercel-badges {
+  margin-top: 9px;
+}
+.vercel-project.is-excluded {
+  opacity: 0.65;
+}
+.vercel-empty {
+  padding: 24px 0;
+  color: var(--muted);
+}
+.vercel-inventory > .panel-heading {
+  gap: 12px;
+  align-items: center;
+}
+.vercel-inventory > .panel-heading p {
+  font-size: 11px;
+  margin-top: 6px;
+  color: var(--muted);
+}
+.vercel-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px 20px;
+  margin: 0;
+  padding: 14px 0;
+}
+.vercel-facts > div {
+  min-width: 0;
+}
+.vercel-facts dt {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.vercel-facts dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.vercel-facts dd small {
+  display: block;
+  color: var(--text);
+  line-height: 1.6;
+}
+.vercel-facts dd code {
+  display: inline-block;
+  margin-top: 5px;
+}
+.vercel-facts dd .badge {
+  margin-left: 8px;
+}
+.vercel-details a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  color: var(--green);
+}
+.vercel-deployment {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 16px;
+  margin-top: 14px;
+}
+.vercel-deployment-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.vercel-deployment > p {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 9px 0;
+}
+.vercel-deployment > a {
+  font-size: 12px;
+}
+.vercel-notice {
+  padding: 12px;
+  background: #fff7e6;
+  border-radius: 7px;
+  color: #806128;
+  margin: 12px 0;
+  font-size: 12px;
+}
+.vercel-client-preview {
+  margin: 18px 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.vercel-analysis {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+.vercel-analysis h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+.vercel-table-wrap {
+  overflow-x: auto;
+}
+.vercel-technologies {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  text-align: left;
+}
+.vercel-technologies th,
+.vercel-technologies td {
+  padding: 10px 12px 10px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.vercel-technologies th {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.vercel-technologies small {
+  display: block;
+  color: var(--muted);
+  margin-top: 5px;
+  font-size: 10px;
+}
+@media (max-width: 1000px) {
+  .vercel-row-actions {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .vercel-row-actions .button {
+    font-size: 11px;
+  }
+}
+@media (max-width: 650px) {
+  .vercel-project {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .vercel-row-actions {
+    align-items: center;
+    flex-direction: row;
+  }
+  .vercel-facts {
+    grid-template-columns: 1fr;
+  }
+  .vercel-inventory > .panel-heading {
+    flex-wrap: wrap;
+  }
+}

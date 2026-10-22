@@ -1,0 +1,3 @@
+import {mkdirSync,writeFileSync} from 'node:fs'; import {createHash} from 'node:crypto';
+const releases=await(await fetch('https://windows.php.net/downloads/releases/releases.json')).json();const zip=releases['8.1']['nts-vs16-x64'].zip;
+const res=await fetch('https://windows.php.net/downloads/releases/'+zip.path);if(!res.ok)throw new Error('Téléchargement PHP indisponible.');const data=Buffer.from(await res.arrayBuffer());if(createHash('sha256').update(data).digest('hex')!==zip.sha256)throw new Error('Archive PHP non vérifiée.');mkdirSync('.data/tools',{recursive:true});writeFileSync('.data/tools/php81.zip',data);console.log('PHP officiel 8.1 : archive vérifiée.');

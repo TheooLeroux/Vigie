@@ -1,0 +1,16 @@
+# Connecteur WordPress Vigie
+
+Le fichier relisible est `connectors/wordpress/vigie-observer.php`. Il est destiné aux neuf WordPress déjà rattachés : AntiPunaiseLit, Campus des Métiers, Francofil, Lovidol, Proagora, Tronconic, Magic Silver, NES 3D et NES Proworking. Aucun déploiement n'est lancé à l'ouverture du plateau.
+
+L'utilisateur a autorisé l'installation sur les neuf sites, puis demandé l'installation automatique au rattachement le 22 octobre 2026. Vigie ajoute donc `wp-content/mu-plugins/vigie-observer.php` par l'API cPanel lorsqu'un WordPress est rattaché à sa fiche, manuellement, depuis « Ajouter au parc », ou par le rapprochement automatique pendant la synchronisation. Les sites non rattachés ne reçoivent aucun connecteur. Une clé aléatoire distincte de 32 octets est générée pour chaque installation, conservée chiffrée dans Vigie et intégrée au fichier PHP exécuté sur le site. Le fichier existant n'est jamais écrasé s'il est inconnu ou modifié ; une version gérée et vérifiée peut être mise à niveau. Ce connecteur est chargé automatiquement par WordPress, comme une extension obligatoire ; le retirer du dossier désactive cet accès.
+
+Les requêtes passent en HTTPS avec une signature HMAC-SHA256 du corps, un horodatage valable deux minutes et un nonce. La clé n'est jamais envoyée dans l'URL ni dans les réponses. Une requête non signée est refusée. Les requêtes ordinaires ne déclenchent aucune collecte et le connecteur ne contacte jamais Vigie de lui-même.
+
+La réponse est liée au nonce, à la date et au répertoire attendus. L'URL doit être publique et en HTTPS, sans identifiants ni paramètres ; les redirections sont refusées. Le client vérifie les adresses DNS puis se connecte à une IP publique vérifiée, en conservant le domaine pour le certificat TLS. Les requêtes sont espacées par IP serveur. Un HTTP 429 respecte le délai du serveur et conserve le relevé précédent.
+
+Le connecteur renvoie uniquement : version WordPress, PHP réellement exécuté côté web, limites et extensions PHP, extensions/thèmes installés et actifs, versions et mises à jour annoncées par leurs flux WordPress, options de mises à jour automatiques, version du moteur de base de données, langue/fuseau, visibilité moteurs, HTTPS, cache et quelques indicateurs de configuration (debug, cron, édition de fichiers). Aucun compte utilisateur, mot de passe, clé de licence, contenu métier ou contenu de `wp-config.php` n'est renvoyé.
+
+La collecte peut rafraîchir les caches de vérification des mises à jour WordPress, au plus toutes les quinze minutes. Cela écrit les caches habituels de WordPress ; cela ne télécharge ni n'installe de mise à jour, n'active aucune autre extension et ne modifie aucune option de sécurité. Les mises à jour des extensions payantes dépendent du bon fonctionnement de leur licence et de leur flux : une absence d'information reste « non vérifiable ».
+
+Si WordPress échoue en HTTP 500 pendant le chargement de ses extensions, une seconde requête authentifiée relève les données avant ce chargement. Ce mode de repli n'exécute pas les vérifications des flux et conserve leurs dernières dates ; les réglages dynamiques ne sont pas présentés comme vérifiés. Il ne désactive ni ne modifie aucune extension sur les visites ordinaires. La version actuelle du connecteur est 1.0.3.
+

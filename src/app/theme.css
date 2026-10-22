@@ -1,0 +1,244 @@
+/* The light palette remains in globals.css; dark colors are scoped here. */
+:root { color-scheme: light; }
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.theme-toggle:hover { background: var(--soft); color: var(--ink); }
+.login-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 30px; }
+.login-heading .login-wordmark { margin-bottom: 0; }
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111114;
+  --paper: #1a1a1f;
+  --ink: #f0edf0;
+  --muted: #a09ba5;
+  --text: #c2bdc7;
+  --green: #e05a66;
+  --green-hover: #ed7280;
+  --line: #303037;
+  --soft: #242329;
+  --lime: #fff0f1;
+  --amber: #e3b66d;
+  --accent-soft: #342127;
+  --accent-text: #ff9aa4;
+  --surface-hover: #25252c;
+  --success: #93ceb0;
+  --success-bg: #21322b;
+  --warning: #e3b66d;
+  --warning-bg: #352c20;
+  --info: #9bbfe3;
+  --info-bg: #222d3a;
+  --purple: #c3a9e6;
+  --purple-bg: #2e263b;
+
+  /* Surfaces, inputs, tables and dialogs. */
+  .sidebar, .topbar { background: #16161a; }
+  .login-page { background: var(--bg); }
+  .workspace-switch, .stat-card, .project-card, .resource-card,
+  .connector-card, .login-card, .modal, .icon-button.framed,
+  .hosting-donut > div, input, select, textarea, .google-sign-in {
+    background: var(--paper);
+    border-color: var(--line);
+  }
+  .button.secondary, .next-step-content .button {
+    background: var(--soft);
+    color: var(--ink);
+    border-color: var(--line);
+    box-shadow: none;
+  }
+  .button.secondary:hover, .next-step-content .button:hover,
+  .google-sign-in:hover:not(:disabled), .project-table tbody tr:hover,
+  .record-row:focus-within, .discovery-item:hover, .linked-resource:hover,
+  .railway-service-card:hover, .add-row:hover {
+    background: var(--surface-hover);
+    border-color: #514049;
+  }
+  .project-card:hover { border-color: #77515a; box-shadow: 0 4px 18px #0003; }
+  .stat-card:hover { box-shadow: 0 5px 20px #0003; }
+  .project-table th, .component-table th, .access-table th, .wp-table th,
+  .environment-head, .modal-actions, .inventory-source, .wp-connect-prompt {
+    background: #202025;
+    border-color: var(--line);
+  }
+  code, .component-table code, .import-help code, .google-setup code,
+  .search-input kbd { background: var(--soft); color: var(--text); border-color: var(--line); }
+  .modal { box-shadow: 0 28px 90px #0008; }
+  .modal::backdrop, .sidebar-overlay { background: #08080caa; }
+
+  /* Consistent borders across the record and import views. */
+  .count-pill, .soon-mini, .tech-icon, .view-toggle, .search-input,
+  .filter-toolbar > select, .filter-toggle, .project-card-footer,
+  .table-footer, .project-table td, .component-table td, .access-table td,
+  .plain-tag, .detail-tabs, .environment-block, .environment-kind,
+  .service-row + .service-row, .add-row, .linked-resource, .resource-mini,
+  .section-icon, .review-value, .quick-access > a, .quick-access > button,
+  .inventory-footnote, .access-card, .access-notes, .resource-main-icon,
+  .resource-projects, .resource-projects > button, .resource-project-link,
+  .connector-notice, .connector-notice > span, .connector-logo,
+  .connector-future, .setting-row, .setting-row .button, .modal-head,
+  .field input, .field select, .field textarea, .form-divider,
+  .checkbox-field, .manual-row, .manual-row input, .manual-row select,
+  .file-drop, .file-drop-icon, .notice, .import-summary, .preview-list > div,
+  .google-setup, .demo-banner, .demo-description, .donut-decoration,
+  .orbit, .orbit-three, .orbit-core, .orbit-node {
+    border-color: var(--line);
+  }
+
+  /* Muted text stays readable against charcoal. */
+  .subtle, .version-badge, .nav-section-label, .provider-nav > button,
+  .sidebar-placeholder, .local-profile div > span, .breadcrumb,
+  .breadcrumb > svg, .local-label, .icon-button, .live-banner, .eyebrow,
+  .page-heading p, .stat-top, .stat-top svg, .stat-card p,
+  .panel-heading > svg, .panel-heading p, .count-pill,
+  .project-table th, .component-table th, .access-table th,
+  .project-name-cell small, .project-name-cell strong + .subtle,
+  .small-dash, .row-open, .table-footer, .hosting-donut span,
+  .hosting-legend button, .hosting-legend small, .hosting-footnote,
+  .activity-content > p, .activity-panel .activity-content > p,
+  .activity-author, .next-step-content p, .next-step-content .eyebrow,
+  .app-footer, .sites-tabs > button, .detail-tabs > button,
+  .search-input, .search-input kbd, .filter-toolbar > select,
+  .filter-toggle, .active-filters, .sort-select select, .owner-inline,
+  .project-card > p, .empty-state p, .loading, .site-url, .detail-meta,
+  .plain-tag, .environment-kind, .env-url, .service-info span,
+  .project-description, .linked-resource span, .linked-resource > svg,
+  .panel-placeholder, .review-panel > p, .review-value small,
+  .review-panel > small, .data-origin, .inventory-source strong,
+  .inventory-source > span:not(.badge), .inventory-source time,
+  .component-toolbar, .component-toolbar > span,
+  .component-table td:first-child > svg, .inventory-footnote,
+  .access-url, .access-card dt, .access-notes, .resource-type,
+  .resource-card > p, .resource-card .resource-notes,
+  .resource-projects > small, .account-cell small,
+  .connector-notice p, .connector-card p, .connector-future,
+  .setting-row p, .local-settings > p, .modal-head p,
+  .field small, .file-drop > span:last-child, .checkbox-list p,
+  .import-help p, .import-summary p, .preview-list span,
+  .confirmation-content p, .help-body p, .help-body > div:not(.notice),
+  .login-intro, .login-restriction, .google-setup p, .google-setup dt {
+    color: var(--muted);
+  }
+  .main-nav button, .sidebar-bottom > button, .help-link,
+  .breadcrumb strong, .search-input input, .field input,
+  .field textarea, .field select, .manual-row input, .manual-row select,
+  .field > span, .checkbox-field legend, .checkbox-list > label,
+  .component-table td, .access-table td, .access-card dd,
+  .account-cell span, .form-divider, .google-sign-in {
+    color: var(--text);
+  }
+  input::placeholder, textarea::placeholder, .search-input input::placeholder,
+  .field input::placeholder, .field textarea::placeholder { color: #908997; }
+  .modal-head h2, .empty-state h3, .access-card h3, .resource-card h2,
+  .connector-card h3, .next-step-content h2, .section-heading,
+  .setting-row strong, .local-settings h2, .file-drop strong,
+  .component-table td:first-child strong, .hosting-donut strong,
+  .hosting-legend strong, .login-card h1, .google-setup h2 { color: var(--ink); }
+
+  /* Red is reserved for the brand, actions and selected navigation. */
+  .brand-dot, .login-wordmark, .text-button, .text-button:hover,
+  .table-footer > button, .project-name-cell:hover strong,
+  .activity-content > div button, .activity-panel .activity-content > div button,
+  .back-link, .back-link:hover, .site-url:hover, .add-row,
+  .quick-access > a, .quick-access > button, .access-table-label,
+  .access-table .text-button, .table-outlink, .resource-console,
+  .manual-rows > .button, .local-settings > .text-button,
+  .import-help a, .google-setup a, .hosting-legend button:hover,
+  .demo-banner button, .live-banner button { color: var(--accent-text); }
+  .brand-mark { background: #b83e4d; }
+  .button.primary { background: #b83e4d; border-color: #b83e4d; color: #fff; box-shadow: 0 2px 5px #0003; }
+  .button.primary:hover { background: #cb4d5d; border-color: #cb4d5d; }
+  .button.danger { background: #923441; border-color: #923441; color: #fff; }
+  .button.danger:hover { background: #ad3e4d; border-color: #ad3e4d; }
+  .main-nav button:hover, .sidebar-bottom > button:hover, .help-link:hover,
+  .provider-nav > button:hover, .icon-button:hover { background: var(--soft); color: var(--ink); }
+  .main-nav button.active, .sidebar-bottom > button.active,
+  .provider-nav > button.active, .view-toggle button.active,
+  .filter-toggle.selected { background: var(--accent-soft); color: var(--accent-text); }
+  .sites-tabs > button.active, .detail-tabs > button.active { color: var(--accent-text); }
+  .sites-tabs > button.active::after, .detail-tabs > button.active::after { background: var(--green); }
+  .nav-count, .workspace-avatar, .profile-avatar, .top-avatar,
+  .tiny-avatar, .activity-rail > span, .resource-mini, .section-icon,
+  .access-icon, .resource-main-icon, .access-table-label > span {
+    background: var(--accent-soft); color: var(--accent-text);
+  }
+  .top-avatar { border-color: var(--paper); }
+  .provider-nav .provider { color: var(--text) !important; }
+  .provider-nav .black .provider-symbol { color: var(--ink); }
+  .activity-rail i, .app-footer i { background: var(--line); }
+  .soon-mini, .sites-tabs > button > span, .detail-tabs > button > span,
+  .empty-icon, .inventory-source, .connector-logo, .notice,
+  .file-drop, .file-drop-icon { background: var(--soft); color: var(--text); }
+  .resource-projects > button, .resource-projects > .resource-project-link {
+    background: var(--accent-soft); color: var(--accent-text); border-color: #4a3038;
+  }
+  .resource-projects > button:hover, .resource-projects > .resource-project-link:hover,
+  .file-drop:hover { background: #402a32; border-color: #77515a; }
+  .next-step-card, .demo-banner, .connector-notice, .import-summary {
+    background: #242026; color: var(--text);
+  }
+  .demo-banner strong, .connector-notice strong, .import-help strong,
+  .help-body strong, .preview-list strong { color: var(--ink); }
+  .connector-notice > span, .orbit-core, .orbit-node { background: var(--soft); color: var(--accent-text); box-shadow: none; }
+  .orbit-core { box-shadow: 0 0 0 8px #2e252b; }
+  .app-footer > span:first-child > span { color: var(--accent-text); }
+  .toast { background: #342127; border-color: #70404a; color: var(--ink); box-shadow: 0 8px 35px #0005; }
+  .toast > svg, .toast .icon-button { color: var(--accent-text); }
+  .toast .icon-button:hover { background: #4a3038; }
+
+  /* Keep status and hosting colors distinct from the red brand. */
+  .tech-icon, .tech-icon.next, .provider, .provider.black,
+  .badge.neutral, .badge.muted { background: var(--soft); color: var(--text); }
+  .tech-icon.wordpress, .connector-logo.wp { background: var(--info-bg); color: var(--info); }
+  .tech-icon.php, .provider.purple, .connector-logo.railway { background: var(--purple-bg); color: var(--purple); }
+  .tech-icon.react, .tech-icon.node, .provider.mint, .provider.green,
+  .badge.sage, .stat-trend, .connector-logo.csv, .connector-logo.supabase {
+    background: var(--success-bg); color: var(--success);
+  }
+  .provider.orange, .badge.warning, .stat-trend.amber, .connector-logo.npm,
+  .connection-error, .vercel-notice, .railway-inventory .notice {
+    background: var(--warning-bg); color: var(--warning); border-color: #534331;
+  }
+  .provider-nav .orange .provider-symbol { color: var(--warning); }
+  .provider-nav .purple .provider-symbol { color: var(--purple); }
+  .review-date, .review-value strong, .local-check,
+  .local-check svg, .wp-active { color: var(--success); }
+  .discovery-match { color: var(--success) !important; }
+  .discovery-warning, .wp-warning { color: var(--warning) !important; }
+  .railway-package .railway-security-note { color: var(--warning); }
+  .discovery-error, .page-error p { color: var(--accent-text); }
+  .error-banner, .form-error, .login-error { background: #352227; border-color: #67404a; color: #ffabb2; }
+  .online-dot, .local-label > span, .live-dot, .environment-dot { background: var(--success); }
+  .environment-dot.staging, .critical-dot { background: var(--warning); }
+  .environment-dot.development { background: var(--info); }
+  .stat-line { background: #446653; }
+  .stat-line.amber { background: #715a36; }
+  .stat-line.blue { background: #435d79; }
+  .stat-line.purple { background: #66537c; }
+
+  button:focus-visible, a:focus-visible { outline-color: var(--accent-text); }
+  input:focus, select:focus, textarea:focus,
+  .search-input:focus-within, .file-drop:focus-within,
+  .record-link:focus-visible::after { outline-color: var(--accent-text); }
+  input[type="checkbox"], input[type="radio"], .checkbox-list input,
+  .installation-choices input, .wp-update-filter input { accent-color: var(--green); }
+}
+
+@media (max-width: 760px) {
+  .theme-toggle { width: 34px; height: 34px; min-height: 34px; padding: 0; }
+  .theme-toggle > span { display: none; }
+  .login-heading .theme-toggle { width: auto; padding: 8px 11px; }
+  .login-heading .theme-toggle > span { display: inline; }
+}

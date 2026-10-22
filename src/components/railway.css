@@ -1,0 +1,230 @@
+.railway-section {
+  margin-bottom: 34px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--line);
+}
+.provider-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 18px;
+}
+.railway-projects {
+  display: grid;
+  margin: 20px 0 0;
+}
+.railway-project {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.railway-project > div:first-child {
+  min-width: 0;
+}
+.railway-project strong {
+  font-size: 14px;
+}
+.railway-project small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.railway-project p {
+  font-size: 12px;
+  color: var(--text);
+  margin: 6px 0;
+}
+.railway-badges,
+.railway-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.railway-inventory > .panel-heading {
+  gap: 16px;
+  align-items: center;
+}
+.railway-inventory > .panel-heading p {
+  font-size: 11px;
+  margin-top: 6px;
+  color: var(--muted);
+}
+.railway-environment {
+  margin-top: 24px;
+}
+.railway-environment > h3 {
+  margin-bottom: 12px;
+}
+.railway-services {
+  display: grid;
+  gap: 12px;
+}
+.railway-service-card {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 17px;
+  background: var(--paper);
+  overflow-wrap: anywhere;
+}
+.railway-service-card:hover {
+  border-color: #a5bea4;
+  background: #fafcf8;
+}
+.railway-service-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.railway-service-card > p {
+  font-size: 12px;
+  color: var(--text);
+  margin: 9px 0 12px;
+}
+.railway-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 20px;
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.railway-facts > div {
+  min-width: 0;
+}
+.railway-facts dt {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.railway-facts dd {
+  font-size: 12px;
+  margin: 0;
+  line-height: 1.5;
+}
+.railway-deployment {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  color: var(--text);
+}
+.railway-deployment-id {
+  display: block;
+  color: var(--text);
+  margin-top: 8px;
+}
+.railway-build-details {
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+  margin-top: 3px;
+}
+.railway-build-details h4 {
+  font-size: 12px;
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+.railway-build + .railway-build {
+  margin-top: 15px;
+  border-top: 1px solid var(--line);
+  padding-top: 15px;
+}
+.railway-code-source {
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  line-height: 1.6;
+}
+.railway-code-source a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  color: var(--green);
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+.railway-framework {
+  font-size: 11px;
+  color: var(--text);
+  margin: 9px 0;
+}
+.railway-packages {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.railway-package {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg);
+  border-radius: 7px;
+}
+.railway-package > div {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.railway-package small {
+  display: block;
+  flex-basis: 100%;
+  line-height: 1.6;
+  color: var(--text);
+}
+.railway-package .railway-security-note {
+  color: #976520;
+}
+.railway-release-source {
+  font-size: 10px;
+  line-height: 1.5;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  color: var(--text);
+}
+.railway-build-empty {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 10px 0;
+}
+@media (max-width: 650px) {
+  .railway-package {
+    grid-template-columns: 1fr;
+  }
+}
+.railway-inventory .notice {
+  padding: 12px;
+  background: #fff7e6;
+  border-radius: 7px;
+  color: #806128;
+  margin-bottom: 12px;
+}
+@media (max-width: 650px) {
+  .railway-project {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .railway-facts {
+    grid-template-columns: 1fr;
+  }
+  .railway-inventory > .panel-heading {
+    flex-wrap: wrap;
+  }
+}
