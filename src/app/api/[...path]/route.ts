@@ -83,6 +83,7 @@ import type {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 type Context = { params: Promise<{ path: string[] }> };
 
 function parseImport(data: { filename: string; content: string }) {

@@ -92,6 +92,8 @@ Le test d'intégration du connecteur exécute le vrai fichier PHP contre des API
 
 ## Stockage
 
+Le déploiement HTTPS est décrit dans [la procédure Vercel](docs/deploiement-vercel.md).
+
 Les données, sessions Google, inventaires et secrets chiffrés sont désormais dans PostgreSQL sur Neon. `DATABASE_URL` contient l’URL poolée avec TLS, uniquement côté serveur. Elle est obligatoire en production. Le projet Neon `vigie` est hébergé à Francfort ; la configuration locale privée utilise sa base `vigie`, branche `production`. `.data/` et les fichiers `.env*` privés sont exclus de Git. L’accès aux données est centralisé dans `src/lib/db.ts` et `src/lib/storage.ts`, l’authentification dans `src/lib/auth.ts` et la liste d’accès dans `src/lib/auth-policy.ts`.
 
 Avant de démarrer une nouvelle installation PostgreSQL, renseigner `DATABASE_URL` et exécuter `npm run db:migrate`. Les migrations SQL versionnées sont atomiques et sérialisées par un verrou PostgreSQL. Les changements futurs du schéma Better Auth doivent également faire l’objet d’une migration avant déploiement.

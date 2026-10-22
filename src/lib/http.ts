@@ -1,4 +1,5 @@
 import { ZodError } from "zod";
+import { trustedRequestOrigin } from "./request-origin";
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -9,20 +10,15 @@ export class ApiError extends Error {
 }
 export function assertLocal(request: Request, allowOAuthCallback = false) {
   const url = new URL(request.url);
-  const host = request.headers.get("host") || url.host;
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  if (
-    !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host) ||
-    (forwardedHost && forwardedHost !== host) ||
-    request.headers.has("forwarded")
-  )
-    throw new ApiError("Cette version est réservée à un accès local.", 403);
+  const trustedOrigin = trustedRequestOrigin(request);
+  if (!trustedOrigin)
+    throw new ApiError("Hôte non autorisé pour cet accès local ou d’équipe.", 403);
   const origin = request.headers.get("origin");
   const oauthReturn =
     allowOAuthCallback &&
     request.method === "GET" &&
     url.pathname === "/api/auth/callback/google";
-  if (!oauthReturn && origin && origin !== `${url.protocol}//${host}`)
+  if (!oauthReturn && origin && origin !== trustedOrigin)
     throw new ApiError("Origine de la requête non autorisée.", 403);
   if (!oauthReturn && request.headers.get("sec-fetch-site") === "cross-site")
     throw new ApiError("Requête externe non autorisée.", 403);
