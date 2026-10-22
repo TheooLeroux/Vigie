@@ -153,8 +153,8 @@ test("API: contrôle du périmètre, relations, historique, imports atomiques et
   assert.equal(data.projects.length, 0);
   response = await call("GET", "workspace", undefined, "demo");
   assert.equal(response.status, 400);
-  transaction(() =>
-    createProject("demo", {
+  (await transaction(async () =>
+    (await createProject("demo", {
       name: "Scope test only",
       url: "",
       description: "",
@@ -163,9 +163,9 @@ test("API: contrôle du périmètre, relations, historique, imports atomiques et
       criticality: "standard",
       lifecycle: "active",
       tags: [],
-    }),
-  );
-  const demo = workspaceData("demo");
+    })),
+  ));
+  const demo = (await workspaceData("demo"));
   response = await call("POST", "projects", {
     name: "Projet réel",
     url: "https://real.example",

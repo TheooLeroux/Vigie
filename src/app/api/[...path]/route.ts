@@ -144,22 +144,22 @@ async function handleRequest(request: Request, context: Context) {
     const method = request.method;
     if (method === "GET") {
       if (root === "vercel" && path.length === 1)
-        return Response.json(vercelState());
+        return Response.json((await vercelState()));
       if (root === "railway" && path.length === 1)
-        return Response.json(railwayState());
+        return Response.json((await railwayState()));
       if (
         root === "installations" &&
         id &&
         child === "observer-plan" &&
         path.length === 3
       )
-        return Response.json(observerPlan(id));
+        return Response.json((await observerPlan(id)));
       if (root === "connections" && path.length === 1) {
-        const connections = hostingConnections();
+        const connections = (await hostingConnections());
         return Response.json({
           connections,
           discoveries: Object.fromEntries(
-            connections.map((c) => [c.id, hostingDiscovery(c.id)]),
+            (await Promise.all(connections.map(async (c) => [c.id, (await hostingDiscovery(c.id))]))),
           ),
         });
       }
@@ -169,18 +169,18 @@ async function handleRequest(request: Request, context: Context) {
         child === "discovery" &&
         path.length === 3
       )
-        return Response.json(hostingDiscovery(id));
+        return Response.json((await hostingDiscovery(id)));
       if (root === "workspace" && path.length === 1)
-        return Response.json(workspaceData(workspace));
+        return Response.json((await workspaceData(workspace)));
       if (root === "projects" && id && path.length === 2)
         return Response.json({
-          ...projectDetail(id, workspace),
-          hosting: projectHostingInstallations(id),
-          railway: railwayState().projects.filter((p) => p.projectId === id),
-          vercel: vercelState().projects.filter((p) => p.projectId === id),
+          ...(await projectDetail(id, workspace)),
+          hosting: (await projectHostingInstallations(id)),
+          railway: (await railwayState()).projects.filter((p) => p.projectId === id),
+          vercel: (await vercelState()).projects.filter((p) => p.projectId === id),
         });
       if (root === "export" && path.length === 1) {
-        const data = workspaceData(workspace);
+        const data = (await workspaceData(workspace));
         const projects = data.projects.map((p) => {
           const service =
             data.services.find(
@@ -265,7 +265,7 @@ async function handleRequest(request: Request, context: Context) {
     if (method === "POST") {
       const raw = await body(request);
       if (root === "vercel" && path.length === 1)
-        return Response.json(saveVercelConnection(raw), { status: 201 });
+        return Response.json((await saveVercelConnection(raw)), { status: 201 });
       if (root === "vercel" && id && child === "sync" && path.length === 3)
         return Response.json(await synchronizeVercel(id));
       if (
@@ -279,18 +279,18 @@ async function handleRequest(request: Request, context: Context) {
           .regex(/^prj_[a-zA-Z0-9]+$/)
           .parse(path[3]);
         if (path[4] === "create")
-          return Response.json(createVercelProject(id, remote));
+          return Response.json((await createVercelProject(id, remote)));
         if (path[4] === "link")
           return Response.json(
-            linkVercelProject(
+            (await linkVercelProject(
               id,
               remote,
               z.object({ projectId: z.string().uuid() }).parse(raw).projectId,
-            ),
+            )),
           );
       }
       if (root === "railway" && path.length === 1)
-        return Response.json(saveRailwayConnection(raw), { status: 201 });
+        return Response.json((await saveRailwayConnection(raw)), { status: 201 });
       if (root === "railway" && id && child === "sync" && path.length === 3)
         return Response.json(await synchronizeRailway(id));
       if (
@@ -302,14 +302,14 @@ async function handleRequest(request: Request, context: Context) {
         const remoteId = z.string().uuid().parse(path[3]);
         if (path[4] === "link")
           return Response.json(
-            linkRailwayProject(
+            (await linkRailwayProject(
               id,
               remoteId,
               z.object({ projectId: z.string().uuid() }).parse(raw).projectId,
-            ),
+            )),
           );
         if (path[4] === "create")
-          return Response.json(createRailwayProject(id, remoteId));
+          return Response.json((await createRailwayProject(id, remoteId)));
       }
       if (
         root === "connections" &&
@@ -320,7 +320,7 @@ async function handleRequest(request: Request, context: Context) {
         return Response.json(await collectHostingInventories(id));
       if (root === "installations" && id && path.length === 3) {
         if (child === "inventory") {
-          const item = hostingInstallation(id);
+          const item = (await hostingInstallation(id));
           return Response.json(
             await collectHostingInventories(
               item.connectionId,
@@ -351,169 +351,169 @@ async function handleRequest(request: Request, context: Context) {
       }
       if (root === "installations" && id && path.length === 3) {
         if (child === "link") {
-          linkHostingInstallation(id, raw);
+          (await linkHostingInstallation(id, raw));
           await provisionLinkedObserver(id);
           return Response.json(
-            hostingDiscovery(hostingInstallation(id).connectionId),
+            (await hostingDiscovery((await hostingInstallation(id)).connectionId)),
           );
         }
         if (child === "create") {
-          const result = createProjectFromInstallation(id);
+          const result = (await createProjectFromInstallation(id));
           await provisionLinkedObserver(id);
           return Response.json({
             ...result,
-            discovery: hostingDiscovery(hostingInstallation(id).connectionId),
+            discovery: (await hostingDiscovery((await hostingInstallation(id)).connectionId)),
           });
         }
         if (child === "ignore")
-          return Response.json(ignoreHostingInstallation(id, raw));
+          return Response.json((await ignoreHostingInstallation(id, raw)));
       }
       if (root === "connections" && path.length === 1)
-        return Response.json(saveHostingConnection(raw), { status: 201 });
+        return Response.json((await saveHostingConnection(raw)), { status: 201 });
       if (root === "connections" && id && child === "test" && path.length === 3)
         return Response.json(await testHostingConnection(id));
       if (root === "clients" && !id) {
         const input = clientSchema.parse(raw);
         return Response.json(
-          transaction(() => createClient(workspace, input)),
+          (await transaction(async () => (await createClient(workspace, input)))),
           { status: 201 },
         );
       }
 
       if (root === "projects" && !id) {
         const input = createProjectSchema.parse(raw);
-        const p = transaction(() => createProject(workspace, input));
+        const p = (await transaction(async () => (await createProject(workspace, input))));
         return Response.json(p, { status: 201 });
       }
       if (root === "projects" && id && child === "environments") {
-        requireProject(id, workspace);
+        (await requireProject(id, workspace));
         const input = environmentSchema.parse(raw);
-        const env = transaction(() => {
-          const env = save<Environment>(
+        const env = (await transaction(async () => {
+          const env = (await save<Environment>(
             "environments",
             workspace,
             { ...input, id: randomUUID(), projectId: id },
             id,
-          );
-          log(
+          ));
+          (await log(
             workspace,
             "environment.created",
             `Environnement « ${env.name} » ajouté.`,
             id,
-          );
+          ));
           return env;
-        });
+        }));
         return Response.json(env, { status: 201 });
       }
       if (root === "projects" && id && child === "services") {
-        requireProject(id, workspace);
+        (await requireProject(id, workspace));
         const input = serviceSchema.parse(raw);
-        const env = get<Environment>(
+        const env = (await get<Environment>(
           "environments",
           input.environmentId,
           workspace,
-        );
+        ));
         if (!env || env.projectId !== id)
           throw new ApiError("Environnement introuvable pour ce projet.");
-        const s = transaction(() => {
-          const s = save<Service>(
+        const s = (await transaction(async () => {
+          const s = (await save<Service>(
             "services",
             workspace,
             { ...input, id: randomUUID(), projectId: id },
             id,
-          );
-          log(
+          ));
+          (await log(
             workspace,
             "service.created",
             `Service « ${s.name} » ajouté.`,
             id,
-          );
+          ));
           return s;
-        });
+        }));
         return Response.json(s, { status: 201 });
       }
       if (root === "projects" && id && child === "accesses") {
-        requireProject(id, workspace);
+        (await requireProject(id, workspace));
         const input = accessSchema.parse(raw);
-        const a = transaction(() => {
-          const a = save<Access>(
+        const a = (await transaction(async () => {
+          const a = (await save<Access>(
             "accesses",
             workspace,
             { ...input, id: randomUUID(), projectId: id },
             id,
-          );
-          log(
+          ));
+          (await log(
             workspace,
             "access.created",
             `Référence d’accès « ${a.label} » ajoutée.`,
             id,
-          );
+          ));
           return a;
-        });
+        }));
         return Response.json(a, { status: 201 });
       }
       if (root === "projects" && id && child === "review") {
-        const p = requireProject(id, workspace);
-        const next = transaction(() => {
-          const next = save<Project>("projects", workspace, {
+        const p = (await requireProject(id, workspace));
+        const next = (await transaction(async () => {
+          const next = (await save<Project>("projects", workspace, {
             ...p,
             reviewedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-          });
-          log(
+          }));
+          (await log(
             workspace,
             "project.reviewed",
             "Documentation relue manuellement. Ce n’est pas un contrôle de sécurité.",
             id,
-          );
+          ));
           return next;
-        });
+        }));
         return Response.json(next);
       }
       if (root === "resources" && !id) {
         const input = resourceSchema.parse(raw);
         input.projectIds = [...new Set(input.projectIds)];
-        for (const p of input.projectIds) requireProject(p, workspace);
-        const r = transaction(() => {
-          const r = save<Resource>("resources", workspace, {
+        for (const p of input.projectIds) (await requireProject(p, workspace));
+        const r = (await transaction(async () => {
+          const r = (await save<Resource>("resources", workspace, {
             ...input,
             id: randomUUID(),
-          });
-          log(
+          }));
+          (await log(
             workspace,
             "resource.created",
             `Ressource « ${r.name} » ajoutée.`,
-          );
+          ));
           return r;
-        });
+        }));
         return Response.json(r, { status: 201 });
       }
       if (root === "inventories" && !id) {
         const input = inventorySchema.parse(raw);
         const parsed = parseLockfile(input.filename, input.content);
         return Response.json(
-          saveInventory(
+          (await saveInventory(
             workspace,
             input.serviceId,
             "lockfile",
             input.filename,
             input.commitRef,
             parsed,
-          ),
+          )),
           { status: 201 },
         );
       }
       if (root === "inventories" && id === "manual") {
         const input = manualInventorySchema.parse(raw);
         return Response.json(
-          saveInventory(
+          (await saveInventory(
             workspace,
             input.serviceId,
             "manual",
             "Saisie manuelle",
             "",
             input.components,
-          ),
+          )),
           { status: 201 },
         );
       }
@@ -525,7 +525,7 @@ async function handleRequest(request: Request, context: Context) {
           })
           .parse(raw);
         const rows = parseImport(input);
-        const existing = list<Project>("projects", workspace);
+        const existing = (await list<Project>("projects", workspace));
         const key = (p: { name: string; url: string }) =>
           `${p.name.toLowerCase()}|${p.url.replace(/\/$/, "").toLowerCase()}`;
         const keys = new Set(existing.map(key));
@@ -550,49 +550,49 @@ async function handleRequest(request: Request, context: Context) {
               provider: p.provider,
             })),
           });
-        transaction(() => {
-          for (const project of additions) createProject(workspace, project);
+        (await transaction(async () => {
+          for (const project of additions) (await createProject(workspace, project));
           if (additions.length)
-            log(
+            (await log(
               workspace,
               "projects.imported",
               `${additions.length} projets importés.`,
-            );
-        });
+            ));
+        }));
         return Response.json({ count: additions.length, skipped });
       }
     }
     if (method === "PATCH") {
       const raw = await body(request);
       if (root === "vercel" && id && path.length === 2)
-        return Response.json(saveVercelConnection(raw, id));
+        return Response.json((await saveVercelConnection(raw, id)));
       if (root === "railway" && id && path.length === 2)
-        return Response.json(saveRailwayConnection(raw, id));
+        return Response.json((await saveRailwayConnection(raw, id)));
       if (root === "connections" && id && path.length === 2)
-        return Response.json(saveHostingConnection(raw, id));
+        return Response.json((await saveHostingConnection(raw, id)));
       if (root === "clients" && id && path.length === 2) {
         const input = clientSchema.partial().parse(raw);
         for (const key of Object.keys(input) as (keyof typeof input)[])
           if (!Object.hasOwn(raw, key)) delete input[key];
         return Response.json(
-          transaction(() => updateClient(workspace, id, input)),
+          (await transaction(async () => (await updateClient(workspace, id, input)))),
         );
       }
       if (root === "projects" && id) {
-        const current = requireProject(id, workspace);
+        const current = (await requireProject(id, workspace));
         const patch = projectSchema.partial().parse(raw);
         for (const key of Object.keys(patch) as (keyof typeof patch)[])
           if (!Object.hasOwn(raw, key)) delete patch[key];
-        const next = transaction(() => {
-          const next = save<Project>("projects", workspace, {
+        const next = (await transaction(async () => {
+          const next = (await save<Project>("projects", workspace, {
             ...current,
             ...patch,
             ...("clientId" in patch || "client" in patch
-              ? resolveProjectClient(workspace, patch)
+              ? (await resolveProjectClient(workspace, patch))
               : {}),
             updatedAt: new Date().toISOString(),
-          });
-          log(
+          }));
+          (await log(
             workspace,
             patch.lifecycle && patch.lifecycle !== current.lifecycle
               ? "project.archived"
@@ -603,56 +603,56 @@ async function handleRequest(request: Request, context: Context) {
                 ? "Projet réactivé."
                 : "Informations du projet modifiées.",
             id,
-          );
+          ));
           return next;
-        });
+        }));
         return Response.json(next);
       }
       if (root === "services" && id) {
-        const current = get<Service>("services", id, workspace);
+        const current = (await get<Service>("services", id, workspace));
         if (!current) throw new ApiError("Service introuvable.", 404);
         const patch = serviceSchema.parse(raw);
-        const env = get<Environment>(
+        const env = (await get<Environment>(
           "environments",
           patch.environmentId,
           workspace,
-        );
+        ));
         if (!env || env.projectId !== current.projectId)
           throw new ApiError("Environnement introuvable pour ce projet.");
         return Response.json(
-          transaction(() => {
-            const s = save<Service>(
+          (await transaction(async () => {
+            const s = (await save<Service>(
               "services",
               workspace,
               { ...current, ...patch },
               current.projectId,
-            );
-            log(
+            ));
+            (await log(
               workspace,
               "service.updated",
               `Service « ${s.name} » modifié.`,
               s.projectId,
-            );
+            ));
             return s;
-          }),
+          })),
         );
       }
       if (root === "resources" && id) {
-        const current = get<Resource>("resources", id, workspace);
+        const current = (await get<Resource>("resources", id, workspace));
         if (!current) throw new ApiError("Ressource introuvable.", 404);
         const input = resourceSchema.parse(raw);
         input.projectIds = [...new Set(input.projectIds)];
-        for (const p of input.projectIds) requireProject(p, workspace);
+        for (const p of input.projectIds) (await requireProject(p, workspace));
         return Response.json(
-          transaction(() => {
-            const r = save<Resource>("resources", workspace, { ...input, id });
-            log(
+          (await transaction(async () => {
+            const r = (await save<Resource>("resources", workspace, { ...input, id }));
+            (await log(
               workspace,
               "resource.updated",
               `Ressource « ${r.name} » modifiée.`,
-            );
+            ));
             return r;
-          }),
+          })),
         );
       }
     }
@@ -663,7 +663,7 @@ async function handleRequest(request: Request, context: Context) {
       child === "token" &&
       path.length === 3
     )
-      return Response.json(disconnectVercel(id));
+      return Response.json((await disconnectVercel(id)));
     if (
       method === "DELETE" &&
       root === "railway" &&
@@ -671,26 +671,26 @@ async function handleRequest(request: Request, context: Context) {
       child === "token" &&
       path.length === 3
     )
-      return Response.json(disconnectRailway(id));
+      return Response.json((await disconnectRailway(id)));
     if (
       method === "DELETE" &&
       root === "connections" &&
       id &&
       path.length === 2
     )
-      return Response.json(disconnectHostingConnection(id));
+      return Response.json((await disconnectHostingConnection(id)));
     if (method === "DELETE" && root === "accesses" && id) {
-      const a = get<Access>("accesses", id, workspace);
+      const a = (await get<Access>("accesses", id, workspace));
       if (!a) throw new ApiError("Accès introuvable.", 404);
-      transaction(() => {
-        remove("accesses", id, workspace);
-        log(
+      (await transaction(async () => {
+        (await remove("accesses", id, workspace));
+        (await log(
           workspace,
           "access.removed",
           `Référence d’accès « ${a.label} » retirée.`,
           a.projectId,
-        );
-      });
+        ));
+      }));
       return Response.json({ ok: true });
     }
     throw new ApiError("Route introuvable.", 404);
@@ -704,7 +704,7 @@ async function handler(request: Request, context: Context) {
     const session = await requireSession(request.headers);
     return withAuditActor(
       { name: session.user.name, email: session.user.email },
-      () => handleRequest(request, context),
+      async () => (await handleRequest(request, context)),
     );
   } catch (error) {
     return errorResponse(error);

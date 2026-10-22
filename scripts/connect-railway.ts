@@ -11,7 +11,7 @@ import { withAuditActor } from "../src/lib/audit-context";
 void withAuditActor(
   { name: "Configuration Railway autorisée", email: "" },
   async () => {
-    let connection = railwayState().connections.find(
+    let connection = (await railwayState()).connections.find(
       (c) => c.workspaceId === "f0298460-12bd-4488-88e7-3b4a62683335",
     );
     if (!process.argv.includes("--sync-only")) {
@@ -30,14 +30,14 @@ void withAuditActor(
         cipher.update(Buffer.from(transfer.value, "base64")),
         cipher.final(),
       ]).toString("utf8");
-      connection = saveRailwayConnection(
+      connection = (await saveRailwayConnection(
         {
           name: "Railway · Janssen",
           workspaceId: "f0298460-12bd-4488-88e7-3b4a62683335",
           secret,
         },
         connection?.id,
-      );
+      ));
       unlinkSync(path);
     }
     if (!connection) throw new Error("Connexion absente.");

@@ -10,7 +10,7 @@ if (!file) throw new Error("Indiquez le chemin de site.txt.");
 const lines = readFileSync(file, "utf8")
   .replace(/^\uFEFF/, "")
   .split(/\r?\n/);
-withAuditActor({ name: "Configuration o2switch", email: "" }, () => {
+(await withAuditActor({ name: "Configuration o2switch", email: "" }, async () => {
   let name = "";
   for (let index = 0; index < lines.length; index++) {
     const section = lines[index].trim().match(/^o2switch\s*(\d+)\s*:/i);
@@ -23,17 +23,17 @@ withAuditActor({ name: "Configuration o2switch", email: "" }, () => {
       continue;
     const username = lines[index + 1]?.trim();
     if (
-      !hostingConnections().some(
+      !(await hostingConnections()).some(
         (c) =>
           c.endpoint === endpoint.replace(/\/$/, "") && c.username === username,
       )
     )
-      saveHostingConnection({ name, endpoint, username, authMode: "token" });
+      (await saveHostingConnection({ name, endpoint, username, authMode: "token" }));
   }
-});
+}));
 console.log(
   JSON.stringify(
-    hostingConnections().map((c) => ({
+    (await hostingConnections()).map((c) => ({
       id: c.id,
       name: c.name,
       endpoint: c.endpoint,

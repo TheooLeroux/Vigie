@@ -6,9 +6,9 @@ import {
 } from "../src/lib/hosting-inventory";
 import { withAuditActor } from "../src/lib/audit-context";
 void withAuditActor({ name: "Inventaire o2switch", email: "" }, async () => {
-  for (const connection of hostingConnections().filter((c) => c.configured)) {
+  for (const connection of (await hostingConnections()).filter((c) => c.configured)) {
     if (process.argv.includes("--install-observers-confirmed"))
-      for (const site of hostingDiscovery(connection.id).installations.filter(
+      for (const site of (await hostingDiscovery(connection.id)).installations.filter(
         (i) =>
           i.project &&
           i.kind === "wordpress" &&

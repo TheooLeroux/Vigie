@@ -60,33 +60,33 @@ async function json(url: string, limit: number, transport: typeof fetch) {
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
-function storage() {
+async function storage() {
   const db = database();
-  db.exec(
+  (await db.initialize(
     "CREATE TABLE IF NOT EXISTS software_release_catalog(cache_key TEXT PRIMARY KEY,data TEXT NOT NULL,expires_at TEXT NOT NULL)",
-  );
+  ));
   return db;
 }
 async function cached<T>(
   key: string,
   read: () => Promise<T>,
 ): Promise<T | null> {
-  const db = storage(),
-    row = db
+  const db = (await storage()),
+    row = (await db
       .prepare(
         "SELECT data FROM software_release_catalog WHERE cache_key=? AND expires_at>?",
       )
-      .get(key, new Date().toISOString()) as { data: string } | undefined;
+      .get(key, new Date().toISOString())) as { data: string } | undefined;
   if (row) return JSON.parse(row.data) as T;
   try {
     const data = await read();
-    db.prepare(
+    (await db.prepare(
       "INSERT INTO software_release_catalog VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at",
     ).run(
       key,
       JSON.stringify(data),
       new Date(Date.now() + 6 * 3600_000).toISOString(),
-    );
+    ));
     return data;
   } catch {
     return null;

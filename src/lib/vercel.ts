@@ -36,20 +36,20 @@ type ProjectRow = {
   missing_since: string | null;
   data: string;
 };
-function storage() {
+async function storage() {
   const db = database();
-  db.exec(`CREATE TABLE IF NOT EXISTS vercel_connections(id TEXT PRIMARY KEY,team_id TEXT NOT NULL UNIQUE,data TEXT NOT NULL,secret_cipher TEXT);
+  (await db.initialize(`CREATE TABLE IF NOT EXISTS vercel_connections(id TEXT PRIMARY KEY,team_id TEXT NOT NULL UNIQUE,data TEXT NOT NULL,secret_cipher TEXT);
   CREATE TABLE IF NOT EXISTS vercel_projects(connection_id TEXT NOT NULL REFERENCES vercel_connections(id) ON DELETE CASCADE,remote_id TEXT NOT NULL,project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,link_method TEXT,observed_at TEXT NOT NULL,missing_since TEXT,data TEXT NOT NULL,PRIMARY KEY(connection_id,remote_id));
   CREATE INDEX IF NOT EXISTS vercel_project_link ON vercel_projects(project_id);
   CREATE TABLE IF NOT EXISTS vercel_client_links(team_id TEXT NOT NULL,client_label TEXT NOT NULL,client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,PRIMARY KEY(team_id,client_label));
   CREATE TRIGGER IF NOT EXISTS vercel_link_insert BEFORE INSERT ON vercel_projects WHEN NEW.project_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM projects WHERE id=NEW.project_id AND workspace='live') BEGIN SELECT RAISE(ABORT,'Projet hors périmètre'); END;
-  CREATE TRIGGER IF NOT EXISTS vercel_link_update BEFORE UPDATE OF project_id ON vercel_projects WHEN NEW.project_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM projects WHERE id=NEW.project_id AND workspace='live') BEGIN SELECT RAISE(ABORT,'Projet hors périmètre'); END;`);
+  CREATE TRIGGER IF NOT EXISTS vercel_link_update BEFORE UPDATE OF project_id ON vercel_projects WHEN NEW.project_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM projects WHERE id=NEW.project_id AND workspace='live') BEGIN SELECT RAISE(ABORT,'Projet hors périmètre'); END;`));
   return db;
 }
-function row(id: string) {
-  const r = storage()
+async function row(id: string) {
+  const r = (await (await storage())
     .prepare("SELECT * FROM vercel_connections WHERE id=?")
-    .get(id) as ConnectionRow | undefined;
+    .get(id)) as ConnectionRow | undefined;
   if (!r) throw new ApiError("Connexion Vercel introuvable.", 404);
   return r;
 }
@@ -64,23 +64,23 @@ function connection(r: ConnectionRow): VercelConnection {
 const context = (r: { id: string; team_id: string }) =>
   `vigie:vercel:v1:${r.id}:${r.team_id}`;
 const running = new Set<string>();
-export function vercelState(): VercelState {
+export async function vercelState(): Promise<VercelState> {
   const connections = (
-    storage()
+    (await (await storage())
       .prepare("SELECT * FROM vercel_connections ORDER BY rowid")
-      .all() as ConnectionRow[]
+      .all()) as ConnectionRow[]
   ).map(connection);
-  const projects = (
-    storage()
+  const projects = (await Promise.all((
+    (await (await storage())
       .prepare("SELECT * FROM vercel_projects ORDER BY rowid")
-      .all() as ProjectRow[]
-  ).map((r) => {
+      .all()) as ProjectRow[]
+  ).map(async (r) => {
     const c = connections.find((c) => c.id === r.connection_id)!,
-      p = r.project_id ? get<Project>("projects", r.project_id, "live") : null;
+      p = r.project_id ? (await get<Project>("projects", r.project_id, "live")) : null;
     const remote = JSON.parse(r.data) as VercelProject;
     return {
       ...remote,
-      clientSuggestion: mappedClient(remote)?.name || remote.clientSuggestion,
+      clientSuggestion: (await mappedClient(remote))?.name || remote.clientSuggestion,
       connectionId: r.connection_id,
       connectionName: c.name,
       configured: c.configured,
@@ -92,7 +92,7 @@ export function vercelState(): VercelState {
       clientName: p?.client || null,
       linkMethod: r.link_method,
     };
-  });
+  })));
   return { connections, projects };
 }
 const inputSchema = z.object({
@@ -105,9 +105,9 @@ const inputSchema = z.object({
     .regex(/^[!-~]*$/)
     .optional(),
 });
-export function saveVercelConnection(raw: unknown, id?: string) {
+export async function saveVercelConnection(raw: unknown, id?: string) {
   const input = inputSchema.parse(raw),
-    previous = id ? row(id) : null;
+    previous = id ? (await row(id)) : null;
   if (id && running.has(id))
     throw new ApiError("Attendez la fin de la synchronisation.", 409);
   if (previous && input.teamId !== previous.team_id)
@@ -115,9 +115,9 @@ export function saveVercelConnection(raw: unknown, id?: string) {
   if (!previous && !input.secret)
     throw new ApiError("Le jeton Vercel est obligatoire.");
   if (
-    storage()
+    (await (await storage())
       .prepare("SELECT id FROM vercel_connections WHERE team_id=? AND id<>?")
-      .get(input.teamId, id || "")
+      .get(input.teamId, id || ""))
   )
     throw new ApiError("Cette équipe Vercel est déjà connectée.", 409);
   const key = id || randomUUID(),
@@ -140,19 +140,19 @@ export function saveVercelConnection(raw: unknown, id?: string) {
         context({ id: key, team_id: input.teamId }),
       )
     : previous!.secret_cipher;
-  transaction(() => {
-    storage()
+  (await transaction(async () => {
+    (await (await storage())
       .prepare(
         "INSERT INTO vercel_connections(id,team_id,data,secret_cipher) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,secret_cipher=excluded.secret_cipher",
       )
-      .run(key, input.teamId, JSON.stringify(c), cipher);
-    log(
+      .run(key, input.teamId, JSON.stringify(c), cipher));
+    (await log(
       "live",
       previous ? "Connexion Vercel modifiée" : "Connexion Vercel ajoutée",
       input.name,
-    );
-  });
-  return connection(row(key));
+    ));
+  }));
+  return connection((await row(key)));
 }
 function host(value: string) {
   try {
@@ -173,12 +173,12 @@ function explicitMatch(value: string, p: VercelProject) {
     return false;
   }
 }
-export function vercelMatches(remote: VercelProject) {
-  const accesses = list<Access>("accesses", "live"),
-    services = list<Service>("services", "live"),
-    envs = list<Environment>("environments", "live"),
+export async function vercelMatches(remote: VercelProject) {
+  const accesses = (await list<Access>("accesses", "live")),
+    services = (await list<Service>("services", "live")),
+    envs = (await list<Environment>("environments", "live")),
     domains = new Set(remote.domains.map((d) => d.name));
-  const matches = list<Project>("projects", "live")
+  const matches = (await list<Project>("projects", "live"))
     .filter((p) => p.lifecycle === "active")
     .map((p) => {
       const refs = accesses.filter(
@@ -204,25 +204,25 @@ export function vercelMatches(remote: VercelProject) {
   const rank = Math.max(0, ...matches.map((m) => m.rank));
   return matches.filter((m) => m.rank === rank).map((m) => m.p);
 }
-export function applyVercelSnapshot(
+export async function applyVercelSnapshot(
   id: string,
   projects: VercelProject[],
   observedAt = new Date().toISOString(),
 ) {
-  const r = row(id);
+  const r = (await row(id));
   if (
     projects.some((p) => p.teamId !== r.team_id) ||
     new Set(projects.map((p) => p.id)).size !== projects.length
   )
     throw new ApiError("Périmètre Vercel incohérent.", 502);
-  transaction(() => {
+  (await transaction(async () => {
     for (const p of projects) {
-      const previous = storage()
+      const previous = (await (await storage())
           .prepare(
             "SELECT * FROM vercel_projects WHERE connection_id=? AND remote_id=?",
           )
-          .get(id, p.id) as ProjectRow | undefined,
-        matches = previous?.project_id || p.excluded ? [] : vercelMatches(p),
+          .get(id, p.id)) as ProjectRow | undefined,
+        matches = previous?.project_id || p.excluded ? [] : (await vercelMatches(p)),
         linked =
           previous?.project_id || (matches.length === 1 ? matches[0].id : null),
         method = previous?.project_id
@@ -243,29 +243,29 @@ export function applyVercelSnapshot(
           refreshFailed: true,
         };
       }
-      storage()
+      (await (await storage())
         .prepare(
           "INSERT INTO vercel_projects(connection_id,remote_id,project_id,link_method,observed_at,missing_since,data) VALUES (?,?,?,?,?,NULL,?) ON CONFLICT(connection_id,remote_id) DO UPDATE SET project_id=excluded.project_id,link_method=excluded.link_method,observed_at=excluded.observed_at,missing_since=NULL,data=excluded.data",
         )
-        .run(id, p.id, linked, method, observedAt, JSON.stringify(p));
+        .run(id, p.id, linked, method, observedAt, JSON.stringify(p)));
       if (linked && !previous?.project_id)
-        log(
+        (await log(
           "live",
           "Projet Vercel rattaché",
           `${p.name} · correspondance exacte`,
           linked,
-        );
+        ));
     }
-    for (const old of storage()
+    for (const old of (await (await storage())
       .prepare("SELECT remote_id FROM vercel_projects WHERE connection_id=?")
-      .all(id) as { remote_id: string }[])
+      .all(id)) as { remote_id: string }[])
       if (!projects.some((p) => p.id === old.remote_id))
-        storage()
+        (await (await storage())
           .prepare(
             "UPDATE vercel_projects SET missing_since=COALESCE(missing_since,?) WHERE connection_id=? AND remote_id=?",
           )
-          .run(observedAt, id, old.remote_id);
-    storage()
+          .run(observedAt, id, old.remote_id));
+    (await (await storage())
       .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
       .run(
         JSON.stringify({
@@ -275,20 +275,20 @@ export function applyVercelSnapshot(
           error: null,
         }),
         id,
-      );
-    log(
+      ));
+    (await log(
       "live",
       "Vercel synchronisé",
       `${connection(r).name} · ${projects.length} projets découverts`,
-    );
-  });
+    ));
+  }));
   return vercelState();
 }
 export async function synchronizeVercel(
   id: string,
   transport: typeof fetch = fetch,
 ) {
-  const r = row(id),
+  const r = (await row(id)),
     c = connection(r);
   if (!r.secret_cipher) throw new ApiError("Jeton Vercel manquant.");
   if (running.has(id))
@@ -296,9 +296,9 @@ export async function synchronizeVercel(
   if (c.lastAttemptAt && Date.now() - Date.parse(c.lastAttemptAt) < 30_000)
     throw new ApiError("Attendez 30 secondes entre deux relevés Vercel.", 429);
   running.add(id);
-  storage()
+  (await (await storage())
     .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
-    .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id);
+    .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id));
   try {
     return applyVercelSnapshot(
       id,
@@ -313,63 +313,63 @@ export async function synchronizeVercel(
       e instanceof ApiError
         ? e.message
         : "Le relevé Vercel a échoué. Le dernier relevé est conservé.";
-    storage()
+    (await (await storage())
       .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
-      .run(JSON.stringify({ ...connection(row(id)), error: message }), id);
+      .run(JSON.stringify({ ...connection((await row(id))), error: message }), id));
     throw new ApiError(message, e instanceof ApiError ? e.status : 502);
   } finally {
     running.delete(id);
   }
 }
-function remoteRow(connectionId: string, remoteId: string) {
-  row(connectionId);
-  const r = storage()
+async function remoteRow(connectionId: string, remoteId: string) {
+  (await row(connectionId));
+  const r = (await (await storage())
     .prepare(
       "SELECT * FROM vercel_projects WHERE connection_id=? AND remote_id=?",
     )
-    .get(connectionId, remoteId) as ProjectRow | undefined;
+    .get(connectionId, remoteId)) as ProjectRow | undefined;
   if (!r) throw new ApiError("Projet Vercel introuvable.", 404);
   return r;
 }
-function mappedClient(remote: VercelProject) {
+async function mappedClient(remote: VercelProject) {
   if (!remote.clientSuggestion) return null;
-  const link = storage()
+  const link = (await (await storage())
     .prepare(
       "SELECT client_id FROM vercel_client_links WHERE team_id=? AND client_label=?",
     )
-    .get(remote.teamId, remote.clientSuggestion) as
+    .get(remote.teamId, remote.clientSuggestion)) as
     { client_id: string | null } | undefined;
   return link?.client_id
-    ? get<Client>("clients", link.client_id, "live") || null
+    ? (await get<Client>("clients", link.client_id, "live")) || null
     : null;
 }
-function resolveMappedClient(remote: VercelProject) {
+async function resolveMappedClient(remote: VercelProject) {
   if (!remote.clientSuggestion) return { clientId: null, client: "" };
-  const existing = mappedClient(remote),
-    resolved = resolveProjectClient(
+  const existing = (await mappedClient(remote)),
+    resolved = (await resolveProjectClient(
       "live",
       existing
         ? { clientId: existing.id }
         : { client: remote.clientSuggestion },
-    );
-  storage()
+    ));
+  (await (await storage())
     .prepare(
       "INSERT INTO vercel_client_links(team_id,client_label,client_id) VALUES(?,?,?) ON CONFLICT(team_id,client_label) DO UPDATE SET client_id=excluded.client_id",
     )
-    .run(remote.teamId, remote.clientSuggestion, resolved.clientId);
+    .run(remote.teamId, remote.clientSuggestion, resolved.clientId));
   return resolved;
 }
-function attachClient(p: Project, remote: VercelProject) {
+async function attachClient(p: Project, remote: VercelProject) {
   if (!p.clientId && remote.clientSuggestion)
-    save("projects", "live", {
+    (await save("projects", "live", {
       ...p,
-      ...resolveMappedClient(remote),
-    });
+      ...(await resolveMappedClient(remote)),
+    }));
 }
-function addHostingAccess(p: Project, remote: VercelProject) {
+async function addHostingAccess(p: Project, remote: VercelProject) {
   const url = `https://vercel.com/${remote.teamSlug}/${remote.name}`;
-  if (!list<Access>("accesses", "live", p.id).some((a) => a.url === url))
-    save<Access>(
+  if (!(await list<Access>("accesses", "live", p.id)).some((a) => a.url === url))
+    (await save<Access>(
       "accesses",
       "live",
       {
@@ -378,11 +378,11 @@ function addHostingAccess(p: Project, remote: VercelProject) {
         projectId: p.id,
       },
       p.id,
-    );
+    ));
 }
-export function createVercelProject(connectionId: string, remoteId: string) {
-  return transaction(() => {
-    const r = remoteRow(connectionId, remoteId),
+export async function createVercelProject(connectionId: string, remoteId: string) {
+  return (await transaction(async () => {
+    const r = (await remoteRow(connectionId, remoteId)),
       remote = JSON.parse(r.data) as VercelProject;
     if (remote.excluded)
       throw new ApiError(
@@ -394,7 +394,7 @@ export function createVercelProject(connectionId: string, remoteId: string) {
       throw new ApiError(
         "Ce projet n’est plus présent dans le dernier relevé.",
       );
-    const matches = vercelMatches(remote);
+    const matches = (await vercelMatches(remote));
     if (matches.length > 1)
       throw new ApiError(
         "Plusieurs fiches correspondent. Choisissez la fiche à rattacher.",
@@ -413,7 +413,7 @@ export function createVercelProject(connectionId: string, remoteId: string) {
       );
     const p =
       matches[0] ||
-      createProject(
+      (await createProject(
         "live",
         createProjectSchema.parse({
           name: remote.name,
@@ -423,12 +423,12 @@ export function createVercelProject(connectionId: string, remoteId: string) {
           repository: remote.repository
             ? `https://github.com/${remote.repository}`
             : "",
-          ...resolveMappedClient(remote),
+          ...(await resolveMappedClient(remote)),
         }),
-      );
-    attachClient(p, remote);
-    addHostingAccess(p, remote);
-    storage()
+      ));
+    (await attachClient(p, remote));
+    (await addHostingAccess(p, remote));
+    (await (await storage())
       .prepare(
         "UPDATE vercel_projects SET project_id=?,link_method=? WHERE connection_id=? AND remote_id=?",
       )
@@ -437,47 +437,47 @@ export function createVercelProject(connectionId: string, remoteId: string) {
         matches.length ? "automatic" : "created",
         connectionId,
         remoteId,
-      );
-    log("live", "Projet Vercel ajouté au parc", remote.name, p.id);
+      ));
+    (await log("live", "Projet Vercel ajouté au parc", remote.name, p.id));
     return { projectId: p.id };
-  });
+  }));
 }
-export function linkVercelProject(
+export async function linkVercelProject(
   connectionId: string,
   remoteId: string,
   projectId: string,
 ) {
-  return transaction(() => {
-    const r = remoteRow(connectionId, remoteId),
+  return (await transaction(async () => {
+    const r = (await remoteRow(connectionId, remoteId)),
       remote = JSON.parse(r.data) as VercelProject;
     if (remote.excluded)
       throw new ApiError(
         "Ce projet est exclu du suivi selon votre consigne.",
         409,
       );
-    const p = get<Project>("projects", projectId, "live");
+    const p = (await get<Project>("projects", projectId, "live"));
     if (!p || p.lifecycle !== "active")
       throw new ApiError("Projet actif introuvable.", 404);
-    attachClient(p, remote);
-    addHostingAccess(p, remote);
-    storage()
+    (await attachClient(p, remote));
+    (await addHostingAccess(p, remote));
+    (await (await storage())
       .prepare(
         "UPDATE vercel_projects SET project_id=?,link_method='manual' WHERE connection_id=? AND remote_id=?",
       )
-      .run(p.id, connectionId, remoteId);
-    log("live", "Projet Vercel rattaché manuellement", remote.name, p.id);
+      .run(p.id, connectionId, remoteId));
+    (await log("live", "Projet Vercel rattaché manuellement", remote.name, p.id));
     return vercelState();
-  });
+  }));
 }
-export function disconnectVercel(id: string) {
+export async function disconnectVercel(id: string) {
   if (running.has(id))
     throw new ApiError("Attendez la fin de la synchronisation.", 409);
-  const r = row(id);
-  transaction(() => {
-    storage()
+  const r = (await row(id));
+  (await transaction(async () => {
+    (await (await storage())
       .prepare("UPDATE vercel_connections SET secret_cipher=NULL WHERE id=?")
-      .run(id);
-    log("live", "Jeton Vercel retiré de Vigie", connection(r).name);
-  });
+      .run(id));
+    (await log("live", "Jeton Vercel retiré de Vigie", connection(r).name));
+  }));
   return vercelState();
 }

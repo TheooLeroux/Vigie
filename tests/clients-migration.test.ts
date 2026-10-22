@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { database, list } from "../src/lib/db";
 import type { Client, Project } from "../src/lib/types";
 
-test("migration : anciens noms clients regroupés sans perte et relation persistante", () => {
+test("migration : anciens noms clients regroupés sans perte et relation persistante", async () => {
   process.env.VIGIE_DB_PATH = ":memory:";
   const legacy = new DatabaseSync(":memory:");
   legacy.exec(
@@ -33,8 +33,8 @@ test("migration : anciens noms clients regroupés sans perte et relation persist
   database();
   database();
   const data = {
-    clients: list<Client>("clients", "live"),
-    projects: list<Project>("projects", "live"),
+    clients: (await list<Client>("clients", "live")),
+    projects: (await list<Project>("projects", "live")),
   };
   assert.equal(data.clients.length, 1);
   assert.equal(data.projects.length, 3);

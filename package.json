@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env.local scripts/migrate-postgres.ts",
+    "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts"
   },
   "engines": {
     "node": ">=24.14.0 <25"
@@ -16,12 +18,14 @@
     "better-auth": "1.7.12",
     "lucide-react": "1.61.0",
     "next": "16.4.2",
+    "pg": "^8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "tsx": "4.23.15",

@@ -24,7 +24,7 @@ if (!file)
   );
 const entries = parseSiteList(readFileSync(file, "utf8"));
 const canonical = (value: string) => new URL(value).href.replace(/\/$/, "");
-const existing = list<Project>("projects", "live");
+const existing = (await list<Project>("projects", "live"));
 console.log(
   JSON.stringify(
     {
@@ -43,16 +43,16 @@ console.log(
   ),
 );
 if (process.argv.includes("--apply")) {
-  const result = withAuditActor({ name: "Import site.txt", email: "" }, () =>
-    transaction(() => {
+  const result = (await withAuditActor({ name: "Import site.txt", email: "" }, async () =>
+    (await transaction(async () => {
       let added = 0,
         updated = 0;
       for (const entry of entries) {
-        let project = list<Project>("projects", "live").find(
+        let project = (await list<Project>("projects", "live")).find(
           (p) => p.url && canonical(p.url) === canonical(entry.url),
         );
         if (!project) {
-          project = createProject(
+          project = (await createProject(
             "live",
             createProjectSchema.parse({
               name: entry.name,
@@ -63,13 +63,13 @@ if (process.argv.includes("--apply")) {
               tags: [entry.accountLabel],
               description: entry.notes,
             }),
-          );
+          ));
           added++;
         } else updated++;
         const id = project.id;
-        const service = list<Service>("services", "live", id)[0];
+        const service = (await list<Service>("services", "live", id))[0];
         if (service)
-          save(
+          (await save(
             "services",
             "live",
             {
@@ -79,15 +79,15 @@ if (process.argv.includes("--apply")) {
               repository: entry.repository || service.repository,
             },
             id,
-          );
-        const upsertAccess = (
+          ));
+        const upsertAccess = async (
           label: string,
           kind: Access["kind"],
           url: string,
         ) => {
           if (
             !url ||
-            list<Access>("accesses", "live", id).some(
+            (await list<Access>("accesses", "live", id)).some(
               (a) =>
                 a.kind === kind &&
                 a.url.replace(/\?$/, "") === url.replace(/\?$/, ""),
@@ -100,21 +100,21 @@ if (process.argv.includes("--apply")) {
             url,
             notes: "Référence fournie dans site.txt. Connexion non testée.",
           });
-          save<Access>(
+          (await save<Access>(
             "accesses",
             "live",
             { ...input, id: randomUUID(), projectId: id },
             id,
-          );
+          ));
         };
         if (entry.provider === "Railway")
-          upsertAccess(
+          (await upsertAccess(
             "Projet Railway",
             "hosting",
             entry.hostingUrl.replace(/\?$/, ""),
-          );
+          ));
         if (entry.repository)
-          upsertAccess("Dépôt Git", "git", entry.repository);
+          (await upsertAccess("Dépôt Git", "git", entry.repository));
         if (entry.database) {
           const url = entry.database.startsWith("https://")
             ? entry.database
@@ -127,7 +127,7 @@ if (process.argv.includes("--apply")) {
             ? new URL(url).pathname.match(/\/project\/([^/]+)/)?.[1] || ""
             : entry.database;
           if (
-            !list<Resource>("resources", "live").some(
+            !(await list<Resource>("resources", "live")).some(
               (r) =>
                 r.kind === "database" &&
                 r.projectIds.includes(id) &&
@@ -143,28 +143,28 @@ if (process.argv.includes("--apply")) {
               reference,
               projectIds: [id],
             });
-            save<Resource>("resources", "live", { ...input, id: randomUUID() });
+            (await save<Resource>("resources", "live", { ...input, id: randomUUID() }));
           }
-          if (url) upsertAccess("Console base de données", "database", url);
+          if (url) (await upsertAccess("Console base de données", "database", url));
         }
-        log(
+        (await log(
           "live",
           "project.imported",
           `Informations ${entry.provider} relues depuis site.txt.`,
           id,
-        );
+        ));
       }
-      const railway = list<Resource>("resources", "live").find(
+      const railway = (await list<Resource>("resources", "live")).find(
         (r) => r.provider === "Railway" && r.name === "Railway",
       );
       if (railway)
-        save("resources", "live", {
+        (await save("resources", "live", {
           ...railway,
           notes: "Connexion via Git. Projets référencés depuis site.txt.",
           projectIds: [
             ...new Set([
               ...railway.projectIds,
-              ...list<Project>("projects", "live")
+              ...(await list<Project>("projects", "live"))
                 .filter(
                   (p) =>
                     p.url &&
@@ -177,9 +177,9 @@ if (process.argv.includes("--apply")) {
                 .map((p) => p.id),
             ]),
           ],
-        });
-      return { added, updated, total: workspaceData("live").projects.length };
-    }),
-  );
+        }));
+      return { added, updated, total: (await workspaceData("live")).projects.length };
+    })),
+  ));
   console.log(JSON.stringify(result));
 }

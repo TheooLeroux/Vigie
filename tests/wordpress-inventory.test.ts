@@ -230,9 +230,9 @@ test("PHP : correctif publié et support standard distingués des correctifs de 
   );
 });
 test("persistance : collecte réelle liée, échec conserve le relevé et aucune installation automatique sans fiche", async () => {
-  const connection = saveHostingConnection(credentials);
-  transaction(() =>
-    applyDiscoverySnapshot(connection, {
+  const connection = (await saveHostingConnection(credentials));
+  (await transaction(async () =>
+    (await applyDiscoverySnapshot(connection, {
       observedAt: new Date().toISOString(),
       installations: [
         {
@@ -245,9 +245,9 @@ test("persistance : collecte réelle liée, échec conserve le relevé et aucune
           suggestedEnvironment: "production",
         },
       ],
-    }),
-  );
-  const id = hostingDiscovery(connection.id).installations[0].id;
+    })),
+  ));
+  const id = (await hostingDiscovery(connection.id)).installations[0].id;
   let calls = 0;
   await provisionLinkedObserver(id, (async () => {
     calls++;
@@ -263,11 +263,11 @@ test("persistance : collecte réelle liée, échec conserve le relevé et aucune
   assert.equal(first.failed, 0);
   const original = first.discovery.installations[0].inventory!;
   assert.equal(original.plugins.length, 3);
-  hostingStorage()
+  (await (await hostingStorage())
     .prepare(
       "UPDATE hosting_site_inventories SET data=json_set(data,'$.lastAttemptAt','2020-01-01T00:00:00Z') WHERE installation_id=?",
     )
-    .run(id);
+    .run(id));
   const failed = await collectHostingInventories(
     connection.id,
     (async () =>

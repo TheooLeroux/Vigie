@@ -46,12 +46,12 @@ import {
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 const secret = "vercel-private-unit-test";
 const freshTeam = () => `team_${randomUUID().replaceAll("-", "")}`;
-const connection = (teamId = freshTeam()) =>
-  saveVercelConnection({ name: "Test Vercel", teamId, secret });
-const local = (name: string, url = "") =>
-  transaction(() =>
-    createProject("live", createProjectSchema.parse({ name, url })),
-  );
+const connection = async (teamId = freshTeam()) =>
+  (await saveVercelConnection({ name: "Test Vercel", teamId, secret }));
+const local = async (name: string, url = "") =>
+  (await transaction(async () =>
+    (await createProject("live", createProjectSchema.parse({ name, url }))),
+  ));
 function remote(teamId: string, name = "reborn-studio-site"): VercelProject {
   const id = "prj_" + randomUUID().replaceAll("-", "");
   return {
@@ -82,11 +82,11 @@ function remote(teamId: string, name = "reborn-studio-site"): VercelProject {
     clientSuggestion: vercelSuggestedClient(teamId, name, []),
   };
 }
-function expire(id: string) {
-  const c = vercelState().connections.find((c) => c.id === id)!;
-  database()
+async function expire(id: string) {
+  const c = (await vercelState()).connections.find((c) => c.id === id)!;
+  (await database()
     .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
-    .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id);
+    .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id));
 }
 function fakeApi(
   team = VERCEL_SOURCE_TEAM,
@@ -316,8 +316,8 @@ test("Vercel : preuves de build filtrées, contraintes et avertissements exclus,
   assert.equal(analyzeVercelBuild(Array(1000).fill({})).truncated, true);
 });
 
-test("Vercel : dernier build conservé seulement pour le même déploiement en cas d’échec d’analyse", () => {
-  const c = connection(),
+test("Vercel : dernier build conservé seulement pour le même déploiement en cas d’échec d’analyse", async () => {
+  const c = (await connection()),
     p = remote(c.teamId);
   p.production = {
     id: "dpl_Proof",
@@ -335,46 +335,46 @@ test("Vercel : dernier build conservé seulement pour le même déploiement en c
       { type: "stdout", text: "Detected Next.js version: 16.3.4" },
     ]),
   };
-  applyVercelSnapshot(c.id, [p]);
+  (await applyVercelSnapshot(c.id, [p]));
   p.production.analysis = analyzeVercelBuild(null);
-  let saved = applyVercelSnapshot(c.id, [p]).projects.find(
+  let saved = (await applyVercelSnapshot(c.id, [p])).projects.find(
     (x) => x.id === p.id,
   )!;
   assert.equal(saved.production?.analysis?.refreshFailed, true);
   assert.equal(saved.production?.analysis?.technologies[0].version, "16.3.4");
   p.production.id = "dpl_Other";
   p.production.analysis = analyzeVercelBuild(null);
-  saved = applyVercelSnapshot(c.id, [p]).projects.find((x) => x.id === p.id)!;
+  saved = (await applyVercelSnapshot(c.id, [p])).projects.find((x) => x.id === p.id)!;
   assert.equal(saved.production?.analysis?.status, "unavailable");
   assert.equal(saved.production?.analysis?.technologies.length, 0);
 });
 test("Vercel : refus, redirections, pagination incomplète et déploiement hors périmètre ne produisent pas de relevé réussi", async () => {
   for (const fail of [401, 403, 429, 503, 302])
     await assert.rejects(
-      () =>
-        collectVercel(
+      async () =>
+        (await collectVercel(
           VERCEL_SOURCE_TEAM,
           secret,
           fakeApi(VERCEL_SOURCE_TEAM, { fail }).transport,
-        ),
+        )),
       (e) => e instanceof Error && !e.message.includes(secret),
     );
   await assert.rejects(
-    () =>
-      collectVercel(
+    async () =>
+      (await collectVercel(
         VERCEL_SOURCE_TEAM,
         secret,
         fakeApi(VERCEL_SOURCE_TEAM, { truncated: true }).transport,
-      ),
+      )),
     /incomplète/,
   );
   await assert.rejects(
-    () =>
-      collectVercel(
+    async () =>
+      (await collectVercel(
         VERCEL_SOURCE_TEAM,
         secret,
         fakeApi(VERCEL_SOURCE_TEAM, { wrongOwner: true }).transport,
-      ),
+      )),
     /hors périmètre/,
   );
 });
@@ -397,9 +397,9 @@ test("Vercel : répartition explicite des clients, périmètre équipe et budget
     null,
   );
 });
-let policyConnection: ReturnType<typeof connection>;
-test("Vercel : aucun projet ou client créé à la découverte ; ajout en un clic atomique et sans doublon", () => {
-  policyConnection = connection(VERCEL_SOURCE_TEAM);
+let policyConnection: Awaited<ReturnType<typeof connection>>;
+test("Vercel : aucun projet ou client créé à la découverte ; ajout en un clic atomique et sans doublon", async () => {
+  policyConnection = (await connection(VERCEL_SOURCE_TEAM));
   const c = policyConnection,
     p = remote(c.teamId),
     other = remote(c.teamId, "reborn-projets-test");
@@ -411,84 +411,84 @@ test("Vercel : aucun projet ou client créé à la découverte ; ajout en un cli
       environment: "production",
     },
   ];
-  const projectsBefore = list("projects", "live").length,
-    clientsBefore = list("clients", "live").length;
-  applyVercelSnapshot(c.id, [p, other]);
-  applyVercelSnapshot(c.id, [p, other]);
-  assert.equal(list("projects", "live").length, projectsBefore);
-  assert.equal(list("clients", "live").length, clientsBefore);
+  const projectsBefore = (await list("projects", "live")).length,
+    clientsBefore = (await list("clients", "live")).length;
+  (await applyVercelSnapshot(c.id, [p, other]));
+  (await applyVercelSnapshot(c.id, [p, other]));
+  assert.equal((await list("projects", "live")).length, projectsBefore);
+  assert.equal((await list("clients", "live")).length, clientsBefore);
   assert.equal(
-    vercelState().projects.filter((v) => v.connectionId === c.id).length,
+    (await vercelState()).projects.filter((v) => v.connectionId === c.id).length,
     2,
   );
-  const one = createVercelProject(c.id, p.id),
-    again = createVercelProject(c.id, p.id),
-    two = createVercelProject(c.id, other.id);
+  const one = (await createVercelProject(c.id, p.id)),
+    again = (await createVercelProject(c.id, p.id)),
+    two = (await createVercelProject(c.id, other.id));
   assert.equal(one.projectId, again.projectId);
-  assert.equal(list("projects", "live").length, projectsBefore + 2);
-  const a = get<Project>("projects", one.projectId, "live")!,
-    b = get<Project>("projects", two.projectId, "live")!;
+  assert.equal((await list("projects", "live")).length, projectsBefore + 2);
+  const a = (await get<Project>("projects", one.projectId, "live"))!,
+    b = (await get<Project>("projects", two.projectId, "live"))!;
   assert.equal(a.client, "Reborn Studio");
   assert.equal(a.clientId, b.clientId);
-  assert.equal(list("clients", "live").length, clientsBefore + 1);
-  assert.equal(list("accesses", "live", one.projectId).length, 1);
-  const client = get<Client>("clients", a.clientId!, "live")!;
-  save("clients", "live", { ...client, name: "Client renommé" });
-  const changed = get<Project>("projects", one.projectId, "live")!;
-  save("projects", "live", {
+  assert.equal((await list("clients", "live")).length, clientsBefore + 1);
+  assert.equal((await list("accesses", "live", one.projectId)).length, 1);
+  const client = (await get<Client>("clients", a.clientId!, "live"))!;
+  (await save("clients", "live", { ...client, name: "Client renommé" }));
+  const changed = (await get<Project>("projects", one.projectId, "live"))!;
+  (await save("projects", "live", {
     ...changed,
     description: "Notes manuelles",
     url: "https://manual-vercel.test",
-  });
-  applyVercelSnapshot(c.id, [p, other]);
+  }));
+  (await applyVercelSnapshot(c.id, [p, other]));
   assert.equal(
-    get<Project>("projects", one.projectId, "live")!.description,
+    (await get<Project>("projects", one.projectId, "live"))!.description,
     "Notes manuelles",
   );
   assert.equal(
-    get<Project>("projects", one.projectId, "live")!.clientId,
+    (await get<Project>("projects", one.projectId, "live"))!.clientId,
     client.id,
   );
   const third = remote(c.teamId, "reporting-reborn");
-  applyVercelSnapshot(c.id, [p, other, third]);
+  (await applyVercelSnapshot(c.id, [p, other, third]));
   assert.equal(
-    vercelState().projects.find((v) => v.id === third.id)?.clientSuggestion,
+    (await vercelState()).projects.find((v) => v.id === third.id)?.clientSuggestion,
     "Client renommé",
   );
-  const addedAfterRename = createVercelProject(c.id, third.id);
+  const addedAfterRename = (await createVercelProject(c.id, third.id));
   assert.equal(
-    get<Project>("projects", addedAfterRename.projectId, "live")!.clientId,
+    (await get<Project>("projects", addedAfterRename.projectId, "live"))!.clientId,
     client.id,
   );
-  assert.equal(list("clients", "live").length, clientsBefore + 1);
+  assert.equal((await list("clients", "live")).length, clientsBefore + 1);
 });
-test("Vercel : les deux projets à virer restent visibles mais ne peuvent être ajoutés ni rattachés", () => {
+test("Vercel : les deux projets à virer restent visibles mais ne peuvent être ajoutés ni rattachés", async () => {
   const c = policyConnection,
     a = remote(c.teamId, "released-scan-demo"),
     b = remote(c.teamId, "mtt-lab"),
-    p = local("Autre fiche");
-  applyVercelSnapshot(c.id, [a, b]);
-  const count = list("projects", "live").length;
+    p = (await local("Autre fiche"));
+  (await applyVercelSnapshot(c.id, [a, b]));
+  const count = (await list("projects", "live")).length;
   for (const v of [a, b]) {
-    assert.throws(() => createVercelProject(c.id, v.id), /exclu/);
-    assert.throws(() => linkVercelProject(c.id, v.id, p.id), /exclu/);
+    await assert.rejects(async () => (await createVercelProject(c.id, v.id)), /exclu/);
+    await assert.rejects(async () => (await linkVercelProject(c.id, v.id, p.id)), /exclu/);
   }
-  assert.equal(list("projects", "live").length, count);
+  assert.equal((await list("projects", "live")).length, count);
   assert.equal(
-    vercelState().projects.filter((v) => v.connectionId === c.id && v.excluded)
+    (await vercelState()).projects.filter((v) => v.connectionId === c.id && v.excluded)
       .length,
     2,
   );
 });
-test("Vercel : rapprochement exact, ambiguïtés et clients manuels conservés", () => {
-  const c = connection(),
+test("Vercel : rapprochement exact, ambiguïtés et clients manuels conservés", async () => {
+  const c = (await connection()),
     r = remote(c.teamId),
-    a = local("A", `https://${r.domains[0].name}`),
-    b = local("B", `https://${r.domains[0].name}`);
-  assert.equal(vercelMatches(r).length, 2);
-  applyVercelSnapshot(c.id, [r]);
-  assert.throws(() => createVercelProject(c.id, r.id), /Plusieurs fiches/);
-  save<Access>(
+    a = (await local("A", `https://${r.domains[0].name}`)),
+    b = (await local("B", `https://${r.domains[0].name}`));
+  assert.equal((await vercelMatches(r)).length, 2);
+  (await applyVercelSnapshot(c.id, [r]));
+  await assert.rejects(async () => (await createVercelProject(c.id, r.id)), /Plusieurs fiches/);
+  (await save<Access>(
     "accesses",
     "live",
     {
@@ -501,32 +501,32 @@ test("Vercel : rapprochement exact, ambiguïtés et clients manuels conservés",
       projectId: a.id,
     },
     a.id,
-  );
+  ));
   assert.deepEqual(
-    vercelMatches(r).map((p) => p.id),
+    (await vercelMatches(r)).map((p) => p.id),
     [a.id],
   );
-  const client = createClient(
+  const client = (await createClient(
     "live",
     clientSchema.parse({ name: "Client manuel" }),
-  );
-  save("projects", "live", { ...b, clientId: client.id, client: client.name });
+  ));
+  (await save("projects", "live", { ...b, clientId: client.id, client: client.name }));
   r.clientSuggestion = "Reborn Studio";
-  linkVercelProject(c.id, r.id, b.id);
-  applyVercelSnapshot(c.id, [r]);
-  assert.equal(get<Project>("projects", b.id, "live")!.clientId, client.id);
+  (await linkVercelProject(c.id, r.id, b.id));
+  (await applyVercelSnapshot(c.id, [r]));
+  assert.equal((await get<Project>("projects", b.id, "live"))!.clientId, client.id);
   assert.equal(
-    vercelState().projects.find((v) => v.id === r.id)!.projectId,
+    (await vercelState()).projects.find((v) => v.id === r.id)!.projectId,
     b.id,
   );
 });
 test("Vercel : secret chiffré, échecs sans perte, absence conservée et déconnexion locale", async () => {
-  const c = connection(),
+  const c = (await connection()),
     r = remote(c.teamId);
-  applyVercelSnapshot(c.id, [r]);
-  const stored = database()
+  (await applyVercelSnapshot(c.id, [r]));
+  const stored = (await database()
     .prepare("SELECT secret_cipher FROM vercel_connections WHERE id=?")
-    .get(c.id) as { secret_cipher: string };
+    .get(c.id)) as { secret_cipher: string };
   assert.ok(!stored.secret_cipher.includes(secret));
   assert.equal(
     openConnectorSecret(
@@ -538,54 +538,54 @@ test("Vercel : secret chiffré, échecs sans perte, absence conservée et décon
   assert.throws(() =>
     openConnectorSecret(stored.secret_cipher, "wrong-context"),
   );
-  assert.throws(
-    () => saveVercelConnection({ ...c, teamId: freshTeam() }, c.id),
+  await assert.rejects(
+    async () => (await saveVercelConnection({ ...c, teamId: freshTeam() }, c.id)),
     /autre connexion/,
   );
-  assert.throws(() => saveVercelConnection({ ...c, secret }), /déjà connectée/);
-  const success = vercelState().connections.find(
+  await assert.rejects(async () => (await saveVercelConnection({ ...c, secret })), /déjà connectée/);
+  const success = (await vercelState()).connections.find(
     (v) => v.id === c.id,
   )!.lastSuccessAt;
   await assert.rejects(
-    () => synchronizeVercel(c.id, fakeApi(c.teamId).transport),
+    async () => (await synchronizeVercel(c.id, fakeApi(c.teamId).transport)),
     /30 secondes/,
   );
-  expire(c.id);
+  (await expire(c.id));
   await assert.rejects(
-    () => synchronizeVercel(c.id, fakeApi(c.teamId, { fail: 503 }).transport),
+    async () => (await synchronizeVercel(c.id, fakeApi(c.teamId, { fail: 503 }).transport)),
     /impossible/,
   );
   assert.equal(
-    vercelState().connections.find((v) => v.id === c.id)!.lastSuccessAt,
+    (await vercelState()).connections.find((v) => v.id === c.id)!.lastSuccessAt,
     success,
   );
-  assert.ok(vercelState().projects.some((v) => v.id === r.id));
-  applyVercelSnapshot(c.id, []);
-  assert.ok(vercelState().projects.find((v) => v.id === r.id)?.missingSince);
-  assert.throws(() => createVercelProject(c.id, r.id), /plus présent/);
-  applyVercelSnapshot(c.id, [r]);
+  assert.ok((await vercelState()).projects.some((v) => v.id === r.id));
+  (await applyVercelSnapshot(c.id, []));
+  assert.ok((await vercelState()).projects.find((v) => v.id === r.id)?.missingSince);
+  await assert.rejects(async () => (await createVercelProject(c.id, r.id)), /plus présent/);
+  (await applyVercelSnapshot(c.id, [r]));
   assert.equal(
-    vercelState().projects.find((v) => v.id === r.id)?.missingSince,
+    (await vercelState()).projects.find((v) => v.id === r.id)?.missingSince,
     null,
   );
-  const created = createVercelProject(c.id, r.id);
-  disconnectVercel(c.id);
-  await assert.rejects(() => synchronizeVercel(c.id), /manquant/);
+  const created = (await createVercelProject(c.id, r.id));
+  (await disconnectVercel(c.id));
+  await assert.rejects(async () => (await synchronizeVercel(c.id)), /manquant/);
   assert.equal(
-    vercelState().projects.find((v) => v.id === r.id)?.projectId,
+    (await vercelState()).projects.find((v) => v.id === r.id)?.projectId,
     created.projectId,
   );
-  remove("projects", created.projectId, "live");
+  (await remove("projects", created.projectId, "live"));
   assert.equal(
-    vercelState().projects.find((v) => v.id === r.id)?.projectId,
+    (await vercelState()).projects.find((v) => v.id === r.id)?.projectId,
     null,
   );
 });
 test("Vercel : routes protégées, aucune fuite dans les réponses et ajout authentifié", async () => {
-  const c = connection(),
+  const c = (await connection()),
     p = remote(c.teamId);
-  applyVercelSnapshot(c.id, [p]);
-  const existing = local("Route existante");
+  (await applyVercelSnapshot(c.id, [p]));
+  const existing = (await local("Route existante"));
   async function call(
     method: string,
     path: string,

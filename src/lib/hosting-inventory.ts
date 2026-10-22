@@ -18,25 +18,25 @@ import { enrichPhpRelease } from "./connectors/php-releases";
 import type { HostingInstallationView, SiteInventory, Project } from "./types";
 const running = new Set<string>();
 type ObserverRow = { secret_cipher: string; data: string };
-function observerRow(id: string) {
-  return hostingStorage()
+async function observerRow(id: string) {
+  return (await (await hostingStorage())
     .prepare(
       "SELECT secret_cipher,data FROM hosting_observers WHERE installation_id=?",
     )
-    .get(id) as ObserverRow | undefined;
+    .get(id)) as ObserverRow | undefined;
 }
 function observerContext(item: HostingInstallationView) {
   return `vigie:wordpress-observer:v1:${item.id}:${item.connectionId}:${item.documentRoot}`;
 }
-function writeInventory(id: string, inventory: SiteInventory) {
-  hostingStorage()
+async function writeInventory(id: string, inventory: SiteInventory) {
+  (await (await hostingStorage())
     .prepare(
       "INSERT INTO hosting_site_inventories VALUES (?,?) ON CONFLICT(installation_id) DO UPDATE SET data=excluded.data",
     )
-    .run(id, JSON.stringify(inventory));
+    .run(id, JSON.stringify(inventory)));
 }
-function assertCurrent(original: HostingInstallationView) {
-  const current = hostingInstallation(original.id);
+async function assertCurrent(original: HostingInstallationView) {
+  const current = (await hostingInstallation(original.id));
   if (current.missingSince || current.documentRoot !== original.documentRoot)
     throw new ApiError(
       "L’installation a changé pendant la collecte. Relancez la synchronisation.",
@@ -44,9 +44,9 @@ function assertCurrent(original: HostingInstallationView) {
     );
   return current;
 }
-export function inventoryUrl(item: HostingInstallationView) {
+export async function inventoryUrl(item: HostingInstallationView) {
   const project = item.project
-    ? get<Project>("projects", item.project.id, "live")
+    ? (await get<Project>("projects", item.project.id, "live"))
     : null;
   if (project?.url) {
     try {
@@ -72,7 +72,7 @@ export async function collectHostingInventories(
 ) {
   if (running.has(connectionId))
     throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
-  let installations = hostingDiscovery(connectionId).installations.filter(
+  let installations = (await hostingDiscovery(connectionId)).installations.filter(
     (i) =>
       i.kind === "wordpress" &&
       !i.ignored &&
@@ -112,10 +112,10 @@ export async function collectHostingInventories(
           const item = installations[cursor++];
           let snapshot: SiteInventory;
           try {
-            const observer = observerRow(item.id);
+            const observer = (await observerRow(item.id));
             snapshot = observer
               ? await collectObserver(
-                  inventoryUrl(item),
+                  (await inventoryUrl(item)),
                   item.documentRoot,
                   openConnectorSecret(
                     observer.secret_cipher,
@@ -130,33 +130,33 @@ export async function collectHostingInventories(
                   catalogTransport,
                 );
             snapshot = await enrichPhpRelease(snapshot, catalogTransport);
-            transaction(() => {
-              assertCurrent(item);
-              writeInventory(item.id, snapshot);
-              log(
+            (await transaction(async () => {
+              (await assertCurrent(item));
+              (await writeInventory(item.id, snapshot));
+              (await log(
                 "live",
                 "hosting.inventory",
                 `Inventaire ${snapshot.source === "wordpress-observer" ? "WordPress" : "des fichiers WordPress"} relevé sur ${item.domains[0]} : ${snapshot.plugins.length} extensions, ${snapshot.themes.length} thèmes.`,
                 item.project?.id || null,
-              );
-            });
+              ));
+            }));
             success++;
           } catch (e) {
             const message =
               e instanceof ApiError
                 ? e.message
                 : "La collecte a échoué. Le dernier inventaire est conservé.";
-            transaction(() => {
-              const current = assertCurrent(item),
+            (await transaction(async () => {
+              const current = (await assertCurrent(item)),
                 now = new Date().toISOString();
               if (current.inventory)
-                writeInventory(item.id, {
+                (await writeInventory(item.id, {
                   ...current.inventory,
                   lastAttemptAt: now,
                   error: message,
-                });
+                }));
               else
-                writeInventory(item.id, {
+                (await writeInventory(item.id, {
                   source: "cpanel-files",
                   observedAt: null,
                   lastAttemptAt: now,
@@ -169,35 +169,35 @@ export async function collectHostingInventories(
                   plugins: [],
                   themes: [],
                   warnings: [],
-                });
-              log(
+                }));
+              (await log(
                 "live",
                 "hosting.inventory_failed",
                 `Collecte impossible sur ${item.domains[0]} : ${message}`,
                 item.project?.id || null,
-              );
-            });
+              ));
+            }));
             failed++;
           }
         }
       }
       await Promise.all([worker(), worker(), worker()]);
-      return { success, failed, discovery: hostingDiscovery(connectionId) };
+      return { success, failed, discovery: (await hostingDiscovery(connectionId)) };
     });
   } finally {
     running.delete(connectionId);
   }
 }
 const observerFile = "vigie-observer.php";
-function recordObserverFailure(id: string, error: unknown) {
+async function recordObserverFailure(id: string, error: unknown) {
   const message =
     error instanceof ApiError
       ? error.message
       : "Installation du connecteur impossible.";
-  transaction(() => {
-    const item = hostingInstallation(id),
+  (await transaction(async () => {
+    const item = (await hostingInstallation(id)),
       now = new Date().toISOString();
-    writeInventory(
+    (await writeInventory(
       id,
       item.inventory
         ? {
@@ -219,14 +219,14 @@ function recordObserverFailure(id: string, error: unknown) {
             themes: [],
             warnings: [],
           },
-    );
-    log(
+    ));
+    (await log(
       "live",
       "hosting.observer_failed",
       `Connecteur sur ${item.domains[0]} : ${message}`,
       item.project?.id || null,
-    );
-  });
+    ));
+  }));
 }
 export async function provisionLinkedObservers(
   connectionId: string,
@@ -234,7 +234,7 @@ export async function provisionLinkedObservers(
   resolveDns = lookup,
 ) {
   const issues: { installationId: string; message: string }[] = [];
-  for (const site of hostingDiscovery(connectionId).installations.filter(
+  for (const site of (await hostingDiscovery(connectionId)).installations.filter(
     (i) =>
       i.kind === "wordpress" &&
       i.project &&
@@ -245,7 +245,7 @@ export async function provisionLinkedObservers(
     try {
       await installObserver(site.id, true, transport, resolveDns);
     } catch (error) {
-      recordObserverFailure(site.id, error);
+      (await recordObserverFailure(site.id, error));
       issues.push({
         installationId: site.id,
         message:
@@ -255,14 +255,14 @@ export async function provisionLinkedObservers(
       });
     }
   }
-  return { discovery: hostingDiscovery(connectionId), issues };
+  return { discovery: (await hostingDiscovery(connectionId)), issues };
 }
 export async function provisionLinkedObserver(
   id: string,
   transport: typeof fetch = fetch,
   resolveDns = lookup,
 ) {
-  const item = hostingInstallation(id);
+  const item = (await hostingInstallation(id));
   if (
     item.kind !== "wordpress" ||
     !item.project ||
@@ -273,11 +273,11 @@ export async function provisionLinkedObserver(
   try {
     await installObserver(id, true, transport, resolveDns);
   } catch (error) {
-    recordObserverFailure(id, error);
+    (await recordObserverFailure(id, error));
   }
 }
-export function observerPlan(id: string) {
-  const item = hostingInstallation(id);
+export async function observerPlan(id: string) {
+  const item = (await hostingInstallation(id));
   if (item.kind !== "wordpress" || item.missingSince || !item.project)
     throw new ApiError(
       "Le connecteur nécessite un WordPress rattaché et retrouvé.",
@@ -291,10 +291,10 @@ export function observerPlan(id: string) {
     domain: item.domains[0],
     project: item.project.name,
     path: posix.join(item.documentRoot, "wp-content/mu-plugins", observerFile),
-    url: inventoryUrl(item),
+    url: (await inventoryUrl(item)),
     version: "1.0.3",
     sourceSha256: createHash("sha256").update(source).digest("hex"),
-    installed: Boolean(observerRow(id)),
+    installed: Boolean((await observerRow(id))),
     source,
   };
 }
@@ -309,8 +309,8 @@ export async function installObserver(
     throw new ApiError(
       "Confirmez l’installation du connecteur de lecture sur ce WordPress.",
     );
-  const plan = observerPlan(id),
-    item = hostingInstallation(id);
+  const plan = (await observerPlan(id)),
+    item = (await hostingInstallation(id));
   if (running.has(item.connectionId))
     throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
   running.add(item.connectionId);
@@ -330,7 +330,7 @@ export async function installObserver(
         );
       const files = mu ? await client.list(dir) : [];
       const existing = files.find((f) => f.file === observerFile);
-      let row = observerRow(id);
+      let row = (await observerRow(id));
       if (existing && !row)
         throw new ApiError(
           "Un fichier vigie-observer.php existe déjà. Il ne sera pas écrasé.",
@@ -355,9 +355,9 @@ export async function installObserver(
           );
         needsUpgrade = currentHash !== hash;
       }
-      transaction(() => {
-        assertCurrent(item);
-        hostingStorage()
+      (await transaction(async () => {
+        (await assertCurrent(item));
+        (await (await hostingStorage())
           .prepare(
             "INSERT INTO hosting_observers VALUES (?,?,?) ON CONFLICT(installation_id) DO NOTHING",
           )
@@ -369,8 +369,8 @@ export async function installObserver(
               sourceSha256: hash,
               createdAt: new Date().toISOString(),
             }),
-          );
-      });
+          ));
+      }));
       const authorization =
         input.authMode === "token"
           ? `cpanel ${input.username}:${input.secret}`
@@ -439,22 +439,22 @@ export async function installObserver(
         if (createHash("sha256").update(saved).digest("hex") !== hash)
           throw new ApiError("Le fichier déposé n’a pas pu être vérifié.", 502);
       }
-      transaction(() => {
-        assertCurrent(item);
-        hostingStorage()
+      (await transaction(async () => {
+        (await assertCurrent(item));
+        (await (await hostingStorage())
           .prepare(
             "UPDATE hosting_observers SET data=json_set(data,'$.sourceSha256',?) WHERE installation_id=?",
           )
-          .run(hash, id);
-      });
+          .run(hash, id));
+      }));
       const snapshot = await enrichPhpRelease(
         await collectObserver(plan.url, root, secret, transport, resolveDns),
         transport,
       );
-      transaction(() => {
-        assertCurrent(item);
-        writeInventory(id, snapshot);
-        hostingStorage()
+      (await transaction(async () => {
+        (await assertCurrent(item));
+        (await writeInventory(id, snapshot));
+        (await (await hostingStorage())
           .prepare(
             "UPDATE hosting_observers SET data=? WHERE installation_id=?",
           )
@@ -465,17 +465,17 @@ export async function installObserver(
               installedAt: new Date().toISOString(),
             }),
             id,
-          );
-        log(
+          ));
+        (await log(
           "live",
           "hosting.observer_installed",
           `Connecteur d’inventaire WordPress 1.0.3 installé et vérifié sur ${item.domains[0]}.`,
           item.project!.id,
-        );
-      });
+        ));
+      }));
       return {
-        installation: hostingInstallation(id),
-        discovery: hostingDiscovery(item.connectionId),
+        installation: (await hostingInstallation(id)),
+        discovery: (await hostingDiscovery(item.connectionId)),
       };
     });
   } finally {

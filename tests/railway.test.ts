@@ -35,20 +35,20 @@ import type { RailwayProject, RailwayService } from "../src/lib/railway-types";
 import type { Access, Service } from "../src/lib/types";
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 const token = "railway-unit-test-private";
-function connection() {
-  return saveRailwayConnection({
+async function connection() {
+  return (await saveRailwayConnection({
     name: "Test Railway",
     workspaceId: randomUUID(),
     secret: token,
-  });
+  }));
 }
-function project(name: string, url = "") {
-  return transaction(() =>
-    createProject(
+async function project(name: string, url = "") {
+  return (await transaction(async () =>
+    (await createProject(
       "live",
       createProjectSchema.parse({ name, url, provider: "Railway" }),
-    ),
-  );
+    )),
+  ));
 }
 function remote(workspaceId: string, name = "app"): RailwayProject {
   const environmentId = randomUUID();
@@ -142,7 +142,7 @@ function apiData(
 const transport = (value: unknown, status = 200) =>
   (async () => Response.json(value, { status })) as typeof fetch;
 test("Railway : métadonnées brutes éliminées avant stockage et réponse API", async () => {
-  const c = connection(),
+  const c = (await connection()),
     p = remote(c.workspaceId),
     raw = apiData(p),
     service =
@@ -164,14 +164,14 @@ test("Railway : métadonnées brutes éliminées avant stockage et réponse API"
     } as any,
   ];
   await synchronizeRailway(c.id, transport(raw));
-  const stored = database()
+  const stored = (await database()
     .prepare("SELECT data FROM railway_projects WHERE connection_id=?")
-    .get(c.id) as { data: string };
+    .get(c.id)) as { data: string };
   assert.doesNotMatch(
     stored.data,
     /do-not-persist-fixture-secret|serviceManifest|commitMessage|"meta"/,
   );
-  const state = railwayState().projects.find((v) => v.id === p.id)!;
+  const state = (await railwayState()).projects.find((v) => v.id === p.id)!;
   assert.equal(
     state.services[0].activeDeployments[0].evidence?.repository,
     "team/deployed",
@@ -188,15 +188,15 @@ test("Railway : métadonnées brutes éliminées avant stockage et réponse API"
     /do-not-persist-fixture-secret|serviceManifest|commitMessage|"meta"/,
   );
 });
-function expireAttempt(id: string) {
-  const c = railwayState().connections.find((c) => c.id === id)!;
-  database()
+async function expireAttempt(id: string) {
+  const c = (await railwayState()).connections.find((c) => c.id === id)!;
+  (await database()
     .prepare("UPDATE railway_connections SET data=? WHERE id=?")
-    .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id);
+    .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id));
 }
 
 test("Railway : requête fixe de lecture, pagination et secret uniquement dans le header", async () => {
-  const c = connection(),
+  const c = (await connection()),
     a = remote(c.workspaceId),
     b = remote(c.workspaceId);
   let calls = 0;
@@ -227,38 +227,38 @@ test("Railway : requête fixe de lecture, pagination et secret uniquement dans l
   );
 });
 test("Railway : relevés incomplets, secrets dans erreurs et périmètres incohérents rejetés", async () => {
-  const c = connection(),
+  const c = (await connection()),
     p = remote(c.workspaceId);
   const truncated = apiData(p);
   truncated.data.projects.edges[0].node.environments.pageInfo.hasNextPage = true;
   await assert.rejects(
-    () => collectRailway(c.workspaceId, token, transport(truncated)),
+    async () => (await collectRailway(c.workspaceId, token, transport(truncated))),
     /relevé partiel/,
   );
   await assert.rejects(
-    () => collectRailway(randomUUID(), token, transport(apiData(p))),
+    async () => (await collectRailway(randomUUID(), token, transport(apiData(p)))),
     /autre workspace/,
   );
   await assert.rejects(
-    () =>
-      collectRailway(
+    async () =>
+      (await collectRailway(
         c.workspaceId,
         token,
         transport({ errors: [{ message: `secret=${token}` }] }),
-      ),
+      )),
     (e) => e instanceof Error && !e.message.includes(token),
   );
   await assert.rejects(
-    () => collectRailway(c.workspaceId, token, transport({}, 429)),
+    async () => (await collectRailway(c.workspaceId, token, transport({}, 429))),
     /Limite API/,
   );
   await assert.rejects(
-    () => collectRailway(c.workspaceId, token, transport({}, 403)),
+    async () => (await collectRailway(c.workspaceId, token, transport({}, 403))),
     /refuse/,
   );
   await assert.rejects(
-    () =>
-      collectRailway(c.workspaceId, token, transport(apiData(p, true, null))),
+    async () =>
+      (await collectRailway(c.workspaceId, token, transport(apiData(p, true, null)))),
     /Pagination/,
   );
   const bad = apiData(p);
@@ -267,11 +267,11 @@ test("Railway : relevés incomplets, secrets dans erreurs et périmètres incoh�
   const safe = await collectRailway(c.workspaceId, token, transport(bad));
   assert.equal(safe[0].services[0].repository, null);
 });
-test("Railway : jeton chiffré, scope immuable, absence des réponses publiques et retrait local", () => {
-  const c = connection(),
-    stored = database()
+test("Railway : jeton chiffré, scope immuable, absence des réponses publiques et retrait local", async () => {
+  const c = (await connection()),
+    stored = (await database()
       .prepare("SELECT secret_cipher FROM railway_connections WHERE id=?")
-      .get(c.id) as { secret_cipher: string };
+      .get(c.id)) as { secret_cipher: string };
   assert.ok(!stored.secret_cipher.includes(token));
   assert.equal(
     openConnectorSecret(
@@ -286,45 +286,45 @@ test("Railway : jeton chiffré, scope immuable, absence des réponses publiques 
       `vigie:railway:v1:${randomUUID()}:${c.workspaceId}`,
     ),
   );
-  assert.ok(!JSON.stringify(railwayState()).includes(token));
-  assert.throws(
-    () => saveRailwayConnection({ ...c, workspaceId: randomUUID() }, c.id),
+  assert.ok(!JSON.stringify((await railwayState())).includes(token));
+  await assert.rejects(
+    async () => (await saveRailwayConnection({ ...c, workspaceId: randomUUID() }, c.id)),
     /changer de workspace/,
   );
-  assert.throws(
-    () => saveRailwayConnection({ ...c, secret: token }),
+  await assert.rejects(
+    async () => (await saveRailwayConnection({ ...c, secret: token })),
     /déjà connecté/,
   );
-  saveRailwayConnection({ ...c, name: "Renommé" }, c.id);
+  (await saveRailwayConnection({ ...c, name: "Renommé" }, c.id));
   assert.equal(
     (
-      database()
+      (await database()
         .prepare("SELECT secret_cipher FROM railway_connections WHERE id=?")
-        .get(c.id) as { secret_cipher: string }
+        .get(c.id)) as { secret_cipher: string }
     ).secret_cipher,
     stored.secret_cipher,
   );
-  disconnectRailway(c.id);
+  (await disconnectRailway(c.id));
   assert.equal(
-    railwayState().connections.find((v) => v.id === c.id)?.configured,
+    (await railwayState()).connections.find((v) => v.id === c.id)?.configured,
     false,
   );
 });
-test("Railway : rattachement exact, sans noms approximatifs, ambiguïtés ni clients écrasés", () => {
-  const c = connection(),
+test("Railway : rattachement exact, sans noms approximatifs, ambiguïtés ni clients écrasés", async () => {
+  const c = (await connection()),
     r = remote(c.workspaceId),
-    p = project("Même nom", "https://unique-railway.test");
+    p = (await project("Même nom", "https://unique-railway.test"));
   r.services[0].domains = ["unique-railway.test"];
-  const service = list<Service>("services", "live", p.id)[0];
-  save(
+  const service = (await list<Service>("services", "live", p.id))[0];
+  (await save(
     "services",
     "live",
     { ...service, runtime: "Node manuel", version: "22" },
     p.id,
-  );
-  const other = project("Autre", "https://unique-railway.test");
-  assert.equal(railwayMatches(r).length, 2);
-  save<Access>(
+  ));
+  const other = (await project("Autre", "https://unique-railway.test"));
+  assert.equal((await railwayMatches(r)).length, 2);
+  (await save<Access>(
     "accesses",
     "live",
     {
@@ -337,87 +337,87 @@ test("Railway : rattachement exact, sans noms approximatifs, ambiguïtés ni cli
       projectId: p.id,
     },
     p.id,
-  );
+  ));
   assert.deepEqual(
-    railwayMatches(r).map((p) => p.id),
+    (await railwayMatches(r)).map((p) => p.id),
     [p.id],
   );
-  applyRailwaySnapshot(c.id, [r]);
-  applyRailwaySnapshot(c.id, [r]);
+  (await applyRailwaySnapshot(c.id, [r]));
+  (await applyRailwaySnapshot(c.id, [r]));
   assert.equal(
-    railwayState().projects.filter((v) => v.connectionId === c.id).length,
+    (await railwayState()).projects.filter((v) => v.connectionId === c.id).length,
     1,
   );
   assert.equal(
-    railwayState().projects.find((v) => v.id === r.id)?.projectId,
+    (await railwayState()).projects.find((v) => v.id === r.id)?.projectId,
     p.id,
   );
   assert.equal(
-    list<Service>("services", "live", p.id)[0].runtime,
+    (await list<Service>("services", "live", p.id))[0].runtime,
     "Node manuel",
   );
-  const archived = project("Archivé");
-  save("projects", "live", { ...archived, lifecycle: "archived" });
-  assert.throws(
-    () => linkRailwayProject(c.id, r.id, archived.id),
+  const archived = (await project("Archivé"));
+  (await save("projects", "live", { ...archived, lifecycle: "archived" }));
+  await assert.rejects(
+    async () => (await linkRailwayProject(c.id, r.id, archived.id)),
     /actif introuvable/,
   );
-  linkRailwayProject(c.id, r.id, other.id);
-  applyRailwaySnapshot(c.id, [r]);
+  (await linkRailwayProject(c.id, r.id, other.id));
+  (await applyRailwaySnapshot(c.id, [r]));
   assert.equal(
-    railwayState().projects.find((v) => v.id === r.id)?.projectId,
+    (await railwayState()).projects.find((v) => v.id === r.id)?.projectId,
     other.id,
   );
   const unknown = remote(c.workspaceId, p.name);
   unknown.services[0].domains = [];
-  assert.equal(railwayMatches(unknown).length, 0);
+  assert.equal((await railwayMatches(unknown)).length, 0);
 });
 test("Railway : dernière observation préservée après panne, absence et déconnexion", async () => {
-  const c = connection(),
+  const c = (await connection()),
     r = remote(c.workspaceId);
   r.services[0].domains = ["retained-railway.test"];
   await synchronizeRailway(c.id, transport(apiData(r)));
-  const before = railwayState().projects.find((v) => v.id === r.id)!;
-  const success = railwayState().connections.find(
+  const before = (await railwayState()).projects.find((v) => v.id === r.id)!;
+  const success = (await railwayState()).connections.find(
     (v) => v.id === c.id,
   )!.lastSuccessAt;
   await assert.rejects(
-    () => synchronizeRailway(c.id, transport(apiData(r))),
+    async () => (await synchronizeRailway(c.id, transport(apiData(r)))),
     /30 secondes/,
   );
-  expireAttempt(c.id);
+  (await expireAttempt(c.id));
   await assert.rejects(
-    () => synchronizeRailway(c.id, transport({}, 503)),
+    async () => (await synchronizeRailway(c.id, transport({}, 503))),
     /indisponible/,
   );
   assert.equal(
-    railwayState().connections.find((v) => v.id === c.id)!.lastSuccessAt,
+    (await railwayState()).connections.find((v) => v.id === c.id)!.lastSuccessAt,
     success,
   );
   assert.deepEqual(
-    railwayState().projects.find((v) => v.id === r.id)!.services,
+    (await railwayState()).projects.find((v) => v.id === r.id)!.services,
     before.services,
   );
-  applyRailwaySnapshot(c.id, []);
-  assert.ok(railwayState().projects.find((v) => v.id === r.id)?.missingSince);
-  assert.throws(() => createRailwayProject(c.id, r.id), /plus présent/);
-  applyRailwaySnapshot(c.id, [r]);
+  (await applyRailwaySnapshot(c.id, []));
+  assert.ok((await railwayState()).projects.find((v) => v.id === r.id)?.missingSince);
+  await assert.rejects(async () => (await createRailwayProject(c.id, r.id)), /plus présent/);
+  (await applyRailwaySnapshot(c.id, [r]));
   assert.equal(
-    railwayState().projects.find((v) => v.id === r.id)?.missingSince,
+    (await railwayState()).projects.find((v) => v.id === r.id)?.missingSince,
     null,
   );
-  const first = createRailwayProject(c.id, r.id),
-    second = createRailwayProject(c.id, r.id);
+  const first = (await createRailwayProject(c.id, r.id)),
+    second = (await createRailwayProject(c.id, r.id));
   assert.equal(first.projectId, second.projectId);
-  disconnectRailway(c.id);
-  await assert.rejects(() => synchronizeRailway(c.id), /manquant/);
+  (await disconnectRailway(c.id));
+  await assert.rejects(async () => (await synchronizeRailway(c.id)), /manquant/);
   assert.equal(
-    railwayState().projects.find((v) => v.id === r.id)?.projectId,
+    (await railwayState()).projects.find((v) => v.id === r.id)?.projectId,
     first.projectId,
   );
-  remove("projects", first.projectId, "live");
+  (await remove("projects", first.projectId, "live"));
   assert.equal(
-    railwayState().projects.find((v) => v.id === r.id)?.projectId,
+    (await railwayState()).projects.find((v) => v.id === r.id)?.projectId,
     null,
   );
 });
@@ -441,10 +441,10 @@ test("Railway : une dernière tentative échouée ne masque pas le déploiement 
   assert.equal(railwayServiceState(s).tone, "neutral");
 });
 test("Railway : toutes les routes exigent une session et bloquent les origines externes", async () => {
-  const c = connection(),
+  const c = (await connection()),
     r = remote(c.workspaceId),
-    p = project("Route");
-  applyRailwaySnapshot(c.id, [r]);
+    p = (await project("Route"));
+  (await applyRailwaySnapshot(c.id, [r]));
   const call = async (
     method: string,
     path: string,

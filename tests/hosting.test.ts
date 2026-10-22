@@ -57,11 +57,11 @@ async function call(
     { params: Promise.resolve({ path: path.split("/") }) },
   );
 }
-function expireCooldown(id: string) {
-  const row = database()
+async function expireCooldown(id: string) {
+  const row = (await database()
     .prepare("SELECT data FROM hosting_connections WHERE id=?")
-    .get(id) as { data: string };
-  database()
+    .get(id)) as { data: string };
+  (await database()
     .prepare("UPDATE hosting_connections SET data=? WHERE id=?")
     .run(
       JSON.stringify({
@@ -69,7 +69,7 @@ function expireCooldown(id: string) {
         lastCheckedAt: "2020-01-01T00:00:00.000Z",
       }),
       id,
-    );
+    ));
 }
 test("o2switch : adresses autorisées, fonction fixe, jeton et Basic sans redirection", async () => {
   for (const endpoint of [
@@ -172,9 +172,9 @@ test("connexions : secrets chiffrés, API Google obligatoire, statuts réels et 
   assert.equal(connection.status, "untested");
   assert.equal(connection.configured, true);
   assert.ok(!JSON.stringify(connection).includes(input.secret));
-  let stored = database()
+  let stored = (await database()
     .prepare("SELECT * FROM hosting_connections WHERE id=?")
-    .get(connection.id) as Record<string, string>;
+    .get(connection.id)) as Record<string, string>;
   assert.ok(!JSON.stringify(stored).includes(input.secret));
   assert.ok(stored.secret_cipher.includes('"tag"'));
   assert.equal((await call("POST", "connections", input)).status, 409);
@@ -187,12 +187,12 @@ test("connexions : secrets chiffrés, API Google obligatoire, statuts réels et 
     (await call("POST", `connections/${connection.id}/test`, {}, false)).status,
     401,
   );
-  assert.throws(
-    () =>
-      saveHostingConnection(
+  await assert.rejects(
+    async () =>
+      (await saveHostingConnection(
         { ...input, secret: "", username: "different" },
         connection.id,
-      ),
+      )),
     /Renseignez le secret/,
   );
   connection = await testHostingConnection(
@@ -206,7 +206,7 @@ test("connexions : secrets chiffrés, API Google obligatoire, statuts réels et 
     testHostingConnection(connection.id, fake(Response.json(success))),
     /Attendez/,
   );
-  expireCooldown(connection.id);
+  (await expireCooldown(connection.id));
   connection = await testHostingConnection(
     connection.id,
     fake(new Response("secret-debug", { status: 401 })),
@@ -220,7 +220,7 @@ test("connexions : secrets chiffrés, API Google obligatoire, statuts réels et 
     "dernier relevé réussi conservé avec sa date",
   );
   let release!: (response: Response) => void;
-  expireCooldown(connection.id);
+  (await expireCooldown(connection.id));
   const pending = testHostingConnection(
     connection.id,
     (() =>
@@ -232,35 +232,35 @@ test("connexions : secrets chiffrés, API Google obligatoire, statuts réels et 
     testHostingConnection(connection.id, fake(Response.json(success))),
     /déjà en cours/,
   );
-  saveHostingConnection(
+  (await saveHostingConnection(
     { ...input, name: "Renommé", secret: "" },
     connection.id,
-  );
+  ));
   release(Response.json(success));
   await assert.rejects(pending, /configuration a changé/);
-  const rotated = saveHostingConnection(
+  const rotated = (await saveHostingConnection(
     { ...input, secret: "replacement-token" },
     connection.id,
-  );
+  ));
   assert.equal(rotated.status, "untested");
-  stored = database()
+  stored = (await database()
     .prepare("SELECT * FROM hosting_connections WHERE id=?")
-    .get(connection.id) as Record<string, string>;
+    .get(connection.id)) as Record<string, string>;
   const encrypted = JSON.parse(stored.secret_cipher);
   encrypted.tag = Buffer.alloc(16).toString("base64");
-  database()
+  (await database()
     .prepare("UPDATE hosting_connections SET secret_cipher=? WHERE id=?")
-    .run(JSON.stringify(encrypted), connection.id);
+    .run(JSON.stringify(encrypted), connection.id));
   await assert.rejects(
     testHostingConnection(connection.id, fake(Response.json(success))),
     /déchiffré/,
   );
-  connection = disconnectHostingConnection(connection.id);
+  connection = (await disconnectHostingConnection(connection.id));
   assert.equal(connection.configured, false);
   assert.equal(connection.status, "unconfigured");
   assert.equal(connection.domains.length, 0);
-  assert.equal(hostingConnections().length, 1);
-  const events = database().prepare("SELECT data FROM activity").all();
+  assert.equal((await hostingConnections()).length, 1);
+  const events = (await database().prepare("SELECT data FROM activity").all());
   assert.ok(!JSON.stringify(events).includes(input.secret));
   assert.ok(!JSON.stringify(events).includes("replacement-token"));
 });

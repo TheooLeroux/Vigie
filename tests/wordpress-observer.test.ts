@@ -343,22 +343,22 @@ test("connecteur PHP réel : requêtes ordinaires intactes ; signature, corps et
   }
 });
 test("installation : confirmation explicite, aucune écriture avant accord, accès Google obligatoire", async () => {
-  const host = saveHostingConnection({
+  const host = (await saveHostingConnection({
     name: "Observer",
     endpoint: "https://gaz.o2switch.net:2083",
     username: "testuser",
     authMode: "token",
     secret: "test-private-only",
-  });
-  transaction(() => {
-    createProject(
+  }));
+  (await transaction(async () => {
+    (await createProject(
       "live",
       createProjectSchema.parse({
         name: "Observer site",
         url: "https://site.example.org/",
       }),
-    );
-    applyDiscoverySnapshot(host, {
+    ));
+    (await applyDiscoverySnapshot(host, {
       observedAt: new Date().toISOString(),
       installations: [
         {
@@ -371,10 +371,10 @@ test("installation : confirmation explicite, aucune écriture avant accord, acc�
           suggestedEnvironment: "production",
         },
       ],
-    });
-  });
-  const item = hostingDiscovery(host.id).installations[0],
-    plan = observerPlan(item.id);
+    }));
+  }));
+  const item = (await hostingDiscovery(host.id)).installations[0],
+    plan = (await observerPlan(item.id));
   assert.ok(plan.source.includes("__VIGIE_SECRET_HEX__"));
   assert.ok(plan.path.endsWith("wp-content/mu-plugins/vigie-observer.php"));
   let calls = 0;
@@ -421,23 +421,23 @@ test("installation : confirmation explicite, aucune écriture avant accord, acc�
   assert.equal(response.status, 400);
 });
 test("installation : dépôt unique vérifié, secret propre au site chiffré, pas d’écrasement d’un fichier inconnu", async () => {
-  const host = saveHostingConnection({
+  const host = (await saveHostingConnection({
     name: "Install",
     endpoint: "https://gaz.o2switch.net:2083",
     username: "installuser",
     authMode: "token",
     secret: "test-private-install",
-  });
+  }));
   const installRoot = "/home/installuser/site";
-  transaction(() => {
-    createProject(
+  (await transaction(async () => {
+    (await createProject(
       "live",
       createProjectSchema.parse({
         name: "Install site",
         url: "https://install.example.org/",
       }),
-    );
-    applyDiscoverySnapshot(host, {
+    ));
+    (await applyDiscoverySnapshot(host, {
       observedAt: new Date().toISOString(),
       installations: [
         {
@@ -450,9 +450,9 @@ test("installation : dépôt unique vérifié, secret propre au site chiffré, p
           suggestedEnvironment: "production",
         },
       ],
-    });
-  });
-  const item = hostingDiscovery(host.id).installations[0];
+    }));
+  }));
+  const item = (await hostingDiscovery(host.id)).installations[0];
   let directory = false,
     uploaded = "",
     uploads = 0,
@@ -543,16 +543,16 @@ test("installation : dépôt unique vérifié, secret propre au site chiffré, p
   assert.ok(!JSON.stringify(first).includes(key));
   assert.ok(
     !JSON.stringify(
-      hostingStorage()
+      (await (await hostingStorage())
         .prepare("SELECT * FROM hosting_observers WHERE installation_id=?")
-        .get(item.id),
+        .get(item.id)),
     ).includes(key),
   );
   await installObserver(item.id, true, transport, dns);
   assert.equal(uploads, 1, "Une seconde liaison ne redépose pas le fichier");
-  hostingStorage()
+  (await (await hostingStorage())
     .prepare("DELETE FROM hosting_observers WHERE installation_id=?")
-    .run(item.id);
+    .run(item.id));
   await assert.rejects(
     installObserver(item.id, true, transport, dns),
     /ne sera pas écrasé/,

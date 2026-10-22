@@ -9,7 +9,7 @@ import {withAuditActor} from "../src/lib/audit-context";
 async function main() {
   const path=resolve(".data","hosting-token-transfer.json");
   const transfer=JSON.parse(readFileSync(path,"utf8"));
-  const connection=hostingConnections().find(c => c.id === transfer.connectionId);
+  const connection=(await hostingConnections()).find(c => c.id === transfer.connectionId);
   if (!connection || transfer.v !== 1) throw new Error("Transfert non reconnu.");
   const encodedKey=process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY || "";
   if (!/^[a-f0-9]{64}$/i.test(encodedKey)) throw new Error("Clé privée absente.");
@@ -17,7 +17,7 @@ async function main() {
   decipher.setAAD(Buffer.from(`vigie:hosting-transfer:v1:${connection.id}`));
   decipher.setAuthTag(Buffer.from(transfer.tag,"base64"));
   const secret=Buffer.concat([decipher.update(Buffer.from(transfer.value,"base64")),decipher.final()]).toString("utf8");
-  saveHostingConnection({...connection,authMode:"token",secret},connection.id);
+  (await saveHostingConnection({...connection,authMode:"token",secret},connection.id));
   unlinkSync(path);
   const tested=await testHostingConnection(connection.id);
   console.log(JSON.stringify({name:tested.name,status:tested.status,domains:tested.domains.length,lastCheckedAt:tested.lastCheckedAt,error:tested.error}));

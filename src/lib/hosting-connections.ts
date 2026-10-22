@@ -27,7 +27,7 @@ export async function withHostingCredentials<T>(
   id: string,
   read: (input: HostingConnection & { secret: string }) => Promise<T>,
 ) {
-  const stored = row(id),
+  const stored = (await row(id)),
     metadata: Metadata = JSON.parse(stored.data);
   if (!stored.secret_cipher)
     throw new ApiError("Le compte o2switch n’est pas configuré.");
@@ -36,8 +36,8 @@ export async function withHostingCredentials<T>(
     secret: decrypt(stored.secret_cipher, metadata),
   });
 }
-function store() {
-  return hostingStorage();
+async function store() {
+  return (await hostingStorage());
 }
 function key() {
   const value = process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY || "";
@@ -91,12 +91,12 @@ function decrypt(encrypted: string, connection: Metadata) {
     );
   }
 }
-function row(id: string): Stored {
-  const result = store()
+async function row(id: string): Promise<Stored> {
+  const result = (await (await store())
     .prepare(
       "SELECT id,data,secret_cipher FROM hosting_connections WHERE workspace='live' AND id=?",
     )
-    .get(id) as Stored | undefined;
+    .get(id)) as Stored | undefined;
   if (!result) throw new ApiError("Connexion introuvable.", 404);
   return result;
 }
@@ -106,30 +106,30 @@ function publicConnection(
 ): HostingConnection {
   return { ...data, configured };
 }
-export function hostingConnections(): HostingConnection[] {
+export async function hostingConnections(): Promise<HostingConnection[]> {
   return (
-    store()
+    (await (await store())
       .prepare(
         "SELECT data,secret_cipher IS NOT NULL AS configured FROM hosting_connections WHERE workspace='live' ORDER BY json_extract(data,'$.name')",
       )
-      .all() as { data: string; configured: number }[]
+      .all()) as { data: string; configured: number }[]
   ).map((r) => publicConnection(JSON.parse(r.data), Boolean(r.configured)));
 }
-export function saveHostingConnection(
+export async function saveHostingConnection(
   raw: unknown,
   id?: string,
-): HostingConnection {
+): Promise<HostingConnection> {
   const input = hostingConnectionSchema.parse(raw);
-  return transaction(() => {
-    const previous = id ? row(id) : null;
+  return (await transaction(async () => {
+    const previous = id ? (await row(id)) : null;
     const current: Metadata | null = previous
       ? JSON.parse(previous.data)
       : null;
-    const duplicate = store()
+    const duplicate = (await (await store())
       .prepare(
         "SELECT id FROM hosting_connections WHERE workspace='live' AND endpoint=? AND username=? AND id<>?",
       )
-      .get(input.endpoint, input.username, id || "");
+      .get(input.endpoint, input.username, id || ""));
     if (duplicate)
       throw new ApiError("Ce compte o2switch est déjà enregistré.", 409);
     const changed =
@@ -165,7 +165,7 @@ export function saveHostingConnection(
     const cipher = input.secret
       ? encrypt(input.secret, connection)
       : previous?.secret_cipher || null;
-    store()
+    (await (await store())
       .prepare(
         "INSERT INTO hosting_connections(id,workspace,endpoint,username,data,secret_cipher) VALUES (?,'live',?,?,?,?) ON CONFLICT(id) DO UPDATE SET endpoint=excluded.endpoint,username=excluded.username,data=excluded.data,secret_cipher=excluded.secret_cipher",
       )
@@ -175,21 +175,21 @@ export function saveHostingConnection(
         connection.username,
         JSON.stringify(connection),
         cipher,
-      );
-    log(
+      ));
+    (await log(
       "live",
       current ? "hosting.updated" : "hosting.created",
       `Connexion « ${connection.name} » ${current ? "modifiée" : "ajoutée"}.`,
-    );
+    ));
     return publicConnection(connection, Boolean(cipher));
-  });
+  }));
 }
 const running = new Set<string>();
 export async function testHostingConnection(
   id: string,
   transport: typeof fetch = fetch,
 ): Promise<HostingConnection> {
-  const stored = row(id),
+  const stored = (await row(id)),
     connection: Metadata = JSON.parse(stored.data);
   if (!stored.secret_cipher)
     throw new ApiError(
@@ -217,14 +217,14 @@ export async function testHostingConnection(
     running.delete(id);
   }
 }
-function recordHostingProbe(
+async function recordHostingProbe(
   id: string,
   result: ProbeResult,
   expected: Stored,
   withinTransaction = false,
-): HostingConnection {
-  const commit = () => {
-    const current = row(id);
+): Promise<HostingConnection> {
+  const commit = async () => {
+    const current = (await row(id));
     if (
       current.data !== expected.data ||
       current.secret_cipher !== expected.secret_cipher
@@ -250,25 +250,25 @@ function recordHostingProbe(
       domains: result.ok ? result.domains : connection.domains,
       updatedAt: now,
     };
-    store()
+    (await (await store())
       .prepare("UPDATE hosting_connections SET data=? WHERE id=?")
-      .run(JSON.stringify(updated), id);
-    log(
+      .run(JSON.stringify(updated), id));
+    (await log(
       "live",
       result.ok ? "hosting.connected" : "hosting.failed",
       result.ok
         ? `Connexion « ${connection.name} » validée : ${result.domains.length} domaines lus.`
         : `Connexion « ${connection.name} » refusée ou indisponible (${result.code}).`,
-    );
+    ));
     return publicConnection(updated, Boolean(current.secret_cipher));
   };
-  return withinTransaction ? commit() : transaction(commit);
+  return withinTransaction ? (await commit()) : (await transaction(commit));
 }
 export async function discoverHostingConnection(
   id: string,
   transport: typeof fetch = fetch,
 ) {
-  const stored = row(id),
+  const stored = (await row(id)),
     connection: Metadata = JSON.parse(stored.data);
   if (!stored.secret_cipher)
     throw new ApiError(
@@ -279,7 +279,7 @@ export async function discoverHostingConnection(
       "Une vérification est déjà en cours pour ce compte.",
       409,
     );
-  const previous = hostingDiscovery(id);
+  const previous = (await hostingDiscovery(id));
   if (
     previous.lastAttemptAt &&
     Date.now() - Date.parse(previous.lastAttemptAt) < 10_000
@@ -294,7 +294,7 @@ export async function discoverHostingConnection(
       { ...connection, secret: decrypt(stored.secret_cipher, connection) },
       transport,
     );
-    transaction(() => {
+    (await transaction(async () => {
       const domains = result.installations
         .flatMap((item) => item.domains)
         .map((name) => ({
@@ -303,40 +303,40 @@ export async function discoverHostingConnection(
             connection.domains.find((d) => d.name === name)?.kind ||
             ("addon" as const),
         }));
-      recordHostingProbe(id, { ok: true, domains }, stored, true);
-      applyDiscoverySnapshot(connection, result);
-    });
+      (await recordHostingProbe(id, { ok: true, domains }, stored, true));
+      (await applyDiscoverySnapshot(connection, result));
+    }));
     return {
-      connection: hostingConnections().find((c) => c.id === id)!,
-      discovery: hostingDiscovery(id),
+      connection: (await hostingConnections()).find((c) => c.id === id)!,
+      discovery: (await hostingDiscovery(id)),
     };
   } catch (error) {
     const message =
       error instanceof ApiError
         ? error.message
         : "La recherche a échoué. Le dernier relevé a été conservé.";
-    transaction(() => {
-      const current = row(id);
+    (await transaction(async () => {
+      const current = (await row(id));
       if (
         current.data === stored.data &&
         current.secret_cipher === stored.secret_cipher
       )
-        recordHostingProbe(
+        (await recordHostingProbe(
           id,
           { ok: false, code: "api", message },
           stored,
           true,
-        );
-      recordDiscoveryFailure(connection, message);
-    });
+        ));
+      (await recordDiscoveryFailure(connection, message));
+    }));
     throw error instanceof ApiError ? error : new ApiError(message, 502);
   } finally {
     running.delete(id);
   }
 }
-export function disconnectHostingConnection(id: string) {
-  return transaction(() => {
-    const stored = row(id),
+export async function disconnectHostingConnection(id: string) {
+  return (await transaction(async () => {
+    const stored = (await row(id)),
       connection: Metadata = JSON.parse(stored.data);
     const updated: Metadata = {
       ...connection,
@@ -347,16 +347,16 @@ export function disconnectHostingConnection(id: string) {
       domains: [],
       updatedAt: new Date().toISOString(),
     };
-    store()
+    (await (await store())
       .prepare(
         "UPDATE hosting_connections SET data=?,secret_cipher=NULL WHERE id=?",
       )
-      .run(JSON.stringify(updated), id);
-    log(
+      .run(JSON.stringify(updated), id));
+    (await log(
       "live",
       "hosting.disconnected",
       `Secret de la connexion « ${connection.name} » retiré de Vigie.`,
-    );
+    ));
     return publicConnection(updated, false);
-  });
+  }));
 }

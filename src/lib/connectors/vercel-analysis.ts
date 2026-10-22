@@ -138,20 +138,20 @@ export async function enrichVercelTechnologies(
   transport: typeof fetch,
 ) {
   const db = database();
-  db.exec(
+  (await db.initialize(
     "CREATE TABLE IF NOT EXISTS software_release_catalog(cache_key TEXT PRIMARY KEY,data TEXT NOT NULL,expires_at TEXT NOT NULL)",
-  );
+  ));
   for (const name of new Set(
     analyses.flatMap((a) => a.technologies.map((t) => t.name)),
   )) {
     if (!packages.has(name)) continue;
     const key = `npm:public:${name}`;
     let catalog: { version: string; checkedAt: string } | null = null;
-    const row = db
+    const row = (await db
       .prepare(
         "SELECT data FROM software_release_catalog WHERE cache_key=? AND expires_at>?",
       )
-      .get(key, new Date().toISOString()) as { data: string } | undefined;
+      .get(key, new Date().toISOString())) as { data: string } | undefined;
     if (row) catalog = JSON.parse(row.data);
     else
       try {
@@ -182,13 +182,13 @@ export async function enrichVercelTechnologies(
         if (raw.name !== name || !/^\d+\.\d+\.\d+$/.test(raw.version))
           throw new Error();
         catalog = { version: raw.version, checkedAt: new Date().toISOString() };
-        db.prepare(
+        (await db.prepare(
           "INSERT INTO software_release_catalog VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at",
         ).run(
           key,
           JSON.stringify(catalog),
           new Date(Date.now() + 6 * 3600_000).toISOString(),
-        );
+        ));
       } catch {
         /* A registry outage must not erase observed versions. */
       }

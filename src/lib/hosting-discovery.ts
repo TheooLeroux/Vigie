@@ -42,37 +42,37 @@ type Run = {
 function scope(connection: ConnectionIdentity) {
   return `${connection.endpoint}|${connection.username}`;
 }
-function connection(id: string): ConnectionIdentity {
-  const row = hostingStorage()
+async function connection(id: string): Promise<ConnectionIdentity> {
+  const row = (await (await hostingStorage())
     .prepare(
       "SELECT data FROM hosting_connections WHERE workspace='live' AND id=?",
     )
-    .get(id) as { data: string } | undefined;
+    .get(id)) as { data: string } | undefined;
   if (!row) throw new ApiError("Connexion introuvable.", 404);
   return JSON.parse(row.data);
 }
-function rows(connectionId?: string): Row[] {
-  return hostingStorage()
+async function rows(connectionId?: string): Promise<Row[]> {
+  return (await (await hostingStorage())
     .prepare(
       `SELECT i.* FROM hosting_installations i JOIN hosting_connections c ON c.id=i.connection_id WHERE i.workspace='live' AND i.scope=json_extract(c.data,'$.endpoint')||'|'||json_extract(c.data,'$.username') ${connectionId ? "AND i.connection_id=?" : ""}`,
     )
-    .all(...(connectionId ? [connectionId] : [])) as Row[];
+    .all(...(connectionId ? [connectionId] : []))) as Row[];
 }
-function requireInstallation(id: string): Row {
-  const row = rows().find((r) => r.id === id);
+async function requireInstallation(id: string): Promise<Row> {
+  const row = (await rows()).find((r) => r.id === id);
   if (!row) throw new ApiError("Installation introuvable.", 404);
   return row;
 }
-export function hostingInstallation(id: string): HostingInstallationView {
-  const row = requireInstallation(id);
-  return view(row, connection(row.connection_id), projectData());
+export async function hostingInstallation(id: string): Promise<HostingInstallationView> {
+  const row = (await requireInstallation(id));
+  return (await view(row, (await connection(row.connection_id)), (await projectData())));
 }
-function projectData() {
+async function projectData() {
   return {
-    projects: list<Project>("projects", "live"),
-    services: list<Service>("services", "live"),
-    environments: list<Environment>("environments", "live"),
-    accesses: list<Access>("accesses", "live"),
+    projects: (await list<Project>("projects", "live")),
+    services: (await list<Service>("services", "live")),
+    environments: (await list<Environment>("environments", "live")),
+    accesses: (await list<Access>("accesses", "live")),
   };
 }
 export function findInstallationMatches(
@@ -81,7 +81,7 @@ export function findInstallationMatches(
     "documentRoot" | "domains" | "aliases"
   >,
   host: ConnectionIdentity,
-  data: ReturnType<typeof projectData>,
+  data: Awaited<ReturnType<typeof projectData>>,
 ) {
   const names = new Set(
     [...installation.domains, ...installation.aliases].map((name) =>
@@ -143,21 +143,21 @@ export function findInstallationMatches(
       : [];
   });
 }
-function view(
+async function view(
   row: Row,
   host: ConnectionIdentity,
-  data: ReturnType<typeof projectData>,
-): HostingInstallationView {
+  data: Awaited<ReturnType<typeof projectData>>,
+): Promise<HostingInstallationView> {
   const item = JSON.parse(row.data) as HostingInstallation;
   const project = data.projects.find((p) => p.id === row.project_id);
-  const inventory = hostingStorage()
+  const inventory = (await (await hostingStorage())
     .prepare(
       "SELECT data FROM hosting_site_inventories WHERE installation_id=?",
     )
-    .get(row.id) as { data: string } | undefined;
-  const observer = hostingStorage()
+    .get(row.id)) as { data: string } | undefined;
+  const observer = (await (await hostingStorage())
     .prepare("SELECT data FROM hosting_observers WHERE installation_id=?")
-    .get(row.id) as { data: string } | undefined;
+    .get(row.id)) as { data: string } | undefined;
   return {
     ...item,
     inventory: inventory ? JSON.parse(inventory.data) : null,
@@ -171,19 +171,19 @@ function view(
     candidates: findInstallationMatches(item, host, data),
   };
 }
-export function hostingDiscovery(connectionId: string): HostingDiscovery {
-  const host = connection(connectionId),
-    data = projectData();
-  const record = hostingStorage()
+export async function hostingDiscovery(connectionId: string): Promise<HostingDiscovery> {
+  const host = (await connection(connectionId)),
+    data = (await projectData());
+  const record = (await (await hostingStorage())
     .prepare(
       "SELECT data FROM hosting_discovery_runs WHERE connection_id=? AND scope=?",
     )
-    .get(host.id, scope(host)) as { data: string } | undefined;
+    .get(host.id, scope(host))) as { data: string } | undefined;
   const run: Run = record
     ? JSON.parse(record.data)
     : { lastAttemptAt: null, lastSuccessAt: null, error: null };
-  const installations = rows(connectionId)
-    .map((row) => view(row, host, data))
+  const installations = (await Promise.all((await rows(connectionId))
+    .map(async (row) => (await view(row, host, data)))))
     .sort((a, b) =>
       (a.domains[0] || a.documentRoot).localeCompare(
         b.domains[0] || b.documentRoot,
@@ -213,23 +213,23 @@ export function hostingDiscovery(connectionId: string): HostingDiscovery {
   }
   return { connectionId, ...run, installations, summary };
 }
-export function projectHostingInstallations(projectId: string) {
-  const data = projectData();
-  return rows()
+export async function projectHostingInstallations(projectId: string) {
+  const data = (await projectData());
+  return (await Promise.all((await rows())
     .filter((row) => row.project_id === projectId)
-    .map((row) => ({
-      ...view(row, connection(row.connection_id), data),
-      connectionName: connection(row.connection_id).name,
-    }));
+    .map(async (row) => ({
+      ...(await view(row, (await connection(row.connection_id)), data)),
+      connectionName: (await connection(row.connection_id)).name,
+    }))));
 }
-function saveRow(row: Row, item: HostingInstallation) {
-  hostingStorage()
+async function saveRow(row: Row, item: HostingInstallation) {
+  (await (await hostingStorage())
     .prepare("UPDATE hosting_installations SET data=? WHERE id=?")
-    .run(JSON.stringify(item), row.id);
+    .run(JSON.stringify(item), row.id));
 }
-function addHostingAccess(projectId: string, host: ConnectionIdentity) {
+async function addHostingAccess(projectId: string, host: ConnectionIdentity) {
   if (
-    list<Access>("accesses", "live", projectId).some(
+    (await list<Access>("accesses", "live", projectId)).some(
       (a) => a.kind === "hosting" && a.url.replace(/\/$/, "") === host.endpoint,
     )
   )
@@ -242,43 +242,43 @@ function addHostingAccess(projectId: string, host: ConnectionIdentity) {
     notes:
       "Compte associé par la découverte o2switch. Le secret est conservé dans la connexion, côté serveur.",
   });
-  save<Access>(
+  (await save<Access>(
     "accesses",
     "live",
     { ...input, id: randomUUID(), projectId },
     projectId,
-  );
+  ));
 }
-function link(
+async function link(
   row: Row,
   projectId: string,
   method: NonNullable<Row["link_method"]>,
   reason: string,
 ) {
-  const project = get<Project>("projects", projectId, "live");
+  const project = (await get<Project>("projects", projectId, "live"));
   if (!project) throw new ApiError("Projet introuvable.", 404);
   if (row.project_id === projectId && row.link_method === method) return;
-  hostingStorage()
+  (await (await hostingStorage())
     .prepare(
       "UPDATE hosting_installations SET project_id=?,link_method=?,match_reason=? WHERE id=?",
     )
-    .run(projectId, method, reason, row.id);
+    .run(projectId, method, reason, row.id));
   const item = JSON.parse(row.data) as HostingInstallation;
-  addHostingAccess(projectId, connection(row.connection_id));
-  log(
+  (await addHostingAccess(projectId, (await connection(row.connection_id))));
+  (await log(
     "live",
     "hosting.linked",
     `Installation ${item.domains[0] || item.documentRoot} rattachée ${method === "automatic" ? "automatiquement " : ""}à la fiche (${reason.toLowerCase()}).`,
     projectId,
-  );
+  ));
 }
 // Caller commits the connection verification and this snapshot in the same transaction.
-export function applyDiscoverySnapshot(
+export async function applyDiscoverySnapshot(
   host: ConnectionIdentity,
   result: DiscoveryResult,
 ) {
-  const db = hostingStorage(),
-    before = rows(host.id),
+  const db = (await hostingStorage()),
+    before = (await rows(host.id)),
     seen = new Set<string>();
   for (const incoming of result.installations) {
     const previous = before.find(
@@ -305,7 +305,7 @@ export function applyDiscoverySnapshot(
       item.kind = old.kind;
       item.version = old.version;
     }
-    db.prepare(
+    (await db.prepare(
       "INSERT INTO hosting_installations(id,workspace,connection_id,scope,document_root,data) VALUES (?,'live',?,?,?,?) ON CONFLICT(connection_id,scope,document_root) DO UPDATE SET data=excluded.data",
     ).run(
       item.id,
@@ -313,19 +313,19 @@ export function applyDiscoverySnapshot(
       scope(host),
       item.documentRoot,
       JSON.stringify(item),
-    );
+    ));
     seen.add(item.id);
   }
   for (const row of before)
     if (!seen.has(row.id)) {
       const item = JSON.parse(row.data) as HostingInstallation;
-      saveRow(row, {
+      (await saveRow(row, {
         ...item,
         missingSince: item.missingSince || result.observedAt,
-      });
+      }));
     }
-  const data = projectData();
-  for (const row of rows(host.id)) {
+  const data = (await projectData());
+  for (const row of (await rows(host.id))) {
     const item = JSON.parse(row.data) as HostingInstallation;
     if (
       row.project_id ||
@@ -337,33 +337,33 @@ export function applyDiscoverySnapshot(
       continue;
     const candidates = findInstallationMatches(item, host, data);
     if (candidates.length === 1 && candidates[0].lifecycle === "active")
-      link(row, candidates[0].id, "automatic", candidates[0].reason);
+      (await link(row, candidates[0].id, "automatic", candidates[0].reason));
   }
   const run: Run = {
     lastAttemptAt: result.observedAt,
     lastSuccessAt: result.observedAt,
     error: null,
   };
-  db.prepare(
+  (await db.prepare(
     "INSERT INTO hosting_discovery_runs VALUES (?,?,?) ON CONFLICT(connection_id,scope) DO UPDATE SET data=excluded.data",
-  ).run(host.id, scope(host), JSON.stringify(run));
-  log(
+  ).run(host.id, scope(host), JSON.stringify(run)));
+  (await log(
     "live",
     "hosting.discovered",
     `${result.installations.length} racines inspectées sur « ${host.name} » ; rapprochement des fiches terminé.`,
-  );
+  ));
 }
-export function recordDiscoveryFailure(
+export async function recordDiscoveryFailure(
   host: ConnectionIdentity,
   message: string,
 ) {
-  const record = hostingStorage()
+  const record = (await (await hostingStorage())
     .prepare(
       "SELECT data FROM hosting_discovery_runs WHERE connection_id=? AND scope=?",
     )
-    .get(host.id, scope(host)) as { data: string } | undefined;
+    .get(host.id, scope(host))) as { data: string } | undefined;
   const previous = record ? (JSON.parse(record.data) as Run) : null;
-  hostingStorage()
+  (await (await hostingStorage())
     .prepare(
       "INSERT INTO hosting_discovery_runs VALUES (?,?,?) ON CONFLICT(connection_id,scope) DO UPDATE SET data=excluded.data",
     )
@@ -375,53 +375,53 @@ export function recordDiscoveryFailure(
         lastSuccessAt: previous?.lastSuccessAt || null,
         error: message,
       }),
-    );
+    ));
 }
 export const installationLinkSchema = z.object({
   projectId: z.string().min(1),
 });
-export function linkHostingInstallation(id: string, raw: unknown) {
+export async function linkHostingInstallation(id: string, raw: unknown) {
   const input = installationLinkSchema.parse(raw);
-  return transaction(() => {
-    const row = requireInstallation(id);
+  return (await transaction(async () => {
+    const row = (await requireInstallation(id));
     const item = JSON.parse(row.data) as HostingInstallation;
     if (item.missingSince)
       throw new ApiError(
         "Cette installation n’a pas été retrouvée lors du dernier relevé.",
       );
-    link(row, input.projectId, "manual", "Rattachement choisi dans le plateau");
-    if (item.ignored) saveRow(row, { ...item, ignored: false });
-    return hostingDiscovery(row.connection_id);
-  });
+    (await link(row, input.projectId, "manual", "Rattachement choisi dans le plateau"));
+    if (item.ignored) (await saveRow(row, { ...item, ignored: false }));
+    return (await hostingDiscovery(row.connection_id));
+  }));
 }
-export function ignoreHostingInstallation(id: string, raw: unknown) {
+export async function ignoreHostingInstallation(id: string, raw: unknown) {
   const input = z.object({ ignored: z.boolean() }).parse(raw);
-  return transaction(() => {
-    const row = requireInstallation(id),
+  return (await transaction(async () => {
+    const row = (await requireInstallation(id)),
       item = JSON.parse(row.data) as HostingInstallation;
     if (row.project_id)
       throw new ApiError(
         "Une installation déjà rattachée reste visible dans sa fiche.",
       );
-    saveRow(row, { ...item, ignored: input.ignored });
-    log(
+    (await saveRow(row, { ...item, ignored: input.ignored }));
+    (await log(
       "live",
       "hosting.visibility",
       `Installation ${item.domains[0] || item.documentRoot} ${input.ignored ? "masquée" : "réaffichée"}.`,
-    );
-    return hostingDiscovery(row.connection_id);
-  });
+    ));
+    return (await hostingDiscovery(row.connection_id));
+  }));
 }
-export function createProjectFromInstallation(id: string) {
-  return transaction(() => {
-    const row = requireInstallation(id),
-      host = connection(row.connection_id),
+export async function createProjectFromInstallation(id: string) {
+  return (await transaction(async () => {
+    const row = (await requireInstallation(id)),
+      host = (await connection(row.connection_id)),
       item = JSON.parse(row.data) as HostingInstallation;
     if (row.project_id)
       return {
         projectId: row.project_id,
         created: false,
-        discovery: hostingDiscovery(row.connection_id),
+        discovery: (await hostingDiscovery(row.connection_id)),
       };
     if (
       item.missingSince ||
@@ -431,7 +431,7 @@ export function createProjectFromInstallation(id: string) {
       throw new ApiError(
         "Cette installation doit être vérifiée avant son ajout.",
       );
-    if (findInstallationMatches(item, host, projectData()).length)
+    if (findInstallationMatches(item, host, (await projectData())).length)
       throw new ApiError(
         "Une fiche correspond déjà à cette installation. Rattachez-la à cette fiche pour éviter un doublon.",
         409,
@@ -448,7 +448,7 @@ export function createProjectFromInstallation(id: string) {
         php: "PHP",
       } as Record<string, string>
     )[item.kind];
-    const project = createProject(
+    const project = (await createProject(
       "live",
       createProjectSchema.parse({
         name,
@@ -456,31 +456,31 @@ export function createProjectFromInstallation(id: string) {
         technology,
         provider: "o2switch",
       }),
-    );
+    ));
     if (item.suggestedEnvironment === "staging")
-      for (const environment of list<Environment>(
+      for (const environment of (await list<Environment>(
         "environments",
         "live",
         project.id,
-      ))
-        save(
+      )))
+        (await save(
           "environments",
           "live",
           { ...environment, name: "Préproduction", kind: "staging" },
           project.id,
-        );
-    link(
-      requireInstallation(id),
+        ));
+    (await link(
+      (await requireInstallation(id)),
       project.id,
       "created",
       "Fiche créée depuis la découverte o2switch",
-    );
+    ));
     if (item.ignored)
-      saveRow(requireInstallation(id), { ...item, ignored: false });
+      (await saveRow((await requireInstallation(id)), { ...item, ignored: false }));
     return {
       projectId: project.id,
       created: true,
-      discovery: hostingDiscovery(row.connection_id),
+      discovery: (await hostingDiscovery(row.connection_id)),
     };
-  });
+  }));
 }

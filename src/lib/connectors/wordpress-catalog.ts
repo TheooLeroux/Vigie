@@ -29,12 +29,12 @@ export async function catalogUpdate(
   if (!/^[a-z0-9][a-z0-9_.-]{0,150}$/.test(slug) || !installed)
     return unknownUpdate();
   const key = `${kind}:${slug}`,
-    db = hostingStorage();
-  const cached = db
+    db = (await hostingStorage());
+  const cached = (await db
     .prepare(
       "SELECT data FROM wordpress_catalog WHERE cache_key=? AND expires_at>?",
     )
-    .get(key, new Date().toISOString()) as { data: string } | undefined;
+    .get(key, new Date().toISOString())) as { data: string } | undefined;
   async function fetchMetadata() {
     const checkedAt = new Date().toISOString();
     let url: URL;
@@ -108,13 +108,13 @@ export async function catalogUpdate(
       )
         answer = { version, checkedAt, found: true };
       // Cache only parsed responses, including a genuine missing catalogue entry.
-      db.prepare(
+      (await db.prepare(
         "INSERT INTO wordpress_catalog VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at",
       ).run(
         key,
         JSON.stringify(answer),
         new Date(Date.now() + 6 * 3600_000).toISOString(),
-      );
+      ));
     } catch {
       /* Unavailable catalogues must never turn into a green status. */
     }

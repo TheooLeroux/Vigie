@@ -102,10 +102,10 @@ function project(): RailwayProject {
     ],
   };
 }
-function clearCache() {
-  database().exec(
+async function clearCache() {
+  (await database().exec(
     "CREATE TABLE IF NOT EXISTS software_release_catalog(cache_key TEXT PRIMARY KEY,data TEXT NOT NULL,expires_at TEXT NOT NULL); DELETE FROM software_release_catalog;",
-  );
+  ));
 }
 test("Preuves Railway : uniquement les champs autorisés, jamais les commandes, messages ou secrets", () => {
   const evidence = deploymentEvidence(meta)!;
@@ -164,7 +164,7 @@ test("Node : correctifs de la même branche, sécurité, dernière LTS et fin de
   assert.equal(nodeRelease("22.8.0", null).state, "unknown");
 });
 test("Catalogues officiels : cache, sources fixes sans jeton Railway et publications futures exclues", async () => {
-  clearCache();
+  (await clearCache());
   const p = project(),
     calls: string[] = [];
   const fake = (async (url, options) => {
@@ -202,7 +202,7 @@ test("Catalogues officiels : cache, sources fixes sans jeton Railway et publicat
   }) as typeof fetch);
 });
 test("Panne de catalogue : versions et preuve conservées, aucun état à jour inventé", async () => {
-  clearCache();
+  (await clearCache());
   const p = project();
   const result = await enrichRailwayReleases([p], (async () =>
     Response.json({}, { status: 503 })) as typeof fetch);

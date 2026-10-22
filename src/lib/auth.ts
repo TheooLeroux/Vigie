@@ -1,7 +1,7 @@
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { getMigrations } from "better-auth/db/migration";
-import { database } from "./db";
+import { authDatabase } from "./storage";
 import { authConfiguration, isAllowedGoogleUser } from "./auth-policy";
 import { ApiError } from "./http";
 
@@ -13,7 +13,7 @@ function createAuth() {
     appName: "Vigie",
     baseURL: configuration.baseUrl,
     secret: process.env.BETTER_AUTH_SECRET!,
-    database: database(),
+    database: authDatabase(),
     trustedOrigins: [configuration.baseUrl],
     emailAndPassword: { enabled: false },
     user: {

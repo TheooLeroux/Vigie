@@ -89,9 +89,9 @@ test("clients : plusieurs sites, renommage, transfert, retrait et imports par no
   detail = await (await call("GET", `projects/${second.id}`)).json();
   assert.equal(detail.project.clientId, null);
   assert.equal(detail.project.client, "");
-  const outside = transaction(() =>
-    createClient("demo", clientSchema.parse({ name: "Hors périmètre" })),
-  );
+  const outside = (await transaction(async () =>
+    (await createClient("demo", clientSchema.parse({ name: "Hors périmètre" }))),
+  ));
   response = await call("POST", "projects", {
     name: "Refusé",
     clientId: outside.id,
@@ -103,11 +103,11 @@ test("clients : plusieurs sites, renommage, transfert, retrait et imports par no
   assert.equal(response.status, 404);
   response = await call("PATCH", `clients/${outside.id}`, { name: "Refusé" });
   assert.equal(response.status, 404);
-  assert.throws(
-    () =>
-      database()
+  await assert.rejects(
+    async () =>
+      (await database()
         .prepare("UPDATE projects SET client_id=? WHERE id=?")
-        .run(outside.id, first.id),
+        .run(outside.id, first.id)),
     /périmètre/,
   );
   response = await call("POST", "import/confirm", {
@@ -116,9 +116,9 @@ test("clients : plusieurs sites, renommage, transfert, retrait et imports par no
       "name;url;client\nSite C;https://c.example;Société B\nSite D;https://d.example;société b",
   });
   assert.equal(response.status, 200);
-  assert.equal(list<Client>("clients", "live").length, 2);
+  assert.equal((await list<Client>("clients", "live")).length, 2);
   assert.equal(
-    list<Project>("projects", "live").filter((p) => p.clientId === other.id)
+    (await list<Project>("projects", "live")).filter((p) => p.clientId === other.id)
       .length,
     2,
   );

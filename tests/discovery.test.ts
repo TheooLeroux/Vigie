@@ -62,16 +62,16 @@ const result = (
   installations: DiscoveredInstallation[],
   observedAt = "2026-10-22T12:00:00.000Z",
 ) => ({ observedAt, installations });
-const data = () => ({
-  projects: list<Project>("projects", "live"),
-  accesses: list<Access>("accesses", "live"),
-  services: list<Service>("services", "live"),
-  environments: list<Environment>("environments", "live"),
+const data = async () => ({
+  projects: (await list<Project>("projects", "live")),
+  accesses: (await list<Access>("accesses", "live")),
+  services: (await list<Service>("services", "live")),
+  environments: (await list<Environment>("environments", "live")),
 });
-const project = (name: string, url: string) =>
-  transaction(() =>
-    createProject("live", createProjectSchema.parse({ name, url })),
-  );
+const project = async (name: string, url: string) =>
+  (await transaction(async () =>
+    (await createProject("live", createProjectSchema.parse({ name, url }))),
+  ));
 function transport(
   domains: unknown[],
   listing: (dir: string) => string[] | Response = () => [
@@ -205,34 +205,34 @@ test("découverte : refus et réponses invalides ne deviennent pas un inventaire
   }
 });
 
-test("rapprochement : domaine exact, URL des services et chemin limité au bon compte", () => {
+test("rapprochement : domaine exact, URL des services et chemin limité au bon compte", async () => {
   const host = { ...credentials, id: "host" };
-  const p = project("Matching", "https://www.match.example.org/");
+  const p = (await project("Matching", "https://www.match.example.org/"));
   assert.equal(
-    findInstallationMatches(item("match.example.org"), host, data())[0].id,
+    findInstallationMatches(item("match.example.org"), host, (await data()))[0].id,
     p.id,
   );
-  const service = list<Service>("services", "live", p.id)[0];
-  save(
+  const service = (await list<Service>("services", "live", p.id))[0];
+  (await save(
     "services",
     "live",
     { ...service, url: "https://api.match.example.org/" },
     p.id,
-  );
+  ));
   assert.equal(
-    findInstallationMatches(item("api.match.example.org"), host, data())[0].id,
+    findInstallationMatches(item("api.match.example.org"), host, (await data()))[0].id,
     p.id,
   );
-  save("projects", "live", {
+  (await save("projects", "live", {
     ...p,
     url: "",
     description: "Répertoire : /home/scanuser/path.example.org",
-  });
+  }));
   assert.equal(
-    findInstallationMatches(item("path.example.org"), host, data()).length,
+    findInstallationMatches(item("path.example.org"), host, (await data())).length,
     0,
   );
-  save<Access>(
+  (await save<Access>(
     "accesses",
     "live",
     {
@@ -246,12 +246,12 @@ test("rapprochement : domaine exact, URL des services et chemin limité au bon c
       projectId: p.id,
     },
     p.id,
-  );
+  ));
   assert.equal(
-    findInstallationMatches(item("path.example.org"), host, data()).length,
+    findInstallationMatches(item("path.example.org"), host, (await data())).length,
     0,
   );
-  save<Access>(
+  (await save<Access>(
     "accesses",
     "live",
     {
@@ -265,94 +265,94 @@ test("rapprochement : domaine exact, URL des services et chemin limité au bon c
       projectId: p.id,
     },
     p.id,
-  );
+  ));
   assert.equal(
-    findInstallationMatches(item("path.example.org"), host, data())[0].id,
+    findInstallationMatches(item("path.example.org"), host, (await data()))[0].id,
     p.id,
   );
   assert.equal(
     findInstallationMatches(
       item("matching-but-different.example.org"),
       host,
-      data(),
+      (await data()),
     ).length,
     0,
   );
 });
 
-test("synchronisation : rattachement unique, client conservé, ambiguïtés et archives à choisir", () => {
-  const host = saveHostingConnection({ ...credentials, username: "matchuser" });
-  const client = transaction(() =>
-    createClient("live", clientSchema.parse({ name: "Client réel de test" })),
-  );
-  const p = project("Unique", "https://unique.example.org/");
-  save("projects", "live", { ...p, clientId: client.id });
-  project("Ambigu A", "https://ambiguous.example.org/");
-  project("Ambigu B", "https://ambiguous.example.org/");
-  const archived = project("Archive", "https://archived.example.org/");
-  save("projects", "live", { ...archived, lifecycle: "archived" });
+test("synchronisation : rattachement unique, client conservé, ambiguïtés et archives à choisir", async () => {
+  const host = (await saveHostingConnection({ ...credentials, username: "matchuser" }));
+  const client = (await transaction(async () =>
+    (await createClient("live", clientSchema.parse({ name: "Client réel de test" }))),
+  ));
+  const p = (await project("Unique", "https://unique.example.org/"));
+  (await save("projects", "live", { ...p, clientId: client.id }));
+  (await project("Ambigu A", "https://ambiguous.example.org/"));
+  (await project("Ambigu B", "https://ambiguous.example.org/"));
+  const archived = (await project("Archive", "https://archived.example.org/"));
+  (await save("projects", "live", { ...archived, lifecycle: "archived" }));
   const snapshot = result([
     item("unique.example.org"),
     item("ambiguous.example.org"),
     item("archived.example.org"),
     item("empty-only.example.org", "empty"),
   ]);
-  transaction(() => applyDiscoverySnapshot(host, snapshot));
-  let found = hostingDiscovery(host.id);
+  (await transaction(async () => (await applyDiscoverySnapshot(host, snapshot))));
+  let found = (await hostingDiscovery(host.id));
   assert.equal(found.summary.linked, 1);
   assert.equal(found.summary.review, 2);
   assert.equal(found.summary.other, 1);
-  assert.equal(get<Project>("projects", p.id, "live")!.clientId, client.id);
+  assert.equal((await get<Project>("projects", p.id, "live"))!.clientId, client.id);
   const linkedId = found.installations.find((i) => i.project?.id === p.id)!.id;
-  assert.throws(
-    () =>
-      createProjectFromInstallation(
+  await assert.rejects(
+    async () =>
+      (await createProjectFromInstallation(
         found.installations.find(
           (i) => i.domains[0] === "ambiguous.example.org",
         )!.id,
-      ),
+      )),
     /doublon/,
   );
-  assert.throws(
-    () =>
-      createProjectFromInstallation(
+  await assert.rejects(
+    async () =>
+      (await createProjectFromInstallation(
         found.installations.find((i) => i.kind === "empty")!.id,
-      ),
+      )),
     /vérifiée/,
   );
-  const count = list("projects", "live").length;
-  transaction(() => applyDiscoverySnapshot(host, snapshot));
-  found = hostingDiscovery(host.id);
+  const count = (await list("projects", "live")).length;
+  (await transaction(async () => (await applyDiscoverySnapshot(host, snapshot))));
+  found = (await hostingDiscovery(host.id));
   assert.equal(
     found.installations.find((i) => i.project?.id === p.id)!.id,
     linkedId,
   );
-  assert.equal(list("projects", "live").length, count);
-  assert.equal(list<Access>("accesses", "live", p.id).length, 1);
-  assert.equal(projectHostingInstallations(p.id)[0].connectionName, host.name);
+  assert.equal((await list("projects", "live")).length, count);
+  assert.equal((await list<Access>("accesses", "live", p.id)).length, 1);
+  assert.equal((await projectHostingInstallations(p.id))[0].connectionName, host.name);
 });
 
-test("création en un clic idempotente ; choix manuel, masquage et dernière observation conservés", () => {
-  const host = saveHostingConnection({
+test("création en un clic idempotente ; choix manuel, masquage et dernière observation conservés", async () => {
+  const host = (await saveHostingConnection({
     ...credentials,
     username: "createuser",
-  });
+  }));
   const sites = [
     item("new.example.org"),
     item("manual.example.org"),
     item("hidden.example.org"),
   ];
   sites[0].suggestedEnvironment = "staging";
-  transaction(() => applyDiscoverySnapshot(host, result(sites)));
-  const found = hostingDiscovery(host.id),
+  (await transaction(async () => (await applyDiscoverySnapshot(host, result(sites)))));
+  const found = (await hostingDiscovery(host.id)),
     createdItem = found.installations.find(
       (i) => i.domains[0] === "new.example.org",
     )!;
-  const created = createProjectFromInstallation(createdItem.id);
+  const created = (await createProjectFromInstallation(createdItem.id));
   assert.equal(created.created, true);
-  assert.equal(createProjectFromInstallation(createdItem.id).created, false);
+  assert.equal((await createProjectFromInstallation(createdItem.id)).created, false);
   assert.equal(
-    list<Environment>("environments", "live", created.projectId)[0].kind,
+    (await list<Environment>("environments", "live", created.projectId))[0].kind,
     "staging",
   );
   const manual = found.installations.find(
@@ -361,8 +361,8 @@ test("création en un clic idempotente ; choix manuel, masquage et dernière obs
     hidden = found.installations.find(
       (i) => i.domains[0] === "hidden.example.org",
     )!;
-  linkHostingInstallation(manual.id, { projectId: created.projectId });
-  ignoreHostingInstallation(hidden.id, { ignored: true });
+  (await linkHostingInstallation(manual.id, { projectId: created.projectId }));
+  (await ignoreHostingInstallation(hidden.id, { ignored: true }));
   const bad = sites.map((i) =>
     i.domains[0] === "new.example.org"
       ? {
@@ -373,10 +373,10 @@ test("création en un clic idempotente ; choix manuel, masquage et dernière obs
         }
       : i,
   );
-  transaction(() =>
-    applyDiscoverySnapshot(host, result(bad, "2026-10-23T12:00:00.000Z")),
-  );
-  const refreshed = hostingDiscovery(host.id);
+  (await transaction(async () =>
+    (await applyDiscoverySnapshot(host, result(bad, "2026-10-23T12:00:00.000Z"))),
+  ));
+  const refreshed = (await hostingDiscovery(host.id));
   assert.equal(
     refreshed.installations.find((i) => i.id === manual.id)!.linkMethod,
     "manual",
@@ -393,27 +393,27 @@ test("création en un clic idempotente ; choix manuel, masquage et dernière obs
     refreshed.installations.find((i) => i.id === createdItem.id)!.observedAt,
     "2026-10-22T12:00:00.000Z",
   );
-  transaction(() =>
-    applyDiscoverySnapshot(host, result([], "2026-10-24T12:00:00.000Z")),
-  );
-  assert.equal(hostingDiscovery(host.id).summary.missing, 3);
-  assert.equal(projectHostingInstallations(created.projectId).length, 2);
-  assert.throws(
-    () => linkHostingInstallation(manual.id, { projectId: created.projectId }),
+  (await transaction(async () =>
+    (await applyDiscoverySnapshot(host, result([], "2026-10-24T12:00:00.000Z"))),
+  ));
+  assert.equal((await hostingDiscovery(host.id)).summary.missing, 3);
+  assert.equal((await projectHostingInstallations(created.projectId)).length, 2);
+  await assert.rejects(
+    async () => (await linkHostingInstallation(manual.id, { projectId: created.projectId })),
     /pas été retrouvée/,
   );
-  saveHostingConnection({ ...credentials, username: "rotateduser" }, host.id);
-  assert.equal(hostingDiscovery(host.id).installations.length, 0);
-  assert.equal(projectHostingInstallations(created.projectId).length, 0);
-  assert.throws(
-    () => createProjectFromInstallation(createdItem.id),
+  (await saveHostingConnection({ ...credentials, username: "rotateduser" }, host.id));
+  assert.equal((await hostingDiscovery(host.id)).installations.length, 0);
+  assert.equal((await projectHostingInstallations(created.projectId)).length, 0);
+  await assert.rejects(
+    async () => (await createProjectFromInstallation(createdItem.id)),
     /introuvable/,
   );
 });
 
 test("collecte connectée : chiffrement, instantané réel, concurrence et échec sans perte", async () => {
-  const host = saveHostingConnection(credentials),
-    p = project("Connected", "https://connected.example.org/");
+  const host = (await saveHostingConnection(credentials)),
+    p = (await project("Connected", "https://connected.example.org/"));
   const domains = [
     {
       domain: "connected.example.org",
@@ -429,11 +429,11 @@ test("collecte connectée : chiffrement, instantané réel, concurrence et éche
   );
   // Older observation for the next attempt; leave the successful installation untouched.
   const { hostingStorage } = await import("../src/lib/hosting-storage");
-  hostingStorage()
+  (await (await hostingStorage())
     .prepare(
       "UPDATE hosting_discovery_runs SET data=json_set(data,'$.lastAttemptAt','2020-01-01T00:00:00.000Z') WHERE connection_id=?",
     )
-    .run(host.id);
+    .run(host.id));
   await assert.rejects(
     discoverHostingConnection(
       host.id,
@@ -442,9 +442,9 @@ test("collecte connectée : chiffrement, instantané réel, concurrence et éche
     ),
     /refuse/,
   );
-  const after = hostingDiscovery(host.id);
+  const after = (await hostingDiscovery(host.id));
   assert.equal(
-    hostingConnections().find((c) => c.id === host.id)!.status,
+    (await hostingConnections()).find((c) => c.id === host.id)!.status,
     "error",
   );
   assert.equal(after.installations[0].id, found.discovery.installations[0].id);
@@ -454,12 +454,12 @@ test("collecte connectée : chiffrement, instantané réel, concurrence et éche
 });
 
 test("routes de découverte : session Google et périmètre requis, détail lié et erreurs contrôlées", async () => {
-  const host = saveHostingConnection({ ...credentials, username: "routeuser" });
-  const p = project("Route", "https://route.example.org/");
-  transaction(() =>
-    applyDiscoverySnapshot(host, result([item("route.example.org")])),
-  );
-  const id = hostingDiscovery(host.id).installations[0].id;
+  const host = (await saveHostingConnection({ ...credentials, username: "routeuser" }));
+  const p = (await project("Route", "https://route.example.org/"));
+  (await transaction(async () =>
+    (await applyDiscoverySnapshot(host, result([item("route.example.org")]))),
+  ));
+  const id = (await hostingDiscovery(host.id)).installations[0].id;
   async function call(
     method: "GET" | "POST",
     path: string,
@@ -492,9 +492,9 @@ test("routes de découverte : session Google et périmètre requis, détail lié
   );
   const detail = await (await call("GET", `projects/${p.id}`)).json();
   assert.equal(detail.hosting[0].connectionName, host.name);
-  const outsider = transaction(() =>
-    createProject("demo", createProjectSchema.parse({ name: "Other scope" })),
-  );
+  const outsider = (await transaction(async () =>
+    (await createProject("demo", createProjectSchema.parse({ name: "Other scope" }))),
+  ));
   assert.equal(
     (await call("POST", `installations/${id}/link`, { projectId: outsider.id }))
       .status,

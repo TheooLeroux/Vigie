@@ -17,7 +17,7 @@ export async function enrichPhpRelease(
   if (!php) return snapshot;
   const branch = php.version.match(/^(\d+\.\d+)\./)?.[1];
   if (!branch) return snapshot;
-  const db = hostingStorage(),
+  const db = (await hostingStorage()),
     key = "php:" + branch;
   let metadata: {
     latestVersion: string;
@@ -25,11 +25,11 @@ export async function enrichPhpRelease(
     upstreamSupported: boolean | null;
     checkedAt: string;
   } | null = null;
-  const cached = db
+  const cached = (await db
     .prepare(
       "SELECT data FROM wordpress_catalog WHERE cache_key=? AND expires_at>?",
     )
-    .get(key, new Date().toISOString()) as { data: string } | undefined;
+    .get(key, new Date().toISOString())) as { data: string } | undefined;
   if (cached) metadata = JSON.parse(cached.data);
   else
     try {
@@ -72,13 +72,13 @@ export async function enrichPhpRelease(
           : null,
         checkedAt: new Date().toISOString(),
       };
-      db.prepare(
+      (await db.prepare(
         "INSERT INTO wordpress_catalog VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at",
       ).run(
         key,
         JSON.stringify(metadata),
         new Date(Date.now() + 6 * 3600_000).toISOString(),
-      );
+      ));
     } catch {
       return snapshot;
     }

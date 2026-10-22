@@ -10,7 +10,7 @@ import { VERCEL_SOURCE_TEAM } from "../src/lib/vercel-client-mapping";
 void withAuditActor(
   { name: "Configuration Vercel autorisée", email: "" },
   async () => {
-    let c = vercelState().connections.find(
+    let c = (await vercelState()).connections.find(
       (c) => c.teamId === VERCEL_SOURCE_TEAM,
     );
     if (!process.argv.includes("--sync-only")) {
@@ -29,10 +29,10 @@ void withAuditActor(
         cipher.update(Buffer.from(raw.value, "base64")),
         cipher.final(),
       ]).toString("utf8");
-      c = saveVercelConnection(
+      c = (await saveVercelConnection(
         { name: "Vercel · Janssen", teamId: VERCEL_SOURCE_TEAM, secret },
         c?.id,
-      );
+      ));
       unlinkSync(file);
     }
     if (!c) throw new Error("Connexion Vercel absente.");
