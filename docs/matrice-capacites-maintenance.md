@@ -2,7 +2,7 @@
 
 État de référence : 22 octobre 2026, instantané préparé à 17:32 (Paris). Document de cadrage : il ne donne pas l'autorisation d'exécuter les opérations décrites.
 
-Évolution ultérieure du code : un [premier parcours Node et dépendances Git](maintenance.md) a été implémenté après cet instantané. Il requiert une activation dédiée ; les capacités « actuelles » de cette matrice décrivent la V1 auditée, pas une activation en production de ce nouveau parcours.
+Note de suivi : le premier module d'exécution Node et dépendances a été retiré pour repartir sur une intégration unifiée Vercel, Railway et o2switch. Cette matrice reste un instantané de cadrage daté, pas la description d'un moteur de mise à jour actif.
 
 ## 1. Périmètre et niveau de preuve
 

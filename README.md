@@ -80,7 +80,9 @@ Ce script est une opération locale d’administration. Avant de l’appliquer, 
 
 La [matrice des capacités de maintenance](docs/matrice-capacites-maintenance.md) distingue, pour les configurations du parc, la détection actuelle, les mises à jour envisageables, les conditions de retour arrière et les blocages par projet. C'est un état de référence daté, pas un moteur de mise à jour activé ni une autorisation d'intervenir. Les sauvegardes et restaurations du parc restent à qualifier avant toute automatisation des écritures.
 
-Le parcours **Mises à jour** implémente désormais la préparation Node et dépendances npm/pnpm via un exécuteur GitHub Actions, des PR dédiées, le suivi des contrôles et une publication explicitement confirmée. Il reste désactivé sans identifiants GitHub dédiés et liste de dépôts autorisés ; les moteurs de bases, WordPress et PHP ne sont pas modifiés par ce parcours. Consulter [l'activation, les permissions, la migration et les limites](docs/maintenance.md) avant de l'utiliser sur un projet réel.
+L'ancien module d'exécution des mises à jour a été retiré : écrans, routes API, préparateur GitHub Actions et logique de publication. L'inventaire des versions et les connexions Vercel, Railway et o2switch restent disponibles. Aucun nouveau parcours de mise à jour n'est implémenté à ce stade.
+
+La migration historique `003-maintenance.sql` est conservée pour préserver l'historique des schémas déjà déployés. Les anciennes tables et traces en base ne sont ni supprimées ni utilisées par l'application. Les secrets GitHub existants restent stockés dans Vercel et GitHub Actions, mais ne sont plus consommés par ce code ; aucune rotation ni suppression d'identifiant n'est effectuée par ce nettoyage.
 
 ## Vérifications
 

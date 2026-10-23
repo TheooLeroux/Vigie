@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { maintenanceState, updateLatestMaintenance, refreshMaintenance, closeMaintenance } from "@/lib/maintenance";
 import {
   vercelState,
   saveVercelConnection,
@@ -144,21 +143,6 @@ async function handleRequest(request: Request, context: Context) {
     const { path } = await context.params;
     const [root, id, child] = path;
     const method = request.method;
-    if (root === "maintenance") {
-      if (method === "GET" && path.length === 1) return Response.json(await maintenanceState());
-      if (method === "POST" && id === "execute" && path.length === 2) {
-        const input = z.object({ targetId: z.string().max(500) }).strict().parse(await body(request));
-        return Response.json(await updateLatestMaintenance({ ...input, approved: true, execute: true }));
-      }
-      if (method === "POST" && id && child && path.length === 3) {
-        if (child === "refresh") return Response.json(await refreshMaintenance(id));
-        if (child === "close") {
-          z.object({ confirmed: z.literal(true) }).strict().parse(await body(request));
-          return Response.json(await closeMaintenance(id));
-        }
-      }
-      throw new ApiError("Route de maintenance introuvable.", 404);
-    }
     if (method === "GET") {
       if (root === "vercel" && path.length === 1)
         return Response.json((await vercelState()));

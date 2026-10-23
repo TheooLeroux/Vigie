@@ -221,19 +221,6 @@ export async function nodeBranchInfo(
   // A major branch is not an observed patch version. Never manufacture a missing-patch warning.
   return { ...release, state: "unknown", securityUpdate: null };
 }
-export async function maintenanceNodeVersions(transport: typeof fetch = fetch) {
-  const catalog = await nodeCatalog(transport);
-  if (!catalog) throw new Error("Catalogue officiel Node indisponible.");
-  const today = new Date().toISOString().slice(0, 10);
-  const seen = new Set<string>();
-  return catalog.releases.filter(release => {
-    const branch = release.version.split(".")[0];
-    const schedule = catalog.schedule[`v${branch}`];
-    if (!release.lts || !schedule?.lts || schedule.lts > today || schedule.end <= today || seen.has(branch)) return false;
-    seen.add(branch);
-    return true;
-  }).map(release => release.version);
-}
 export async function enrichRailwayReleases(
   projects: RailwayProject[],
   transport: typeof fetch = fetch,
