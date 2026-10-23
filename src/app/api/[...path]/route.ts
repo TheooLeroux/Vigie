@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { maintenanceState, inspectMaintenance, packageRelease, createMaintenancePlan, approveMaintenance, refreshMaintenance, mergeMaintenance, closeMaintenance } from "@/lib/maintenance";
 import {
   vercelState,
   saveVercelConnection,
@@ -143,6 +144,25 @@ async function handleRequest(request: Request, context: Context) {
     const { path } = await context.params;
     const [root, id, child] = path;
     const method = request.method;
+    if (root === "maintenance") {
+      if (method === "GET" && path.length === 1) return Response.json(await maintenanceState());
+      if (method === "POST" && id === "inspect" && path.length === 2) {
+        const input = z.object({ targetId: z.string().max(500) }).strict().parse(await body(request));
+        return Response.json(await inspectMaintenance(input.targetId));
+      }
+      if (method === "POST" && id === "package" && path.length === 2) return Response.json(await packageRelease(await body(request)));
+      if (method === "POST" && id === "plans" && path.length === 2) return Response.json(await createMaintenancePlan(await body(request)));
+      if (method === "POST" && id && child && path.length === 3) {
+        if (child === "approve") return Response.json(await approveMaintenance(id, await body(request)));
+        if (child === "refresh") return Response.json(await refreshMaintenance(id));
+        if (child === "merge") return Response.json(await mergeMaintenance(id, await body(request)));
+        if (child === "close") {
+          z.object({ confirmed: z.literal(true) }).strict().parse(await body(request));
+          return Response.json(await closeMaintenance(id));
+        }
+      }
+      throw new ApiError("Route de maintenance introuvable.", 404);
+    }
     if (method === "GET") {
       if (root === "vercel" && path.length === 1)
         return Response.json((await vercelState()));

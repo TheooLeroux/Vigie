@@ -1,0 +1,129 @@
+.maintenance-panel {
+  display: grid;
+  gap: 20px;
+}
+.maintenance-intro,
+.maintenance-setup,
+.maintenance-editor,
+.maintenance-jobs {
+  padding: 24px;
+}
+.maintenance-intro > div,
+.maintenance-heading,
+.maintenance-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.maintenance-heading {
+  justify-content: space-between;
+}
+.maintenance-panel h2,
+.maintenance-panel h3 {
+  margin: 0;
+}
+.maintenance-panel p,
+.maintenance-panel li {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.maintenance-panel p {
+  margin: 12px 0;
+}
+.maintenance-panel small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.maintenance-editor {
+  display: grid;
+  gap: 16px;
+}
+.maintenance-editor .button {
+  justify-self: start;
+}
+.maintenance-editor select {
+  width: 100%;
+}
+.maintenance-source {
+  display: grid;
+  gap: 8px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.maintenance-source span {
+  font-size: 12px;
+}
+.maintenance-warnings,
+.maintenance-updates,
+.maintenance-checks {
+  margin: 0;
+  padding-left: 20px;
+}
+.maintenance-warning {
+  color: var(--orange, #ce965b);
+}
+.maintenance-error {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  color: #dc737a;
+}
+.maintenance-job {
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+}
+.maintenance-job details {
+  margin: 14px 0;
+  font-size: 12px;
+}
+.maintenance-job summary {
+  cursor: pointer;
+}
+.maintenance-job code {
+  overflow-wrap: anywhere;
+}
+.maintenance-actions {
+  margin-top: 16px;
+  font-size: 12px;
+}
+.maintenance-confirm {
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.maintenance-confirm label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.maintenance-confirm input {
+  margin-top: 5px;
+}
+.maintenance-updates li {
+  padding: 6px 0;
+}
+.maintenance-updates .text-button {
+  margin-left: 14px;
+}
+@media (max-width: 650px) {
+  .maintenance-intro,
+  .maintenance-setup,
+  .maintenance-editor,
+  .maintenance-jobs {
+    padding: 16px;
+  }
+  .maintenance-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .maintenance-heading {
+    align-items: flex-start;
+  }
+}

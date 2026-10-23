@@ -33,6 +33,7 @@ import {
   SlidersHorizontal,
   UserRound,
   X,
+  Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityPanel } from "./activity-panel";
@@ -61,8 +62,9 @@ import {
 } from "./ui";
 import { VercelInventoryPanel } from "./vercel-panel";
 import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
+import { MaintenancePanel } from "./maintenance-panel";
 
-type View = "sites" | "clients" | "connections" | "backup" | "activity";
+type View = "sites" | "clients" | "connections" | "backup" | "activity" | "maintenance";
 type Dialog =
   | "project"
   | "manualProject"
@@ -79,6 +81,7 @@ const navigation = [
   { id: "sites", label: "Sites & projets", icon: Globe2 },
   { id: "clients", label: "Clients", icon: Building2 },
   { id: "connections", label: "Connexions", icon: Link2 },
+  { id: "maintenance", label: "Mises à jour", icon: Wrench },
   { id: "backup", label: "Backup", icon: Database },
   { id: "activity", label: "Activité", icon: ActivityIcon },
 ] as const;
@@ -86,6 +89,7 @@ const titles: Record<
   View,
   { title: string; description: string; kicker: string }
 > = {
+  maintenance: { title: "Mises à jour", description: "Préparer, vérifier et publier les évolutions de vos applications.", kicker: "MAINTENANCE" },
   connections: {
     title: "Connexions",
     description: "Comptes d’hébergement et accès vérifiés.",
@@ -1181,6 +1185,7 @@ export function WorkspaceApp({
                         </div>
                       </section>
                     )}
+                    {view === "maintenance" && <MaintenancePanel request={api} />}
                     {view === "backup" && (
                       <section className="panel backup-placeholder">
                         <Database size={32} />

@@ -74,6 +74,12 @@ npx tsx scripts/import-site-list.ts C:\Users\theol\Desktop\site.txt --apply
 
 Ce script est une opération locale d’administration. Avant de l’appliquer, conserver une sauvegarde cohérente SQLite. Une sauvegarde privée a été créée dans `.data/backups/` avant l’import du 22 octobre.
 
+## Maintenance — cadrage
+
+La [matrice des capacités de maintenance](docs/matrice-capacites-maintenance.md) distingue, pour les configurations du parc, la détection actuelle, les mises à jour envisageables, les conditions de retour arrière et les blocages par projet. C'est un état de référence daté, pas un moteur de mise à jour activé ni une autorisation d'intervenir. Les sauvegardes et restaurations du parc restent à qualifier avant toute automatisation des écritures.
+
+Le parcours **Mises à jour** implémente désormais la préparation Node et dépendances npm/pnpm via un exécuteur GitHub Actions, des PR dédiées, le suivi des contrôles et une publication explicitement confirmée. Il reste désactivé sans identifiants GitHub dédiés et liste de dépôts autorisés ; les moteurs de bases, WordPress et PHP ne sont pas modifiés par ce parcours. Consulter [l'activation, les permissions, la migration et les limites](docs/maintenance.md) avant de l'utiliser sur un projet réel.
+
 ## Vérifications
 
 Vercel est disponible dans **Connexions**, avec découverte de tous les projets, filtre par client et ajout au parc sur choix explicite. L’ajout crée la fiche et son association client en un clic ; la découverte seule ne crée rien. Les deux projets « À virer » restent exclus et ne sont pas modifiés. Voir [le fonctionnement et les limites du connecteur Vercel](docs/connecteur-vercel.md).
