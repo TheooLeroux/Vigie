@@ -783,6 +783,59 @@ test("CI absente, échouée ou ignorée : fusion bloquée", async () => {
     await closeMaintenance(job.id, fake.transport);
   }
 });
+
+test("Lecture CI refusée : PR suivie, anciens succès effacés et fusion bloquée", async () => {
+  for (const endpoint of ["/check-runs?", "/status?"]) {
+    const fake = fakeGitHub();
+    const job = await planned(await fixtureTarget(), fake);
+    await approveMaintenance(job.id, { approved: true }, fake.transport);
+    await runMaintenanceWorker(
+      job.payload,
+      new GitHubMaintenanceClient("secret", fake.transport),
+      ["team/app"],
+    );
+    assert.equal(
+      (await refreshMaintenance(job.id, fake.transport)).canMerge,
+      true,
+    );
+    const denied = (async (input, init) =>
+      String(input).includes(endpoint)
+        ? Response.json({ message: "private-token-must-not-leak" }, { status: 403 })
+        : fake.transport(input, init)) as typeof fetch;
+    const tracked = await refreshMaintenance(job.id, denied);
+    assert.equal(tracked.status, "pull_request");
+    assert.equal(tracked.pullNumber, 7);
+    assert.equal(tracked.headSha, headSha);
+    assert.equal(tracked.canMerge, false);
+    assert.deepEqual(tracked.checks, []);
+    assert.match(tracked.mergeBlocker || "", /non vérifiables/);
+    assert.ok(!JSON.stringify(tracked).includes("private-token-must-not-leak"));
+    assert.equal(
+      (await maintenanceState()).jobs.find((stored) => stored.id === job.id)
+        ?.pullNumber,
+      7,
+    );
+    assert.ok(
+      await database()
+        .prepare("SELECT job_id FROM maintenance_locks WHERE job_id=?")
+        .get(job.id),
+    );
+    await assert.rejects(
+      mergeMaintenance(job.id, {
+        confirmed: true,
+        previewReviewed: true,
+        returnReviewed: true,
+        expectedHead: headSha,
+      }, denied),
+      /non vérifiables/,
+    );
+    assert.ok(!fake.calls.some((call) => call.path.endsWith("/merge-async")));
+    const recovered = await refreshMaintenance(job.id, fake.transport);
+    assert.equal(recovered.error, undefined);
+    assert.equal(recovered.canMerge, true);
+    await closeMaintenance(job.id, fake.transport);
+  }
+});
 test("Modification externe d’une PR : arrêt de la fusion depuis Vigie", async () => {
   const fake = fakeGitHub({ extraFile: true });
   const job = await planned(await fixtureTarget(), fake);

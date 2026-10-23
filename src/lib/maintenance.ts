@@ -797,14 +797,29 @@ export async function refreshMaintenance(
         return saveJob(job);
       }
       job.status = "pull_request";
-      const [checks, statuses] = await Promise.all([
-        client.request(
-          `${client.repo(job.payload.repository)}/commits/${job.headSha}/check-runs?per_page=100&filter=latest`,
-        ),
-        client.request(
-          `${client.repo(job.payload.repository)}/commits/${job.headSha}/status?per_page=100`,
-        ),
-      ]);
+      let checks, statuses;
+      try {
+        [checks, statuses] = await Promise.all([
+          client.request(
+            `${client.repo(job.payload.repository)}/commits/${job.headSha}/check-runs?per_page=100&filter=latest`,
+          ),
+          client.request(
+            `${client.repo(job.payload.repository)}/commits/${job.headSha}/status?per_page=100`,
+          ),
+        ]);
+      } catch (error) {
+        if (
+          !(error instanceof GitHubMaintenanceError) ||
+          ![401, 403].includes(error.responseStatus || 0)
+        )
+          throw error;
+        job.checks = [];
+        job.error =
+          "La PR est créée, mais GitHub refuse la lecture des contrôles CI. Vérifiez les droits Checks et Commit statuses ; ce type de jeton peut nécessiter une intégration GitHub App pour les contrôles.";
+        job.mergeBlocker =
+          "Contrôles CI non vérifiables : aucune fusion depuis Vigie autorisée.";
+        return saveJob(job);
+      }
       if (
         !Array.isArray(checks.check_runs) ||
         !Array.isArray(statuses.statuses) ||

@@ -49,6 +49,8 @@ Prévoir un accès dédié limité aux dépôts sélectionnés, pas un jeton glo
 
 Ne pas donner à ces identifiants de contournement des règles de branche. Configurer sur les dépôts cibles les contrôles obligatoires, la revue et, si nécessaire, une file de fusion. Vigie n'ajoute ni ne modifie ces permissions/protections automatiquement. Les registres privés nécessiteront une intégration séparée sans réutiliser les secrets de production pendant la préparation.
 
+Le pilote du 23 octobre a confirmé que l'interface GitHub ne propose pas la permission **Checks** pour le jeton personnel finement limité utilisé. La lecture des check-runs est refusée même avec Commit statuses en lecture. Ce jeton suffit à préparer une PR, pas à qualifier sa CI complète : prévoir un accès GitHub App approprié pour cette lecture, sans réutiliser un jeton CLI global. Vigie conserve le suivi de la PR et son verrou quand cette lecture est refusée ; les anciens résultats CI sont effacés et la fusion reste bloquée. Les résultats locaux consignés dans une revue ne remplacent pas des contrôles GitHub vérifiables.
+
 Un jeton finement limité à un propriétaire ne doit pas être supposé valable pour tous les propriétaires du parc. La configuration accepte un jeton commun lorsqu'il est réellement autorisé, ou un dictionnaire de jetons distincts par propriétaire/dépôt. Une correspondance de dépôt prime sur celle de propriétaire, puis sur le jeton commun. Les secrets restent uniquement dans les environnements serveur/GitHub, jamais dans les inputs du workflow, le navigateur ou les plans.
 
 ### 3. Variables côté serveur Vigie

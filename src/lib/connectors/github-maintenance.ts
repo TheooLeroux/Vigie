@@ -10,6 +10,7 @@ export class GitHubMaintenanceError extends ApiError {
     message: string,
     status: number,
     public definitive: boolean,
+    public responseStatus?: number,
   ) {
     super(message, status);
   }
@@ -66,6 +67,7 @@ export class GitHubMaintenanceClient {
         response.status >= 400 &&
           response.status < 500 &&
           response.status !== 409,
+        response.status,
       );
     if (response.status === 204) return null;
     const reader = response.body?.getReader();
