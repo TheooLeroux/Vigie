@@ -233,6 +233,8 @@ function fakeGitHub(
       return new Response(null, { status: 404 });
     if (path === "/repos/team/app/git/refs")
       return Response.json({ ref: body.ref });
+    if (path === "/repos/team/app/git/refs/heads/main" && method === "PATCH")
+      return Response.json({ object: { sha: body.sha } });
     if (path === "/repos/team/app/pulls" && method === "POST") {
       jobId = body.head.split("/").at(-1);
       pull = {
@@ -569,6 +571,42 @@ test("Exécuteur : liste autorisée et branche devenue obsolète bloquent les é
     /changé/,
   );
   assert.ok(fake.calls.every((call) => call.method === "GET"));
+});
+
+test("Exécution : publier après build, sans PR ni contournement des protections", async () => {
+  for (const fails of [false, true]) {
+    const fake = fakeGitHub();
+    const input: MaintenancePayload = { ...payload(), execute: true, operation: {
+      kind: "all", version: "24.2.0", updates: [{ name: "react", version: "19.1.0" }],
+    } };
+    let validated = false;
+    const run = () => runMaintenanceWorker(input, new GitHubMaintenanceClient("secret", fake.transport), ["team/app"], async () => {
+      assert.ok(!fake.calls.some((call) => call.method === "PATCH"));
+      if (fails) throw new Error("Build échoué");
+      validated = true;
+    }, async () => new Map([["package.json", JSON.stringify(updateManifest(manifest, input.operation))]]));
+    if (fails) await assert.rejects(run(), /Build échoué/);
+    else assert.deepEqual(await run(), { commitSha: headSha });
+    const publications = fake.calls.filter((call) => call.method === "PATCH");
+    assert.equal(publications.length, validated ? 1 : 0);
+    if (validated) assert.deepEqual(publications[0].body, { sha: headSha, force: false });
+    assert.ok(!fake.calls.some((call) => call.method === "POST" && call.path.endsWith("/pulls")));
+  }
+});
+
+test("Exécution : remplacer l’ancienne PR et libérer son verrou sans fusion", async () => {
+  const targetId = await fixtureTarget();
+  const fake = fakeGitHub();
+  const old = await planned(targetId, fake);
+  await approveMaintenance(old.id, { approved: true }, fake.transport);
+  await runMaintenanceWorker(old.payload, new GitHubMaintenanceClient("secret", fake.transport), ["team/app"]);
+  await refreshMaintenance(old.id, fake.transport);
+  const execution = await updateLatestMaintenance({ targetId, approved: true, execute: true }, fake.transport);
+  assert.equal(execution.job?.payload.execute, true);
+  assert.equal(execution.job?.status, "queued");
+  assert.ok(fake.calls.some((call) => call.path.endsWith("/pulls/7") && call.method === "PATCH" && call.body.state === "closed"));
+  assert.ok(!fake.calls.some((call) => call.path.includes("/merge")));
+  await database().prepare("DELETE FROM maintenance_locks WHERE job_id=?").run(execution.job!.id);
 });
 test("Résolution npm/pnpm : mises à jour individuelles et groupées, sans scripts ni secrets", async () => {
   for (const { manager, kind } of (["npm", "pnpm"] as const).flatMap((manager) =>

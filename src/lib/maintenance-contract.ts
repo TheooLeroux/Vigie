@@ -82,6 +82,7 @@ export const workerPayloadSchema = z
     baseSha: shaSchema,
     directory: z.string().transform(safeDirectory),
     nodeMode: z.enum(["major", "exact"]),
+    execute: z.literal(true).optional(),
     operation: operationSchema,
   })
   .strict();

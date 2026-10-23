@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { GitHubMaintenanceClient } from "../src/lib/connectors/github-maintenance";
 import { ApiError } from "../src/lib/http";
+import { validateUpdate } from "./validate-update";
 import { maintenanceToken } from "../src/lib/maintenance-credentials";
 import {
   maintenanceBranch,
@@ -465,6 +466,8 @@ export async function runMaintenanceWorker(
   raw: unknown,
   client: GitHubMaintenanceClient,
   allowedRepositories: string[],
+  validate: typeof validateUpdate = validateUpdate,
+  regenerate: typeof regenerateDependencies = regenerateDependencies,
 ) {
   const payload = workerPayloadSchema.parse(raw);
   if (
@@ -475,6 +478,8 @@ export async function runMaintenanceWorker(
   )
     throw new ApiError("Dépôt non autorisé sur cet exécuteur.", 403);
   const prefix = client.repo(payload.repository);
+  if (payload.execute && payload.operation.kind !== "all")
+    throw new ApiError("Une exécution exige une mise à jour groupée.");
   const branch = maintenanceBranch(payload.id);
   const existingPulls = await client.request(
     `${prefix}/pulls?state=all&head=${encodeURIComponent(`${payload.repository.split("/")[0]}:${branch}`)}&per_page=10`,
@@ -512,7 +517,7 @@ export async function runMaintenanceWorker(
     const changed =
       payload.operation.kind === "node"
         ? nodeFileChanges(snapshot, payload.operation.version, payload.nodeMode)
-        : await regenerateDependencies(client, payload, snapshot);
+        : await regenerate(client, payload, snapshot);
     changes = [...changed]
       .filter(([path, content]) => content !== snapshot.files.get(path))
       .map(([path, content]) => ({
@@ -568,6 +573,17 @@ export async function runMaintenanceWorker(
       ref: `refs/heads/${branch}`,
       sha: commit.sha,
     });
+  if (payload.execute) {
+    const candidate = existingBranch?.object.sha || commit.sha;
+    await validate(payload, candidate);
+    if (await client.branch(payload.repository, payload.baseBranch) !== payload.baseSha)
+      throw new ApiError("La source a changé pendant la vérification. Aucune publication effectuée.", 409);
+    await client.request(`${prefix}/git/refs/heads/${encodeURIComponent(payload.baseBranch)}`, "PATCH", {
+      sha: candidate,
+      force: false,
+    });
+    return { commitSha: candidate };
+  }
   const pull = await client.request(`${prefix}/pulls`, "POST", {
     title,
     head: branch,

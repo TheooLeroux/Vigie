@@ -3,8 +3,8 @@ import { z } from "zod";
 import { auditActor } from "./audit-context";
 import { database, get, list, log, transaction } from "./db";
 import { ApiError } from "./http";
-import { railwayState } from "./railway";
-import { vercelState } from "./vercel";
+import { railwayState, synchronizeRailway } from "./railway";
+import { vercelState, synchronizeVercel } from "./vercel";
 import type { Project } from "./types";
 import {
   GitHubMaintenanceClient,
@@ -572,9 +572,18 @@ export async function updateLatestMaintenance(
     .object({
       targetId: z.string().max(500),
       approved: z.literal(true),
+      execute: z.literal(true).optional(),
     })
     .strict()
     .parse(raw);
+  if (input.execute) {
+    const target = (await maintenanceTargets()).find((item) => item.id === input.targetId);
+    if (target && Date.now() - Date.parse(target.observedAt) > 24 * 3600_000) {
+      const connectionId = target.id.split(":")[1];
+      if (target.provider === "Railway") await synchronizeRailway(connectionId, transport);
+      else await synchronizeVercel(connectionId, transport);
+    }
+  }
   const inspection = await inspectMaintenance(input.targetId, transport);
   const db = await storage();
   const lock = (await db
@@ -584,6 +593,18 @@ export async function updateLatestMaintenance(
     | undefined;
   if (lock) {
     const existing = await storedJob(lock.job_id);
+    if (input.execute && existing.payload.execute && existing.status === "failed") {
+      const closed = await closeMaintenance(existing.id, transport);
+      if (closed.status !== "closed")
+        throw new ApiError("Arrêt en cours. Réessayez dans quelques instants.", 409);
+      return updateLatestMaintenance(input, transport);
+    }
+    if (input.execute && !existing.payload.execute) {
+      const closed = await closeMaintenance(existing.id, transport);
+      if (closed.status !== "closed")
+        throw new ApiError("Arrêt de l’ancienne préparation en cours. Réessayez dans quelques instants.", 409);
+      return updateLatestMaintenance(input, transport);
+    }
     if (existing.targetId !== input.targetId)
       throw new ApiError(
         "Une mise à jour est déjà en cours sur un autre service de ce dépôt.",
@@ -649,6 +670,10 @@ export async function updateLatestMaintenance(
   );
   if (job.payload.baseSha !== inspection.baseSha)
     throw new ApiError("La branche a changé pendant la recherche des versions. Relancez l’analyse.", 409);
+  if (input.execute) {
+    job.payload.execute = true;
+    await saveJob(job);
+  }
   return {
     job: await approveMaintenance(job.id, { approved: true }, transport),
     current: false,
@@ -856,6 +881,37 @@ export async function refreshMaintenance(
   const job = await storedJob(id);
   if (job.status === "planned") return job;
   const client = clientFor(job.payload.repository, transport);
+  if (job.payload.execute) {
+    if (job.status === "closed") return job;
+    if (job.status === "merged") {
+      if (job.deployment !== "observed") {
+        const connectionId = job.targetId.split(":")[1];
+        if (job.provider === "Railway") await synchronizeRailway(connectionId);
+        else await synchronizeVercel(connectionId);
+        const target = (await maintenanceTargets()).find((item) => item.id === job.targetId);
+        if (target?.commit === job.mergeSha) job.deployment = "observed";
+      }
+      return saveJob(job);
+    }
+    const run = await workflowRun(job, transport);
+    if (run?.status === "completed") {
+      if (run.conclusion !== "success") {
+        job.status = "failed";
+        job.error = "La mise à jour a échoué. La version publiée n’est pas présumée modifiée ; consultez le diagnostic technique.";
+      } else {
+        const commitSha = await client.branch(job.payload.repository, maintenanceBranch(job.id));
+        const commit = await client.request(`${client.repo(job.payload.repository)}/git/commits/${commitSha}`);
+        if (commit.parents?.[0]?.sha !== job.payload.baseSha ||
+          !String(commit.message).includes(`Vigie maintenance job ${job.id}`))
+          throw new ApiError("Résultat de mise à jour incohérent.", 409);
+        job.status = "merged";
+        job.mergeSha = commitSha;
+        job.deployment = "not-verified";
+        job.error = undefined;
+      }
+    }
+    return saveJob(job);
+  }
   const [pull, run] = await Promise.all([
     pullState(job, client),
     workflowRun(job, transport),

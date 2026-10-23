@@ -27,7 +27,7 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Préparer une PR sans exécuter le code de la cible
+      - name: Mettre à jour et publier après vérification isolée
         run: node --import tsx scripts/maintenance-worker.ts
         env:
           VIGIE_MAINTENANCE_JOB: ${{ inputs.job }}

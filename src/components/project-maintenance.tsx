@@ -19,11 +19,7 @@ export function ProjectMaintenance({
         <div>
           <h2>Mises à jour</h2>
           <p>
-            Un clic par service pour préparer Node LTS et toutes les dépendances
-            aux dernières versions stables.
-          </p>
-          <p>
-            Une seule PR, sans choix de versions. Aucun déploiement direct en production.
+            Node et dépendances : dernières versions stables.
           </p>
         </div>
       </div>

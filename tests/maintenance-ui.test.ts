@@ -17,11 +17,8 @@ test("Fiche projet : parcours rapide visible, sans écriture au rendu", () => {
     }),
   );
   assert.match(html, /Mises à jour de Alpha &amp; Beta/);
-  assert.match(html, /Un clic par service/);
-  assert.match(html, /Une seule PR, sans choix de versions/);
-  assert.match(html, /<details class="maintenance-advanced"><summary>Options avancées/);
-  assert.doesNotMatch(html, /<details class="maintenance-advanced" open/);
-  assert.match(html, /Aucun déploiement direct en production/);
+  assert.match(html, /Node et dépendances/);
+  assert.doesNotMatch(html, /\bPR\b|Options avancées|Plan et portée|fusion/i);
   assert.equal(requests, 0);
 });
 
@@ -36,16 +33,18 @@ test("Parcours rapide : un bouton par service, blocages et verrou partagé visib
   }));
   const state = { configured: true, targets, jobs: [] } as unknown as MaintenanceState;
   const html = render(state);
-  assert.match(html, /aria-label="Tout mettre à jour — Frontend"/);
-  assert.match(html, /aria-label="Tout mettre à jour — Documentation" disabled/);
-  assert.match(html, /sans fusion ni déploiement en production/);
+  assert.match(html, /aria-label="Mettre à jour — Frontend"/);
+  assert.match(html, /aria-label="Mettre à jour — Documentation" disabled/);
+  assert.match(html, /publie et déclenche son déploiement/);
   assert.doesNotMatch(html, /<select/);
   assert.equal(writes, 0);
   state.jobs = [{ status: "pull_request", payload: { repository: "TEAM/APP" } }] as MaintenanceState["jobs"];
-  assert.match(render(state), /aria-label="Tout mettre à jour — Frontend" disabled/);
-  assert.match(render(state), /Une préparation existe déjà/);
+  assert.doesNotMatch(render(state), /aria-label="Mettre à jour — Frontend" disabled/);
+  state.jobs = [{ status: "queued", payload: { repository: "TEAM/APP", execute: true } }] as MaintenanceState["jobs"];
+  assert.match(render(state), /aria-label="Mettre à jour — Frontend" disabled/);
+  assert.match(render(state), /Mise à jour en cours/);
   state.jobs = [];
-  assert.match(render(state, true), /aria-label="Tout mettre à jour — Frontend" disabled/);
+  assert.match(render(state, true), /aria-label="Mettre à jour — Frontend" disabled/);
 });
 
 test("Fiche projet : services et suivi strictement limités au projet choisi", () => {
