@@ -43,6 +43,14 @@ Les accès existants sont réutilisés : `VIGIE_MAINTENANCE_GITHUB_TOKENS` (ou j
 dédié unique), `VIGIE_MAINTENANCE_REPOSITORIES`,
 `VIGIE_MAINTENANCE_RUNNER_REPOSITORY`, `VIGIE_MAINTENANCE_RUNNER_REF`, et les secrets
 de l'environnement GitHub `vigie-maintenance`. Aucun jeton n'est envoyé au client.
+Un jeton supplémentaire peut être stocké séparément sous
+`VIGIE_MAINTENANCE_GITHUB_TOKEN_<PROPRIETAIRE>` (majuscules, tirets remplacés par
+des underscores), par exemple `VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140`.
+Il est transmis explicitement au préparateur dans le workflow. Cela permet de
+conserver le dictionnaire sensible existant sans devoir le relire ou l'écraser.
+Une entrée de dictionnaire spécifique à un dépôt reste prioritaire, puis viennent
+le jeton séparé du propriétaire, l'entrée propriétaire du dictionnaire et le
+jeton unique historique.
 Les tables existantes et l'historique sont conservés, sans nouvelle migration.
 
 Ce parcours concerne les projets Node GitHub npm/pnpm compatibles Vercel/Railpack.

@@ -16,7 +16,9 @@ export function maintenanceToken(repository: string) {
   const owner = entries.find(
     ([key]) => key.toLowerCase() === repository.split("/")[0].toLowerCase(),
   )?.[1];
-  const token = specific || owner || process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN;
+  const ownerKey = repository.split("/")[0].toUpperCase().replaceAll("-", "_");
+  const separate = process.env[`VIGIE_MAINTENANCE_GITHUB_TOKEN_${ownerKey}`];
+  const token = specific || separate || owner || process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN;
   return typeof token === "string" && /^[!-~]{10,2000}$/.test(token)
     ? token
     : null;

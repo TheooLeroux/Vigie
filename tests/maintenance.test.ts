@@ -1068,6 +1068,29 @@ test("Propriétaires GitHub : identifiants distincts sans transmission au regist
     delete process.env.VIGIE_MAINTENANCE_GITHUB_TOKENS;
   }
 });
+test("Jeton propriétaire séparé : ajout Janssen sans remplacer Theoo ni une entrée de dépôt", () => {
+  const previousMap = process.env.VIGIE_MAINTENANCE_GITHUB_TOKENS;
+  const previousOwner = process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140;
+  try {
+    process.env.VIGIE_MAINTENANCE_GITHUB_TOKENS = JSON.stringify({
+      TheooLeroux: "original-theoo-test-token",
+      Janssen76140: "old-janssen-test-token",
+      "Janssen76140/specific": "specific-repository-test-token",
+    });
+    process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140 = "separate-janssen-test-token";
+    assert.equal(maintenanceToken("TheooLeroux/Vigie"), "original-theoo-test-token");
+    assert.equal(maintenanceToken("janssen76140/project"), "separate-janssen-test-token");
+    assert.equal(maintenanceToken("Janssen76140/specific"), "specific-repository-test-token");
+    process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140 = "invalid token";
+    assert.equal(maintenanceToken("Janssen76140/project"), null);
+  } finally {
+    if (previousMap === undefined) delete process.env.VIGIE_MAINTENANCE_GITHUB_TOKENS;
+    else process.env.VIGIE_MAINTENANCE_GITHUB_TOKENS = previousMap;
+    if (previousOwner === undefined) delete process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140;
+    else process.env.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140 = previousOwner;
+  }
+});
+
 test("Fusion asynchrone : attente et verrou conservés, sans double demande ni faux succès", async () => {
   const fake = fakeGitHub({ mergePending: true });
   const job = await planned(await fixtureTarget(), fake);
