@@ -41,6 +41,19 @@ test("Docker réel : un test en échec arrête la mise à jour avant publication
   try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /a échoué/); }
   finally { await rm(folder, { recursive: true, force: true }); }
 });
+test("Docker réel : une alerte de sécurité arrête le parcours avant les scripts du projet", docker, async () => {
+  const { folder, names } = await fixture(undefined, "node -e \"require('node:fs').writeFileSync('executed.txt','unexpected')\"");
+  let validated = false;
+  try {
+    await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion, fetch, [], undefined, {
+      resolved: async () => { throw new Error("security-policy-blocked"); },
+      image: async () => { throw new Error("image must not run"); },
+      validated: async () => { validated = true; },
+    }), /security-policy-blocked/);
+    await assert.rejects(readFile(join(folder, "executed.txt")));
+    assert.equal(validated, false);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 
 test("Docker réel : un conflit de dépendances est résolu sans forcer l’installation", docker, async () => {
   const { folder, names } = await fixture();

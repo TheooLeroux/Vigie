@@ -46,6 +46,11 @@ export function dockerPackages(source: string) {
   }
   return Object.fromEntries(packages);
 }
+export function dockerRuntimeBase(source: string) {
+  const bases = replacements(source).filter(item => item.image);
+  const last = bases.at(-1)!;
+  return `node:${last.version}${last.suffix}`;
+}
 export function rewriteDockerfile(source: string, nodeVersion: string, versions: Record<string, string>) {
   if (!stableVersion(nodeVersion)) throw new ApiError("Version Node invalide pour le Dockerfile.");
   let result = source;
@@ -64,7 +69,7 @@ export function versionOnlyDockerfile(before: string, after: string) {
   } catch { return false; }
 }
 
-export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string) {
+export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
   const prefix = root ? root + "/" : "", source = await readFile(join(folder, prefix + "Dockerfile"), "utf8");
   replacements(source);
   const expose = [...source.matchAll(/^\s*EXPOSE\s+(\d+)(?:\/tcp)?\s*$/gim)].at(-1);
@@ -84,6 +89,7 @@ export async function validateDockerfile(folder: string, root: string, names: st
       await copyFile(origin, destination);
     }
     await runCommand("docker", ["build", "--pull", "--tag", image, "--file", join(context, "Dockerfile"), context], { env, timeout: 15 * 60_000 });
+    await inspectImage?.(image);
     const server = await readFile(join(context, "server.js"), "utf8").catch(() => "");
     const gatedDocs = server.includes("process.env.DOCS_COOKIE_SECRET") && server.includes("process.env.DOCS_GATE_URL") && server.includes("/healthz");
     const fixtureEnv = gatedDocs ? ["--env=DOCS_COOKIE_SECRET=vigie-isolated-validation-not-a-production-secret", "--env=DOCS_GATE_URL=https://vigie.invalid/api/auth/docs-gate", "--env=PUBLIC_DOCS_URL=https://vigie.invalid"] : [];

@@ -89,6 +89,23 @@ test("Mises à jour : un seul exécuteur, échec avant publication sans toucher 
   assert.equal((await readUpdateRun(run.id))?.stage, "failed");
   assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
 });
+test("Mises à jour : une installation des scanners en échec est enregistrée et libère le verrou", async () => {
+  const { project } = await fixture();
+  const run = await startProjectUpdate({ projectId: project.id }, async () => {});
+  const previous = process.env.VIGIE_UPDATES_RUNNER_SETUP_OK;
+  process.env.VIGIE_UPDATES_RUNNER_SETUP_OK = "false";
+  let called = false;
+  try {
+    await executeUpdate(run.id, async () => { called = true; }, undefined, noRefresh);
+    assert.equal(called, false);
+    assert.equal((await readUpdateRun(run.id))?.stage, "failed");
+    assert.match((await readUpdateRun(run.id))!.message, /outils de sécurité/);
+    assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.VIGIE_UPDATES_RUNNER_SETUP_OK;
+    else process.env.VIGIE_UPDATES_RUNNER_SETUP_OK = previous;
+  }
+});
 test("Mises à jour : échec après publication conserve les références et interdit une relance aveugle", async () => {
   const { project } = await fixture();
   const run = await startProjectUpdate({ projectId: project.id }, async () => {});

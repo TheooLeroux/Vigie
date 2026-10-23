@@ -16,6 +16,23 @@ export type UpdateTarget = {
   builder?: string;
 };
 export type UpdateStage = "queued" | "checking" | "updating" | "publishing" | "verifying" | "completed" | "failed" | "attention";
+export type SecurityFinding = {
+  id: string;
+  aliases: string[];
+  package: string;
+  version: string;
+  severity: "critical" | "high" | "moderate" | "low" | "unknown";
+  scope?: string;
+};
+export type UpdateCheck = {
+  tool: "OSV" | "Trivy" | "WPScan" | "Validation";
+  phase: "before" | "candidate" | "after";
+  checkedAt: string;
+  scope: string;
+  status: "passed" | "warning" | "blocked";
+  message: string;
+  findings: SecurityFinding[];
+};
 export type UpdateResult = {
   targetId: string;
   name: string;
@@ -27,6 +44,7 @@ export type UpdateResult = {
   previousDeploymentId?: string;
   backup?: string;
   warnings: string[];
+  checks?: UpdateCheck[];
 };
 export type UpdateRun = {
   id: string;

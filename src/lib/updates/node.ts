@@ -68,13 +68,14 @@ export async function upgradeManifest(manifest: Record<string, any>, nodeVersion
   return compatibleVersions(manifest, nodeVersion, transport);
 }
 export function managerCommands(manifest: Record<string, any>, names: string[]) {
+  const additional = ["test:integration", "test:e2e"].filter(name => manifest.scripts?.[name]);
   const declared = typeof manifest.packageManager === "string" ? manifest.packageManager.split("+")[0] : "";
   if (names.includes("bun.lock") || names.includes("bun.lockb") || manifest.engines?.bun) throw new ApiError("Ce projet utilise Bun : ce parcours est réservé à Node.");
   if (declared.startsWith("pnpm@") || names.includes("pnpm-lock.yaml")) {
     const version = declared.startsWith("pnpm@") ? declared.slice(5) : "12.15.0";
     if (!stableVersion(version)) throw new ApiError("Version de pnpm non stable ou non précisée.");
     const tool = `npx --yes --package=pnpm@${version} -- pnpm`;
-    return { lock: "pnpm-lock.yaml", resolve: `${tool} install --lockfile-only --ignore-scripts --strict-peer-dependencies`, validate: `${tool} install --frozen-lockfile --strict-peer-dependencies && ${tool} run --if-present typecheck && ${tool} run --if-present test && ${tool} run --if-present build` };
+    return { lock: "pnpm-lock.yaml", resolve: `${tool} install --lockfile-only --ignore-scripts --strict-peer-dependencies`, validate: `${tool} install --frozen-lockfile --strict-peer-dependencies && ${tool} run --if-present typecheck && ${tool} run --if-present test && ${tool} run --if-present build` + additional.map(name => ` && ${tool} run ${name}`).join("") };
   }
   if (declared.startsWith("yarn@") || names.includes("yarn.lock")) {
     const version = declared.startsWith("yarn@") ? declared.slice(5) : "1.22.22";
@@ -84,7 +85,7 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
     const mode = Number(version.split(".")[0]) >= 4 ? "skip-build" : "skip-builds";
     const resolve = modern ? `YARN_ENABLE_IMMUTABLE_INSTALLS=false ${tool} install --mode=${mode}` : `${tool} install --ignore-scripts`;
     const install = modern ? `${tool} install --immutable` : `${tool} install --frozen-lockfile --force`;
-    const scripts = ["typecheck", "test", "build"].filter(name => manifest.scripts?.[name]).map(name => `${tool} run ${name}`);
+    const scripts = ["typecheck", "test", "build", ...additional].filter(name => manifest.scripts?.[name]).map(name => `${tool} run ${name}`);
     return { lock: "yarn.lock", resolve, validate: [install, ...scripts].join(" && ") };
   }
   if (declared && !declared.startsWith("npm@")) throw new ApiError("Gestionnaire de dépendances non pris en charge.");
@@ -93,9 +94,14 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
   const npmVersion = declared ? declared.slice(4) : null;
   if (npmVersion && !stableVersion(npmVersion)) throw new ApiError("Version de npm non stable ou non précisée.");
   const tool = npmVersion ? `npx --yes --package=npm@${npmVersion} -- npm` : "npm";
-  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts --strict-peer-deps --no-audit --no-fund`, validate: `${tool} ci --strict-peer-deps --no-audit --no-fund && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` };
+  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts --strict-peer-deps --no-audit --no-fund`, validate: `${tool} ci --strict-peer-deps --no-audit --no-fund && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
 }
-export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: { limits: Map<string, Record<string, string>>; attempt: number } = { limits: new Map(), attempt: 0 }): Promise<{ allowed: Set<string>; warnings: string[] }> {
+export type NodeUpdateChecks = {
+  resolved: (names: string[]) => Promise<void>;
+  image: (root: string, image: string) => Promise<void>;
+  validated: (root: string, scripts: string[]) => Promise<void>;
+};
+export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: { limits: Map<string, Record<string, string>>; attempt: number } = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
     if (!/(^|\/)(Dockerfile|mise\.toml|\.tool-versions|railpack\.json)$/.test(name)) return false;
@@ -155,6 +161,7 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
   for (const check of checks) await isolated(check.root, check.resolve);
   for (const [path, content] of intended) if (await readFile(join(folder, path), "utf8") !== content) throw new ApiError("Le gestionnaire a modifié un manifeste au-delà des versions demandées.");
   const resolvedFiles = await snapshotSources(folder, [...allowed]);
+  await security?.resolved([...new Set([...names, ...allowed])]);
   for (const check of checks) {
     try { await isolated(check.root, check.validate, check.packages, check.environment); }
     catch (error) {
@@ -178,12 +185,13 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
         if (content === null) await rm(join(folder, name), { force: true });
         else await writeFile(join(folder, name), content);
       }
-      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { limits, attempt: retry.attempt + 1 });
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { limits, attempt: retry.attempt + 1 }, security);
       result.warnings.push(...held.map(name => `${name} : montée majeure écartée après les tests ; dernière version compatible de la branche actuelle retenue.`));
       return result;
     }
+    await security?.validated(check.root, ["typecheck", "test", "build", "test:integration", "test:e2e"].filter(name => check.original.scripts?.[name]));
   }
   await changedSources(folder, resolvedFiles, new Set());
-  for (const check of checks.filter(check => check.docker)) await validateDockerfile(folder, check.root, [...new Set([...names, ...allowed])], nodeVersion);
+  for (const check of checks.filter(check => check.docker)) await validateDockerfile(folder, check.root, [...new Set([...names, ...allowed])], nodeVersion, security ? image => security.image(check.root, image) : undefined);
   return { allowed, warnings };
 }

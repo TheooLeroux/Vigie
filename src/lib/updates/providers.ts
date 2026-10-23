@@ -132,5 +132,6 @@ export async function checkPublicSite(value: string, depth = 0): Promise<void> {
     request.end();
   });
   if ([301, 302, 303, 307, 308].includes(result.status) && result.location) return checkPublicSite(new URL(result.location, url).href, depth + 1);
+  if ([401, 403].includes(result.status)) throw new ApiError("Le contrôle vise une page protégée. Configurez une URL de santé publique chez l’hébergeur (par exemple /healthz), sans désactiver l’authentification.", 502);
   if (result.status !== 200 || /There has been a critical error|Il y a eu une erreur critique|Fatal error:/.test(result.content)) throw new ApiError(`Le contrôle du site échoue (HTTP ${result.status}). Une vérification est nécessaire.`, 502);
 }

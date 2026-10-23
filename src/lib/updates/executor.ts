@@ -16,8 +16,10 @@ import { runCommand } from "./process";
 import { readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
-import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage } from "./types";
-import { versionOnlyDockerfile } from "./dockerfile";
+import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
+import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
+import { requireSecurityPass, scanDockerImage, scanNodeSources, securityCheck } from "./security";
+import { checkWordPressRequirements, parseWordPressPlan, wordPressScanner, wordpressPlanScript } from "./wordpress-security";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -90,10 +92,36 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       if (/(_auth\w*|npmAuthToken|npmAuthIdent|password|token)\s*[:=]/i.test(await readFile(join(sourceFolder, name), "utf8"))) throw new ApiError("Les sources contiennent des identifiants de registre. Utilisez un accès dédié avant l’automatisation.");
     }
     const before = await snapshotSources(sourceFolder, names);
+    const roots = targets.map(target => target.root);
+    async function record(check: UpdateCheck, selected = results) {
+      for (const result of selected) { result.checks ||= []; result.checks.push(check); }
+      await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
+      requireSecurityPass(check);
+    }
+    await progress("checking", "Analyse de sécurité des dépendances actuelles.");
+    const baseline = await scanNodeSources(sourceFolder, roots, names);
+    await record(securityCheck("OSV", "before", "Dépendances verrouillées des services sélectionnés", baseline));
+    const imageBaselines = new Map<string, SecurityFinding[]>();
+    for (const root of [...new Set(roots)]) {
+      const dockerfile = (root ? root + "/" : "") + "Dockerfile";
+      if (!names.includes(dockerfile)) continue;
+      const image = dockerRuntimeBase(await readFile(join(sourceFolder, dockerfile), "utf8"));
+      const findings = (await scanDockerImage(image, undefined, true)).map(entry => ({ ...entry, scope: root }));
+      imageBaselines.set(root, findings);
+      await record(securityCheck("Trivy", "before", `Image de base actuelle ${image} (hors code applicatif)`, findings), results.filter((_, index) => targets[index].root === root));
+    }
     await progress("updating", "Actualisation de Node et des dépendances, puis validation isolée.");
-    const prepared = await prepareNodeSources(sourceFolder, targets.map(target => target.root), names, version, fetch, targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root));
+    const prepared = await prepareNodeSources(sourceFolder, roots, names, version, fetch, targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root), undefined, {
+      resolved: async resolvedNames => { await record(securityCheck("OSV", "candidate", "Dépendances directes et transitives verrouillées", await scanNodeSources(sourceFolder, roots, resolvedNames), baseline)); },
+      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanDockerImage(image)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
+      validated: async (root, scripts) => {
+        const browser = scripts.includes("test:e2e"), tests = scripts.some(name => name === "test" || name === "test:integration");
+        await record({ tool: "Validation", phase: "candidate", scope: root || "racine", checkedAt: new Date().toISOString(), status: browser && tests ? "passed" : "warning", message: `Scripts réussis : ${scripts.join(", ")}. ${!browser ? "Aucun parcours navigateur test:e2e déclaré : les parcours métier ne sont pas certifiés." : "Le périmètre navigateur dépend des assertions du projet."} ${!tests ? "Aucun test unitaire ou d’intégration déclaré." : ""}`, findings: [] }, results.filter((_, index) => targets[index].root === root));
+      },
+    });
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     for (const result of results) result.warnings.push(...prepared.warnings);
+    for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     if (!changes.length) {
       for (const result of results) { result.stage = "completed"; result.message = "Node et les dépendances sont déjà à jour."; }
       return;
@@ -144,12 +172,24 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress) {
+  if (!process.env.VIGIE_UPDATES_WPSCAN_TOKEN) throw new ApiError("Configurez le jeton WPScan sur l’exécuteur avant la mise à jour WordPress. Aucun site n’a été modifié.", 503);
   await checkPublicSite(target.url!);
   await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
   const fresh = (await hostingInstallation(target.remoteId)).inventory;
   if (!fresh || fresh.source !== "wordpress-observer" || fresh.collectionMode === "early" || !fresh.php || fresh.error || !fresh.observedAt || Date.now() - Date.parse(fresh.observedAt) > 5 * 60_000) throw new ApiError("Un relevé WordPress récent avec la version PHP web est nécessaire avant la mise à jour.");
   if (fresh.site?.multisite || fresh.configuration?.fileModsDisabled) throw new ApiError("La configuration WordPress actuelle ne permet pas cette mise à jour automatique.");
+  if (fresh.plugins.some(plugin => plugin.mustUse)) result.warnings.push("Extensions MU présentes : elles ne sont ni mises à jour ni qualifiées automatiquement ; une recette spécifique reste nécessaire.");
   await withWordPressUpdater(target, async (execute, username) => {
+    const plan = parseWordPressPlan(await execute(wordpressPlanScript(target.root)));
+    checkWordPressRequirements(plan);
+    const scan = wordPressScanner();
+    const baseline = await scan(plan, false);
+    result.checks = [securityCheck("WPScan", "before", "WordPress, extensions et thèmes installés", baseline)];
+    await progress("checking", "Vérification de sécurité des versions WordPress candidates.");
+    const candidate = securityCheck("WPScan", "candidate", "Versions WordPress prévues et exigences PHP/WordPress", await scan(plan, true), baseline);
+    result.checks.push(candidate);
+    await progress("checking", "Sécurité WordPress et prérequis vérifiés.");
+    requireSecurityPass(candidate);
     await progress("checking", "Vérification de WordPress et sauvegarde des fichiers et de la base.");
     const backupOutput = await execute(wordpressBackupScript(target.root, username, run.id, target.url!, fresh.php!.version));
     const backup = backupOutput.match(/^VIGIE_BACKUP=(\/home\/[\w-]+\/\.vigie-backups\/[a-f0-9-]{36}\/[a-f0-9]{12})$/m)?.[1];
@@ -157,12 +197,21 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
     result.backup = backup;
     result.stage = "publishing";
     await progress("publishing", "Sauvegarde vérifiée. Mise à jour de WordPress, des extensions et des thèmes.");
-    const output = await execute(wordpressUpdateScript(target.root, backup));
+    const output = await execute(wordpressUpdateScript(target.root, backup, plan));
     const plugins = output.match(/^VIGIE_PLUGINS=(\d+)$/m), themes = output.match(/^VIGIE_THEMES=(\d+)$/m);
     if (!plugins || !themes || Number(plugins[1]) || Number(themes[1])) throw new ApiError("Certains composants WordPress n’ont pas pu être mis à jour. La sauvegarde est conservée.");
     result.stage = "verifying";
     await progress("verifying", "Contrôle du site après mise à jour WordPress.");
     await checkPublicSite(target.url!);
+    const installed = parseWordPressPlan(await execute(wordpressPlanScript(target.root)));
+    if (installed.wordpress.current !== plan.wordpress.target || ["plugins", "themes"].some(kind => {
+      const key = kind as "plugins" | "themes";
+      return installed[key].length !== plan[key].length || plan[key].some(item => installed[key].find(next => next.slug === item.slug)?.current !== item.target);
+    })) throw new ApiError("Les versions WordPress installées ne correspondent pas au plan vérifié. Sauvegarde conservée.");
+    const finalCheck = securityCheck("WPScan", "after", "Versions réellement installées après mise à jour", await scan(installed, false), baseline);
+    result.checks.push(finalCheck);
+    await progress("verifying", "Contrôle de sécurité WordPress après installation.");
+    requireSecurityPass(finalCheck);
     result.stage = "completed";
     result.message = "WordPress, extensions et thèmes mis à jour ; contrôle HTTPS réussi.";
     result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
@@ -188,6 +237,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
   try {
     await withAuditActor(run.actor, async () => {
       await progress("checking", "Vérification des accès et de la configuration du projet.");
+      if (process.env.VIGIE_UPDATES_RUNNER_SETUP_OK !== undefined && process.env.VIGIE_UPDATES_RUNNER_SETUP_OK !== "true") throw new ApiError("L’installation vérifiée des outils de sécurité ou de déploiement a échoué. Aucun service n’a été modifié.", 503);
       const current = await updateTargets(run.projectId);
       for (const target of run.targets) {
         const next = current.find(item => item.id === target.id);
@@ -207,7 +257,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
         else await executeGroup(run, targets, results, progress);
       }
       run.stage = "completed";
-      run.message = run.results.some(result => result.warnings.length) ? "Mise à jour terminée. Quelques précisions sont disponibles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
+      run.message = run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       await log("live", "updates.completed", run.message, run.projectId);
     });
   } catch (error) {

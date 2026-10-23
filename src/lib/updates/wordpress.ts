@@ -10,6 +10,7 @@ import { ApiError } from "../http";
 import { readUpdateSource } from "./storage";
 import { runCommand } from "./process";
 import type { UpdateTarget } from "./types";
+import type { WordPressUpdatePlan } from "./wordpress-security";
 
 export function shellQuote(value: string) { return `'${value.replace(/'/g, `'"'"'`)}'`; }
 export function wordpressBackupScript(root: string, username: string, runId: string, url?: string, webPhp?: string) {
@@ -44,7 +45,16 @@ sha256sum -c SHA256SUMS >/dev/null
 printf 'VIGIE_BACKUP=%s\\n' "$backup"
 `;
 }
-export function wordpressUpdateScript(root: string, backup: string) {
+export function wordpressUpdateScript(root: string, backup: string, plan?: WordPressUpdatePlan) {
+  const updateCommands = plan ? [
+    `test "$(wp --path="$root" core version)" = ${shellQuote(plan.wordpress.current)}`,
+    ...plan.plugins.map(item => `test "$(wp --path="$root" plugin get ${shellQuote(item.slug)} --field=version)" = ${shellQuote(item.current)}`),
+    ...plan.themes.map(item => `test "$(wp --path="$root" theme get ${shellQuote(item.slug)} --field=version)" = ${shellQuote(item.current)}`),
+    ...(plan.wordpress.target !== plan.wordpress.current ? [`wp --path="$root" core update --version=${shellQuote(plan.wordpress.target)}`] : []),
+    `wp --path="$root" core update-db`,
+    ...plan.plugins.filter(item => item.target !== item.current).map(item => `wp --path="$root" plugin update ${shellQuote(item.slug)} --version=${shellQuote(item.target)}`),
+    ...plan.themes.filter(item => item.target !== item.current).map(item => `wp --path="$root" theme update ${shellQuote(item.slug)} --version=${shellQuote(item.target)}`),
+  ].join("\n") : `wp --path="$root" core update\nwp --path="$root" core update-db\nwp --path="$root" plugin update --all\nwp --path="$root" theme update --all`;
   return `set -eu
 root=${shellQuote(root)}
 backup=${shellQuote(backup)}
@@ -54,10 +64,7 @@ sha256sum -c SHA256SUMS >/dev/null
 test ! -f "$root/.maintenance"
 wp --path="$root" maintenance-mode activate >/dev/null
 trap 'wp --path="$root" maintenance-mode deactivate >/dev/null 2>&1 || true' EXIT
-wp --path="$root" core update
-wp --path="$root" core update-db
-wp --path="$root" plugin update --all
-wp --path="$root" theme update --all
+${updateCommands}
 wp --path="$root" core verify-checksums >/dev/null
 wp --path="$root" cache flush >/dev/null
 if test -f "$root/.maintenance"; then wp --path="$root" maintenance-mode deactivate >/dev/null; fi
