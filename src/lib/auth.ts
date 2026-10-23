@@ -33,7 +33,7 @@ function createAuth() {
     account: { accountLinking: { enabled: false }, encryptOAuthTokens: true },
     telemetry: { enabled: false },
     session: {
-      expiresIn: 60 * 60 * 12,
+      expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 30,
       cookieCache: { enabled: false },
     },

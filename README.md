@@ -17,6 +17,8 @@ Ouvrir http://127.0.0.1:3001. Le serveur écoute uniquement sur l’interface lo
 
 Le plateau et ses API exigent une session Google autorisée. Les deux adresses sont définies dans `.env.local`. L’accès n’est pas ouvert à tout le domaine.
 
+Les nouvelles sessions et leurs cookies durent sept jours. Le seuil de renouvellement reste de trente minutes. Les sessions déjà émises conservent leur ancienne échéance jusqu'à leur renouvellement ou une nouvelle connexion ; un déploiement ne les révoque pas.
+
 Le client OAuth **Vigie — local** est créé dans le projet Google Cloud `vigie-512409`, avec une audience interne à Reborn France. Les identifiants Google et le secret de session sont enregistrés dans le fichier privé `.env.local`. La connexion réelle avec le compte professionnel a été validée le 22 octobre 2026, avec ouverture du parc de 9 sites. L’inventaire et les exports restent refusés sans session. Si la configuration est retirée, les données restent protégées.
 
 Les étapes et URL exactes sont dans [docs/connexion-google.md](docs/connexion-google.md).

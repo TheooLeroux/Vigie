@@ -101,6 +101,18 @@ test("OAuth : le retour Google traverse la garde locale, sans désactiver CSRF a
   assert.match(response.headers.get("location") || "", /connexion|error/);
 });
 
+test("Sessions : durée de sept jours en base et dans le cookie", async () => {
+  const auth = await getAuth();
+  const context = await auth.$context;
+  const fixture = await authFixture();
+  const session = await context.internalAdapter.createSession(fixture.userId);
+  const duration = 7 * 24 * 60 * 60;
+  assert.equal(auth.options.session?.expiresIn, duration);
+  assert.equal(context.authCookies.sessionToken.attributes.maxAge, duration);
+  const lifetime = session.expiresAt.getTime() - session.createdAt.getTime();
+  assert.ok(Math.abs(lifetime - duration * 1000) < 1000);
+});
+
 test("Session réelle persistée : signature, autorisation courante et révocation", async () => {
   const fixture = await authFixture();
   const headers = new Headers({ cookie: fixture.cookie, origin: base });
