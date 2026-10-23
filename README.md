@@ -31,7 +31,7 @@ Les étapes et URL exactes sont dans [docs/connexion-google.md](docs/connexion-g
 - Fiches projets, environnements et services.
 - Ajout en deux parcours : lier un site déjà détecté chez un hébergeur, ou créer une fiche de zéro. Le second parcours crée une fiche Vigie, sans provisionner de service distant.
 - Connexions regroupées par hébergeur, avec sélection o2switch, Vercel ou Railway.
-- Fiche projet en une colonne : suivi technique, puis hébergement, services et historique dans des sections repliables.
+- Fiche projet en une colonne : mises à jour en un clic, suivi technique, puis hébergement, services et historique dans des sections repliables.
 - Liste unique des projets et journal attribué au membre connecté.
 - Activité avec recherche, filtres par projet/type/date et pagination des 100 dernières actions chargées.
 - Backup affiche « Coming soon ».
@@ -54,7 +54,7 @@ Les fiches affichent WordPress et PHP web, extensions/thèmes installés et acti
 
 Les secrets sont chiffrés en AES-256-GCM avec une clé indépendante `VIGIE_CONNECTOR_ENCRYPTION_KEY` (32 octets en hexadécimal), définie dans le `.env.local` privé. Ils ne sont renvoyés ni au navigateur ni dans les exports/journaux. Conserver cette clé séparément des sauvegardes SQLite ; sans elle, il faut saisir de nouveaux jetons. Ne pas la régénérer à chaque démarrage. Le bouton de déconnexion retire le secret local, mais ne révoque pas le jeton chez o2switch.
 
-La recherche affiche la date du relevé et les erreurs. Un échec garde le dernier relevé réussi avec sa date ; une lecture de répertoire en échec conserve la précédente version observée. L’enregistrement d’un nouveau secret lance une recherche ; les recherches suivantes sont manuelles. « Synchroniser les sites » recherche, rattache, installe les connecteurs manquants puis collecte les informations. « Actualiser » dans une fiche ne relève que ce site. Le connecteur vérifie les flux mais n'installe aucune mise à jour. La planification périodique et l'application des mises à jour ne sont pas implémentées.
+La recherche affiche la date du relevé et les erreurs. Un échec garde le dernier relevé réussi avec sa date ; une lecture de répertoire en échec conserve la précédente version observée. L’enregistrement d’un nouveau secret lance une recherche ; les recherches suivantes sont manuelles. « Synchroniser les sites » recherche, rattache, installe les connecteurs manquants puis collecte les informations. « Actualiser » dans une fiche ne relève que ce site. Le connecteur d’inventaire reste en lecture seule ; le parcours de mise à jour utilise un accès SSH distinct, une sauvegarde préalable et WP-CLI. Aucune mise à jour périodique n’est lancée automatiquement.
 
 La procédure de création du jeton est documentée par [o2switch](https://faq.o2switch.fr/cpanel/securite/token-api-cpanel/) ; le jeton possède les droits du compte cPanel. Vigie l'utilise pour les lectures et le dépôt contrôlé de son propre connecteur.
 
@@ -76,13 +76,13 @@ npx tsx scripts/import-site-list.ts C:\Users\theol\Desktop\site.txt --apply
 
 Ce script est une opération locale d’administration. Avant de l’appliquer, conserver une sauvegarde cohérente SQLite. Une sauvegarde privée a été créée dans `.data/backups/` avant l’import du 22 octobre.
 
-## Maintenance — cadrage
+## Mises à jour en un clic
 
 La [matrice des capacités de maintenance](docs/matrice-capacites-maintenance.md) distingue, pour les configurations du parc, la détection actuelle, les mises à jour envisageables, les conditions de retour arrière et les blocages par projet. C'est un état de référence daté, pas un moteur de mise à jour activé ni une autorisation d'intervenir. Les sauvegardes et restaurations du parc restent à qualifier avant toute automatisation des écritures.
 
-L'ancien module d'exécution des mises à jour a été retiré : écrans, routes API, préparateur GitHub Actions et logique de publication. L'inventaire des versions et les connexions Vercel, Railway et o2switch restent disponibles. Aucun nouveau parcours de mise à jour n'est implémenté à ce stade.
+Le nouveau parcours est intégré à chaque fiche projet : **Tout mettre à jour**, progression et résultat, sans écran PR ni choix de versions obligatoire. Il vise Node LTS et les dépendances stables des applications Vercel/Railway, ainsi que WordPress, ses extensions et ses thèmes sur o2switch. Les mises à jour majeures sont incluses lorsque la validation réussit. Voir [le périmètre, l’activation et les limites](docs/mises-a-jour.md).
 
-La migration historique `003-maintenance.sql` est conservée pour préserver l'historique des schémas déjà déployés. Les anciennes tables et traces en base ne sont ni supprimées ni utilisées par l'application. Les secrets GitHub existants restent stockés dans Vercel et GitHub Actions, mais ne sont plus consommés par ce code ; aucune rotation ni suppression d'identifiant n'est effectuée par ce nettoyage.
+La migration `004-updates.sql` ajoute le suivi durable, les verrous d’exécution et les sources chiffrées. Le module est désactivé par défaut : appliquer la migration, configurer l’exécuteur et réaliser un pilote avant l’activation. L’ancienne migration `003-maintenance.sql` et ses traces sont conservées sans réutiliser les anciens jobs ni leurs verrous. Les jetons dédiés existants peuvent être réutilisés par compatibilité, sans rotation ni élargissement automatique de leurs droits.
 
 ## Vérifications
 

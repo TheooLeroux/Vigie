@@ -1,0 +1,40 @@
+name: Vigie updates
+run-name: vigie-update-${{ inputs.run_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Identifiant de la mise à jour enregistrée par Vigie
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: vigie-update-${{ inputs.run_id }}
+  cancel-in-progress: false
+jobs:
+  update:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm install --global @railway/cli@5.71.0
+      - name: Exécuter la mise à jour enregistrée
+        run: node --import tsx scripts/update-worker.ts
+        env:
+          VIGIE_UPDATE_RUN_ID: ${{ inputs.run_id }}
+          VIGIE_UPDATES_ENABLED: "1"
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_UPDATES_GITHUB_TOKENS: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKENS }}
+          VIGIE_UPDATES_GITHUB_TOKEN_JANSSEN76140: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140 }}
+          VIGIE_UPDATES_REPOSITORIES: ${{ vars.VIGIE_MAINTENANCE_REPOSITORIES }}

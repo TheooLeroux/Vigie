@@ -1,0 +1,113 @@
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { auditActor } from "../audit-context";
+import { log, requireProject, transaction } from "../db";
+import { ApiError } from "../http";
+import { dispatchUpdate, githubRequest, updateRunner } from "./github";
+import { readUpdateRun, readUpdateSource, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { updateScope, updateTargets } from "./targets";
+import { activeUpdateStages, type UpdateRun, type UpdateState } from "./types";
+import { currentSourceDeployment } from "./providers";
+import { isPostgres } from "../storage";
+
+export function updatesEnabled() {
+  return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
+}
+export async function projectUpdates(projectId: string): Promise<UpdateState> {
+  const targets = await updateTargets(projectId);
+  const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
+  return { enabled: updatesEnabled(), targets, runs: rows.map(row => JSON.parse(row.data)) };
+}
+const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
+export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate) {
+  const input = startSchema.parse(raw);
+  if (!updatesEnabled()) throw new ApiError("Le service de mise à jour n’est pas encore activé.", 503);
+  const all = await updateTargets(input.projectId);
+  const targets = input.targetIds ? input.targetIds.map(id => {
+    const target = all.find(target => target.id === id);
+    if (!target) throw new ApiError("Ce service ne fait pas partie de ce projet.", 404);
+    return target;
+  }) : all.filter(target => !target.unavailable);
+  if (!targets.length || targets.length > 30 || new Set(targets.map(target => target.id)).size !== targets.length || targets.some(target => target.unavailable)) throw new ApiError(targets.find(target => target.unavailable)?.unavailable || "Choisissez entre 1 et 30 services distincts pouvant être mis à jour.");
+  const now = new Date().toISOString();
+  const candidate: UpdateRun = { id: randomUUID(), projectId: input.projectId, stage: "queued", createdAt: now, updatedAt: now, actor: auditActor() || { name: "Équipe Vigie", email: "" }, targets, results: [], message: "La mise à jour va démarrer." };
+  const db = await updateStorage();
+  const { run, created } = await transaction(async () => {
+    if (isPostgres()) await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(input.projectId);
+    if ((await requireProject(input.projectId, "live")).lifecycle !== "active") throw new ApiError("Projet archivé.", 409);
+    const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=?").all(input.projectId) as { data: string }[];
+    const existing = rows.map(row => JSON.parse(row.data) as UpdateRun).find(run => activeUpdateStages.includes(run.stage));
+    if (existing) return { run: existing, created: false };
+    if (rows.some(row => (JSON.parse(row.data) as UpdateRun).stage === "attention")) throw new ApiError("Une publication précédente doit être vérifiée avant de lancer une nouvelle mise à jour.", 409);
+    await db.prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(candidate.id, candidate.projectId, candidate.stage, JSON.stringify(candidate));
+    for (const scope of [...new Set(targets.map(updateScope))].sort()) {
+      const lock = await db.prepare("INSERT INTO update_locks(scope,run_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING").run(scope, candidate.id);
+      if (!lock.changes) throw new ApiError("Une mise à jour utilise déjà ces sources. Son suivi reste disponible sur le projet concerné.", 409);
+    }
+    await log("live", "updates.started", "Mise à jour du projet demandée.", input.projectId);
+    return { run: candidate, created: true };
+  });
+  if (created) {
+    try { await dispatch(run.id); }
+    catch (error) {
+      run.stage = "queued";
+      run.message = "Le lancement n’a pas été confirmé. Vérifiez l’exécuteur avant de relancer.";
+      if (error instanceof ApiError && /GitHub refuse/.test(error.message)) {
+        run.stage = "failed";
+        run.message = "Le service de mise à jour n’a pas pu démarrer. Vérifiez sa configuration GitHub Actions.";
+      }
+      await transaction(async () => {
+        const changed = await db.prepare("UPDATE update_runs SET stage=?,data=? WHERE id=? AND stage='queued'").run(run.stage, JSON.stringify(run), run.id);
+        if (changed.changes && run.stage === "failed") await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(run.id);
+      });
+    }
+  }
+  return (await readUpdateRun(run.id))!;
+}
+const settingsSchema = z.object({
+  targetId: z.string().min(1).max(300),
+  archive: z.string().max(2_800_000).regex(/^[A-Za-z0-9+/]*={0,2}$/).optional(),
+  filename: z.string().max(120).optional(),
+  sshKey: z.string().trim().min(50).max(20000).optional(),
+  hostKey: z.string().trim().regex(/^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/]+={0,2}$/).max(2000).optional(),
+});
+export async function configureUpdateSource(projectId: string, raw: unknown, readDeployment = currentSourceDeployment) {
+  const input = settingsSchema.parse(raw);
+  const target = (await updateTargets(projectId)).find(target => target.id === input.targetId);
+  if (!target) throw new ApiError("Service introuvable.", 404);
+  if (target.mode === "git") throw new ApiError("Les sources de ce service sont gérées par GitHub.");
+  if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
+  const scope = updateScope(target), db = await updateStorage();
+  const previous = await readUpdateSource(target.id);
+  const settings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
+  if (target.mode === "wordpress" && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
+  await transaction(async () => {
+    if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) throw new ApiError("Attendez la fin de la mise à jour avant de modifier ses accès ou ses sources.", 409);
+    await writeUpdateSource(target.id, projectId, settings);
+    await log("live", "updates.source_configured", `Accès de mise à jour configuré pour ${target.name}.`, projectId);
+  });
+  return { configured: true };
+}
+export async function closeInterruptedUpdate(id: string, raw: unknown) {
+  z.object({ confirmed: z.literal(true) }).parse(raw);
+  const run = await readUpdateRun(id);
+  if (!run) throw new ApiError("Mise à jour introuvable.", 404);
+  await requireProject(run.projectId, "live");
+  if (["completed", "failed"].includes(run.stage)) return run;
+  if (Date.now() - Date.parse(run.updatedAt) < 30 * 60_000) throw new ApiError("La mise à jour peut encore être en cours. Attendez avant de clôturer son suivi.", 409);
+  const runner = updateRunner();
+  if (!runner) throw new ApiError("Accès à l’exécuteur manquant.", 503);
+  const remote = await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-updates.yml/runs?event=workflow_dispatch&per_page=100`, runner.token);
+  const matches = remote.workflow_runs.filter((item: { display_title: string }) => item.display_title === `vigie-update-${id}`);
+  if (!matches.length || matches.some((item: { status: string }) => item.status !== "completed")) throw new ApiError("L’arrêt de l’exécuteur n’est pas confirmé. Vérifiez GitHub Actions.", 409);
+  await transaction(async () => {
+    const current = await readUpdateRun(id);
+    if (current?.updatedAt !== run.updatedAt) throw new ApiError("Le traitement vient de reprendre. Rechargez son suivi.", 409);
+    run.stage = "failed";
+    run.message = "Suivi clôturé après vérification manuelle de l’hébergement. Les modifications déjà publiées sont conservées.";
+    await writeUpdateRun(run);
+    await (await updateStorage()).prepare("DELETE FROM update_locks WHERE run_id=?").run(id);
+    await log("live", "updates.closed", run.message, run.projectId);
+  });
+  return run;
+}

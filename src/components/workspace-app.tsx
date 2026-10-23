@@ -61,6 +61,7 @@ import {
 } from "./ui";
 import { VercelInventoryPanel } from "./vercel-panel";
 import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
+import { ProjectUpdates } from "./project-updates";
 
 type View = "sites" | "clients" | "connections" | "backup" | "activity";
 type Dialog =
@@ -617,6 +618,7 @@ export function WorkspaceApp({
         </div>
         <div className="project-content">
           {p.description && <p className="project-intro">{p.description}</p>}
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onComplete={refresh} />
           <section
             className="project-monitoring"
             aria-label="Suivi technique du projet"

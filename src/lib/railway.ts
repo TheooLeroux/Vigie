@@ -63,6 +63,11 @@ function publicConnection(r: ConnectionRow): RailwayConnection {
 }
 const context = (r: { id: string; workspace_id: string }) =>
   `vigie:railway:v1:${r.id}:${r.workspace_id}`;
+export async function withRailwayCredentials<T>(id: string, run: (token: string, workspaceId: string) => Promise<T>) {
+  const stored = await row(id);
+  if (!stored.secret_cipher) throw new ApiError("Jeton Railway manquant.");
+  return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.workspace_id);
+}
 export async function railwayState(): Promise<RailwayState> {
   const connections = (
     (await (await storage())

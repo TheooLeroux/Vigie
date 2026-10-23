@@ -63,6 +63,11 @@ function connection(r: ConnectionRow): VercelConnection {
 }
 const context = (r: { id: string; team_id: string }) =>
   `vigie:vercel:v1:${r.id}:${r.team_id}`;
+export async function withVercelCredentials<T>(id: string, run: (token: string, teamId: string) => Promise<T>) {
+  const stored = await row(id);
+  if (!stored.secret_cipher) throw new ApiError("Jeton Vercel manquant.");
+  return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.team_id);
+}
 const running = new Set<string>();
 export async function vercelState(): Promise<VercelState> {
   const connections = (

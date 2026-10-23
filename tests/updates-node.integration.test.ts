@@ -1,0 +1,144 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { prepareNodeSources, snapshotSources, changedSources } from "../src/lib/updates/node";
+
+const docker = { skip: process.env.VIGIE_TEST_DOCKER !== "1" };
+const nodeVersion = "24.14.0";
+async function fixture(packageManager?: string, script = "node -e \"if (!require('is-number')(42)) process.exit(1)\"") {
+  const folder = await mkdtemp(join(tmpdir(), "vigie-node-integration-"));
+  const manifest = { name: "vigie-isolated-fixture", version: "1.0.0", private: true, ...(packageManager ? { packageManager } : {}), engines: { node: "22.x" }, dependencies: { "is-number": "6.0.0" }, scripts: { test: script } };
+  await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
+  const names = ["package.json"];
+  if (!packageManager || packageManager.startsWith("npm@")) {
+    names.push("package-lock.json");
+    await writeFile(join(folder, "package-lock.json"), JSON.stringify({ name: manifest.name, version: "1.0.0", lockfileVersion: 3, packages: {} }));
+  }
+  return { folder, names };
+}
+
+for (const manager of ["npm@11.9.0", "pnpm@10.11.0", "yarn@1.22.22", "yarn@4.9.2"]) {
+  test(`Docker réel : dépendances, verrouillage et tests avec ${manager}`, docker, async () => {
+    const { folder, names } = await fixture(manager);
+    try {
+      const before = await snapshotSources(folder, names);
+      const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
+      const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+      assert.equal(manifest.engines.node, "24.x");
+      assert.notEqual(manifest.dependencies["is-number"], "6.0.0");
+      assert.match(manifest.dependencies["is-number"], /^\d+\.\d+\.\d+$/);
+      const changes = await changedSources(folder, before, prepared.allowed);
+      assert.ok(changes.some(file => file.path === "package.json"));
+      assert.ok(changes.some(file => /lock|shrinkwrap/.test(file.path)));
+    } finally { await rm(folder, { recursive: true, force: true }); }
+  });
+}
+
+test("Docker réel : un test en échec arrête la mise à jour avant publication", docker, async () => {
+  const { folder, names } = await fixture(undefined, "node -e \"process.exit(1)\"");
+  try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /a échoué/); }
+  finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : un conflit de dépendances est résolu sans forcer l’installation", docker, async () => {
+  const { folder, names } = await fixture();
+  await writeFile(join(folder, "package.json"), JSON.stringify({ name: "vigie-peer-conflict-fixture", private: true, dependencies: { react: "18.3.1", "react-dom": "18.3.1" }, scripts: { test: "node --version" } }));
+  const transport: typeof fetch = async input => {
+    const url = String(input);
+    if (url.includes("react-dom")) {
+      const item = { version: "18.3.1", peerDependencies: { react: "^18.3.1" } };
+      return Response.json(url.endsWith("/latest") ? item : { versions: { "18.3.1": item } });
+    }
+    return Response.json(url.endsWith("/latest") ? { version: "19.0.0" } : { versions: { "19.0.0": { version: "19.0.0" }, "18.3.1": { version: "18.3.1" } } });
+  };
+  try {
+    const result = await prepareNodeSources(folder, [""], names, nodeVersion, transport);
+    assert.equal(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies.react, "18.3.1");
+    assert.ok(result.warnings.some(warning => warning.includes("react")));
+  }
+  finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : le verrou npm est reconstruit sans conserver un ancien arbre contradictoire", docker, async () => {
+  const { folder, names } = await fixture();
+  await writeFile(join(folder, "package-lock.json"), JSON.stringify({ name: "vigie-isolated-fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { dependencies: { "is-number": "6.0.0" } }, "node_modules/is-number": { version: "6.0.0" }, "node_modules/old-unused-peer": { version: "1.0.0" } } }));
+  try {
+    await prepareNodeSources(folder, [""], names, nodeVersion);
+    const lock = JSON.parse(await readFile(join(folder, "package-lock.json"), "utf8"));
+    assert.equal(lock.packages["node_modules/is-number"].version, "7.0.0");
+    assert.ok(!lock.packages["node_modules/old-unused-peer"]);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : une rupture d’API identifiée conserve la branche compatible sans bloquer les autres mises à jour", docker, async () => {
+  const program = "if(require('is-number/package.json').version.startsWith('7.')){console.error('error TS2614: Module \"is-number\" has no exported member legacy');process.exit(1)}";
+  const { folder, names } = await fixture(undefined, `node -e ${JSON.stringify(program)}`);
+  const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+  manifest.dependencies["is-odd"] = "2.0.0";
+  await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
+  const transport: typeof fetch = async input => {
+    if (String(input).includes("is-odd")) return Response.json({ version: "3.0.1" });
+    return Response.json(String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
+  };
+  try {
+    const result = await prepareNodeSources(folder, [""], names, nodeVersion, transport);
+    const updated = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+    assert.deepEqual(updated.dependencies, { "is-number": "6.0.0", "is-odd": "3.0.1" });
+    assert.ok(result.warnings.some(warning => warning.includes("montée majeure écartée")));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : le repli de compatibilité ne peut pas masquer une altération du code", docker, async () => {
+  const program = "require('fs').writeFileSync('source.js','changed');console.error('error TS2614: Module \"is-number\" has no exported member legacy');process.exit(1)";
+  const { folder, names } = await fixture(undefined, `node -e ${JSON.stringify(program)}`);
+  names.push("source.js");
+  await writeFile(join(folder, "source.js"), "original");
+  try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /hors du périmètre/); }
+  finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : le Dockerfile d’un service indépendant ne bloque pas la racine Node", docker, async () => {
+  const { folder, names } = await fixture();
+  await mkdir(join(folder, "unrelated"));
+  await writeFile(join(folder, "unrelated", "Dockerfile"), "FROM node:20");
+  names.push("unrelated/Dockerfile");
+  try {
+    const before = await snapshotSources(folder, names);
+    const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
+    await changedSources(folder, before, prepared.allowed);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : image multi-étapes, Node, paquet runtime et serveur HTTP validés", docker, async () => {
+  const { folder, names } = await fixture();
+  names.push("Dockerfile", "server.js");
+  await writeFile(join(folder, "Dockerfile"), 'FROM node:22-slim AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm install --ignore-scripts --no-audit --no-fund\nCOPY server.js ./server.js\nFROM node:22-slim AS runner\nWORKDIR /app\nRUN npm install --no-audit --no-fund --no-save express@4.21.2\nCOPY --from=builder /app/server.js ./server.js\nEXPOSE 8080\nCMD ["node","server.js"]\n');
+  await writeFile(join(folder, "server.js"), "if(process.env.DATABASE_URL||process.env.GITHUB_TOKEN||process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY)process.exit(1);const express=require('express');const app=express();app.get('/',(req,res)=>res.send('ok'));app.listen(process.env.PORT||8080);");
+  try {
+    const before = await snapshotSources(folder, names);
+    const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
+    const changes = await changedSources(folder, before, prepared.allowed);
+    const dockerfile = changes.find(file => file.path === "Dockerfile")!.content;
+    assert.equal(dockerfile.match(/node:24\.14\.0-slim/g)?.length, 2);
+    assert.ok(!dockerfile.includes("express@4.21.2"));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : les scripts ne peuvent pas modifier le manifeste validé", docker, async () => {
+  const { folder, names } = await fixture(undefined, "node -e \"require('fs').writeFileSync('package.json', '{}')\"");
+  try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /hors du périmètre/); }
+  finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : un script qui altère du code ne peut pas le publier", docker, async () => {
+  const { folder, names } = await fixture(undefined, "node -e \"require('fs').writeFileSync('source.js', 'changed')\"");
+  names.push("source.js");
+  await writeFile(join(folder, "source.js"), "original");
+  try {
+    const before = await snapshotSources(folder, names);
+    const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
+    await assert.rejects(changedSources(folder, before, prepared.allowed), /hors du périmètre/);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});

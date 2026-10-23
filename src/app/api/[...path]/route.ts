@@ -16,6 +16,9 @@ import {
   disconnectRailway,
 } from "@/lib/railway";
 import { requireSession } from "@/lib/auth";
+import { projectUpdates, startProjectUpdate, configureUpdateSource, closeInterruptedUpdate } from "@/lib/updates/service";
+import { readUpdateSource } from "@/lib/updates/storage";
+import { updateTargets } from "@/lib/updates/targets";
 import {
   hostingConnections,
   saveHostingConnection,
@@ -144,6 +147,16 @@ async function handleRequest(request: Request, context: Context) {
     const [root, id, child] = path;
     const method = request.method;
     if (method === "GET") {
+      if (root === "updates" && id && child === "source" && path.length === 3) {
+        const targets = await updateTargets(z.string().uuid().parse(id));
+        const target = targets.find(target => target.id === url.searchParams.get("targetId"));
+        if (!target || target.mode !== "archive") throw new ApiError("Sources introuvables.", 404);
+        const source = await readUpdateSource(target.id);
+        if (!source?.settings.archive) throw new ApiError("Sources introuvables.", 404);
+        return new Response(Buffer.from(source.settings.archive, "base64"), { headers: { "Content-Type": "application/zip", "Content-Disposition": 'attachment; filename="vigie-sources.zip"', "Cache-Control": "private, no-store" } });
+      }
+      if (root === "updates" && path.length === 1)
+        return Response.json(await projectUpdates(z.string().uuid().parse(url.searchParams.get("projectId"))));
       if (root === "vercel" && path.length === 1)
         return Response.json((await vercelState()));
       if (root === "railway" && path.length === 1)
@@ -265,6 +278,12 @@ async function handleRequest(request: Request, context: Context) {
     }
     if (method === "POST") {
       const raw = await body(request);
+      if (root === "updates" && path.length === 1)
+        return Response.json(await startProjectUpdate(raw), { status: 202 });
+      if (root === "updates" && id && child === "source" && path.length === 3)
+        return Response.json(await configureUpdateSource(z.string().uuid().parse(id), raw));
+      if (root === "updates" && id && child === "close" && path.length === 3)
+        return Response.json(await closeInterruptedUpdate(z.string().uuid().parse(id), raw));
       if (root === "vercel" && path.length === 1)
         return Response.json((await saveVercelConnection(raw)), { status: 201 });
       if (root === "vercel" && id && child === "sync" && path.length === 3)
