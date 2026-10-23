@@ -2,6 +2,21 @@
   display: grid;
   gap: 20px;
 }
+.project-maintenance {
+  display: grid;
+  gap: 16px;
+}
+.project-maintenance-heading {
+  padding: 24px;
+  margin: 0;
+}
+.project-maintenance-heading > div {
+  flex: 1;
+  min-width: 0;
+}
+.project-maintenance-heading .button {
+  flex-shrink: 0;
+}
 .maintenance-intro,
 .maintenance-setup,
 .maintenance-editor,
@@ -113,6 +128,12 @@
   margin-left: 14px;
 }
 @media (max-width: 650px) {
+  .project-maintenance-heading {
+    padding: 16px;
+  }
+  .project-maintenance-heading .button {
+    width: 100%;
+  }
   .maintenance-intro,
   .maintenance-setup,
   .maintenance-editor,

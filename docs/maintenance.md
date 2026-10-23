@@ -2,7 +2,9 @@
 
 ## Périmètre implémenté
 
-L'écran **Mises à jour** permet de choisir une application Vercel ou un service Railway rattaché à une fiche active, d'analyser sa source GitHub puis de préparer :
+Chaque fiche projet comporte une section **Mises à jour** et un bouton **Mettre à jour**. Ce bouton ouvre les options dans la fiche, limitées aux services et à l'historique du projet ; il ne modifie pas la production. Une cible unique est présélectionnée, plusieurs services restent au choix de l'opérateur. La vue générale **Mises à jour** conserve le suivi transversal du parc.
+
+Ce parcours permet de choisir une application Vercel ou un service Railway rattaché à une fiche active, d'analyser sa source GitHub puis de préparer :
 
 - Une évolution Node vers une version LTS encore supportée du catalogue officiel. Vercel conserve une branche majeure (`22.x` / `24.x`, liste fournisseur révisable dans le code) ; Railway reçoit une version exacte dans le manifeste pour provoquer une nouvelle construction reproductible. Les métadonnées Volta/devEngines et les fichiers `.nvmrc` / `.node-version` du dossier sont alignés lorsqu'ils existent.
 - Des mises à jour ciblées de dépendances directes de production, développement ou optionnelles : frameworks, React, outils de build, clients de base, etc. Les versions stables publiques choisies sont exactes, le manifeste et le lockfile sont régénérés ensemble. Jusqu'à douze composants peuvent être regroupés.
@@ -90,7 +92,7 @@ Choisir un projet rattaché non critique après revue humaine, avec accès Git, 
 - `VIGIE_MAINTENANCE_ALLOW_MERGE=false` et la liste des contrôles requis est vide : analyse, préparation et PR seulement. La fusion reste bloquée jusqu'à qualification d'un pilote et configuration des contrôles exacts du dépôt cible.
 - La migration `003-maintenance.sql` a été appliquée à Neon après création d'un instantané préalable. Aucune maintenance du parc ni PR cible n'a été lancée pendant cette activation. Le pilote réel reste à effectuer séparément.
 
-1. Ouvrir **Mises à jour**, choisir l'application/service et **Analyser la source GitHub**.
+1. Ouvrir la fiche du projet, puis **Mises à jour → Mettre à jour**, choisir son application/service et **Analyser la source GitHub**. La vue générale reste disponible pour le suivi de tous les projets.
 2. Vérifier dépôt, branche, commit de production, tête de branche et répertoire. Lire les avertissements de portée et de configuration.
 3. Sélectionner Node, ou ajouter les versions stables des composants liés dans un même plan. Relire les migrations et exigences des versions cibles ; les groupes framework/React doivent rester cohérents.
 4. **Préparer le plan**, relire les fichiers et approuver sa création de PR. L'approbation peut lancer des workflows de push/PR du dépôt cible, dont des previews ; qualifier ces déclencheurs avant le pilote.

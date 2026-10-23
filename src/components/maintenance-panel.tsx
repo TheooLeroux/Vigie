@@ -12,6 +12,7 @@ import type {
   MaintenanceJob,
   MaintenanceState,
 } from "@/lib/maintenance-contract";
+import { maintenanceScope } from "@/lib/maintenance-scope";
 import { Field, formatDate, Modal, OutLink } from "./ui";
 
 type RequestApi = (
@@ -32,9 +33,11 @@ const labels: Record<MaintenanceJob["status"], string> = {
 export function MaintenancePanel({
   request,
   projectId,
+  embedded = false,
 }: {
   request: RequestApi;
   projectId?: string;
+  embedded?: boolean;
 }) {
   const [state, setState] = useState<MaintenanceState | null>(null);
   const [inspection, setInspection] = useState<MaintenanceInspection | null>(
@@ -55,6 +58,10 @@ export function MaintenancePanel({
   } | null>(null);
   const [reviewed, setReviewed] = useState(false);
   const [returnReviewed, setReturnReviewed] = useState(false);
+  const { targets, jobs } = maintenanceScope(state, projectId);
+  const selectedTarget =
+    targets.find((target) => target.id === targetId) ||
+    (projectId && targets.length === 1 ? targets[0] : null);
   async function reload() {
     setState(await request("maintenance"));
   }
@@ -93,7 +100,10 @@ export function MaintenancePanel({
     setConfirmation({ action, job });
   }
   async function inspect() {
-    const result = await request("maintenance/inspect", "POST", { targetId });
+    if (!selectedTarget) return;
+    const result = await request("maintenance/inspect", "POST", {
+      targetId: selectedTarget.id,
+    });
     setInspection(result);
     setVersion(result.nodeVersions[0] || "");
     setUpdates([]);
@@ -149,32 +159,27 @@ export function MaintenancePanel({
     setConfirmation(null);
     await reload();
   }
-  const targets =
-    state?.targets.filter(
-      (target) => !projectId || target.projectId === projectId,
-    ) || [];
-  const jobs =
-    state?.jobs.filter((job) => !projectId || job.projectId === projectId) ||
-    [];
   return (
     <section className="maintenance-panel">
-      <div className="panel maintenance-intro">
-        <div>
-          <Wrench size={20} />
-          <h2>Mises à jour contrôlées</h2>
+      {!embedded && (
+        <div className="panel maintenance-intro">
+          <div>
+            <Wrench size={20} />
+            <h2>Mises à jour contrôlées</h2>
+          </div>
+          <p>
+            Node et dépendances npm/pnpm : proposition, PR, contrôles puis
+            confirmation de fusion. Les frameworks et bibliothèques sont traités
+            comme des dépendances. Aucun changement direct sur la branche de
+            production.
+          </p>
+          <p>
+            WordPress, PHP, images externes et bases de données ne sont pas mis à
+            jour par ce parcours. Une PR de retour restaure le code uniquement,
+            jamais les données ni les secrets.
+          </p>
         </div>
-        <p>
-          Node et dépendances npm/pnpm : proposition, PR, contrôles puis
-          confirmation de fusion. Les frameworks et bibliothèques sont traités
-          comme des dépendances. Aucun changement direct sur la branche de
-          production.
-        </p>
-        <p>
-          WordPress, PHP, images externes et bases de données ne sont pas mis à
-          jour par ce parcours. Une PR de retour restaure le code uniquement,
-          jamais les données ni les secrets.
-        </p>
-      </div>
+      )}
       {error && (
         <p className="maintenance-error" role="alert">
           <AlertCircle size={16} />
@@ -207,7 +212,7 @@ export function MaintenancePanel({
           <h3>Préparer une mise à jour</h3>
           <Field label="Application ou service">
             <select
-              value={targetId}
+              value={selectedTarget?.id || ""}
               disabled={busy}
               onChange={(event) => {
                 setTargetId(event.target.value);
@@ -223,18 +228,18 @@ export function MaintenancePanel({
               ))}
             </select>
           </Field>
-          {targets.find((target) => target.id === targetId)?.blocked && (
+          {selectedTarget?.blocked && (
             <p className="maintenance-warning">
-              {targets.find((target) => target.id === targetId)?.blocked}
+              {selectedTarget.blocked}
             </p>
           )}
           <button
             className="button secondary"
             disabled={
               busy ||
-              !targetId ||
+              !selectedTarget ||
               !state.configured ||
-              !!targets.find((target) => target.id === targetId)?.blocked
+              !!selectedTarget?.blocked
             }
             onClick={() => act(inspect)}
           >
@@ -380,7 +385,8 @@ export function MaintenancePanel({
                 }
                 onClick={() => act(prepare)}
               >
-                <GitPullRequest size={15} /> Préparer le plan
+                <GitPullRequest size={15} />
+                {projectId ? "Mettre à jour via une PR" : "Préparer le plan"}
               </button>
             </>
           )}
