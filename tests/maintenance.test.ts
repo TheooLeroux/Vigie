@@ -19,6 +19,7 @@ import {
   closeMaintenance,
   createMaintenancePlan,
   inspectMaintenance,
+  updateLatestMaintenance,
   maintenanceState,
   mergeMaintenance,
   refreshMaintenance,
@@ -85,6 +86,7 @@ function fakeGitHub(
     run?: string;
     mergePending?: boolean;
     manager?: "npm" | "pnpm";
+    manifest?: Record<string, any>;
   } = {},
 ) {
   const calls: {
@@ -96,7 +98,7 @@ function fakeGitHub(
   const packageManifest =
     options.manager === "pnpm"
       ? { ...manifest, packageManager: "pnpm@10.10.0" }
-      : manifest;
+      : options.manifest || manifest;
   const lockfile =
     options.manager === "pnpm"
       ? "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      react:\n        specifier: ^19.0.0\n        version: 19.0.0\n"
@@ -105,8 +107,8 @@ function fakeGitHub(
           lockfileVersion: 3,
           packages: {
             "": {
-              engines: manifest.engines,
-              dependencies: manifest.dependencies,
+              engines: packageManifest.engines,
+              dependencies: packageManifest.dependencies,
             },
             "node_modules/react": {
               version: "19.0.0",
@@ -419,6 +421,19 @@ test("Manifestes : champs conservés, composants existants, doublons et liens in
     /workspace/,
   );
 });
+
+test("Plan groupé : Node et dépendances appliqués ensemble sans toucher aux scripts", () => {
+  const updated = updateManifest(manifest, {
+    kind: "all", version: "24.2.0", updates: [{ name: "react", version: "19.1.0" }],
+  }, "exact");
+  assert.equal(updated.engines.node, "24.2.0");
+  assert.equal(updated.dependencies.react, "19.1.0");
+  assert.deepEqual(updated.scripts, manifest.scripts);
+  assert.equal(manifest.engines.node, "20.x");
+  assert.throws(() => operationSchema.parse({
+    kind: "all", version: "24.2.0", updates: [{ name: "react", version: "latest" }],
+  }));
+});
 test("Node : modifications cohérentes package.json/lockfile et aucun script applicatif", async () => {
   const fake = fakeGitHub();
   const client = new GitHubMaintenanceClient("test", fake.transport);
@@ -555,8 +570,10 @@ test("Exécuteur : liste autorisée et branche devenue obsolète bloquent les é
   );
   assert.ok(fake.calls.every((call) => call.method === "GET"));
 });
-test("Résolution npm/pnpm : commandes bornées, sans scripts ni secrets, manifestes préservés", async () => {
-  for (const manager of ["npm", "pnpm"] as const) {
+test("Résolution npm/pnpm : mises à jour individuelles et groupées, sans scripts ni secrets", async () => {
+  for (const { manager, kind } of (["npm", "pnpm"] as const).flatMap((manager) =>
+    (["dependencies", "all"] as const).map((kind) => ({ manager, kind })),
+  )) {
     const fake = fakeGitHub({ manager });
     const client = new GitHubMaintenanceClient("secret", fake.transport);
     const snapshot = await readMaintenanceFiles(
@@ -566,6 +583,10 @@ test("Résolution npm/pnpm : commandes bornées, sans scripts ni secrets, manife
       "",
     );
     const commands: any[] = [];
+    if (kind === "all") {
+      snapshot.files.set(".nvmrc", "20.0.0\n");
+      snapshot.files.set(".node-version", "20.0.0\n");
+    }
     const command = (async (file: string, args: string[], options: any) => {
       commands.push({ file, args, options });
       assert.equal(options.env.npm_config_ignore_scripts, "true");
@@ -578,6 +599,7 @@ test("Résolution npm/pnpm : commandes bornées, sans scripts ni secrets, manife
           await readFile(join(options.cwd, "package.json"), "utf8"),
         );
         assert.equal(manifest.dependencies.react, "19.1.0");
+        assert.equal(manifest.engines.node, kind === "all" ? "24.2.0" : "20.x");
         await writeFile(
           join(
             options.cwd,
@@ -586,7 +608,7 @@ test("Résolution npm/pnpm : commandes bornées, sans scripts ni secrets, manife
           manager === "npm"
             ? JSON.stringify({
                 lockfileVersion: 3,
-                packages: { "": { dependencies: manifest.dependencies } },
+                packages: { "": { dependencies: manifest.dependencies, engines: manifest.engines } },
               })
             : "lockfileVersion: '9.0'\nimporters: {}\n",
         );
@@ -597,15 +619,24 @@ test("Résolution npm/pnpm : commandes bornées, sans scripts ni secrets, manife
       client,
       {
         ...payload(),
-        operation: {
-          kind: "dependencies",
+        nodeMode: "exact",
+        operation: kind === "all" ? {
+          kind, version: "24.2.0",
+          updates: [{ name: "react", version: "19.1.0" }],
+        } : {
+          kind,
           updates: [{ name: "react", version: "19.1.0" }],
         },
       },
       snapshot,
       command,
     );
-    assert.equal(changed.size, 2);
+    assert.equal(changed.size, kind === "all" ? 4 : 2);
+    if (kind === "all") {
+      assert.equal(changed.get(".nvmrc"), "24.2.0\n");
+      assert.equal(changed.get(".node-version"), "24.2.0\n");
+      assert.equal(JSON.parse(changed.get("package.json")!).engines.node, "24.2.0");
+    }
     assert.ok(commands.length >= 1);
     if (manager === "pnpm")
       assert.ok(commands.at(-1).args.includes("--ignore-pnpmfile"));
@@ -639,7 +670,74 @@ test("API maintenance : authentification, démo et CSRF restent obligatoires", a
     { params: Promise.resolve({ path: ["maintenance", "plans"] }) },
   );
   assert.equal(csrf.status, 403);
+  const latestPath = { params: Promise.resolve({ path: ["maintenance", "latest"] }) };
+  const latestBody = JSON.stringify({ targetId: "untrusted", approved: true });
+  const unauthenticatedLatest = await POST(new Request("http://127.0.0.1:3001/api/maintenance/latest", {
+    method: "POST", headers: { "content-type": "application/json" }, body: latestBody,
+  }), latestPath);
+  assert.equal(unauthenticatedLatest.status, 401);
+  const crossSiteLatest = await POST(new Request("http://127.0.0.1:3001/api/maintenance/latest", {
+    method: "POST", headers: { cookie, origin: "https://evil.test", "content-type": "application/json" }, body: latestBody,
+  }), latestPath);
+  assert.equal(crossSiteLatest.status, 403);
 });
+test("Un clic : une préparation Node et dépendances, sans fusion ni double dispatch", async () => {
+  const fake = fakeGitHub();
+  const targetId = await fixtureTarget();
+  await assert.rejects(updateLatestMaintenance({ targetId }, fake.transport));
+  const result = await updateLatestMaintenance({ targetId, approved: true }, fake.transport);
+  assert.equal(result.current, false);
+  assert.equal(result.job?.status, "queued");
+  assert.deepEqual(result.job?.payload.operation, {
+    kind: "all", version: "24.2.0", updates: [{ name: "react", version: "19.1.0" }],
+  });
+  assert.deepEqual(result.job?.files.sort(), ["package-lock.json", "package.json"]);
+  const repeated = await updateLatestMaintenance({ targetId, approved: true }, fake.transport);
+  assert.equal(repeated.job?.id, result.job?.id);
+  assert.equal(repeated.existing, true);
+  const otherTarget = await fixtureTarget();
+  await assert.rejects(updateLatestMaintenance({ targetId: otherTarget, approved: true }, fake.transport), /autre service/);
+  assert.equal(fake.calls.filter((call) => call.path.endsWith("/dispatches")).length, 1);
+  assert.ok(!fake.calls.some((call) => call.path.includes("/merge")));
+  assert.ok(fake.calls.filter((call) => call.path.includes("/react/")).every((call) => !call.authorization));
+  await database().prepare("DELETE FROM maintenance_locks WHERE job_id=?").run(result.job!.id);
+});
+
+test("Un clic : déjà à jour ou registre invalide, aucun dispatch", async () => {
+  const targetId = await fixtureTarget();
+  const current = fakeGitHub({ manifest: {
+    ...manifest, engines: { node: "24.x" }, dependencies: { react: "19.1.0" },
+  } });
+  const result = await updateLatestMaintenance({ targetId, approved: true }, current.transport);
+  assert.equal(result.current, true);
+  assert.equal(result.job, null);
+  assert.ok(!current.calls.some((call) => call.method !== "GET"));
+  for (const invalid of ["20.0.0-beta.1", "19.1.0"]) {
+    const fake = fakeGitHub();
+    const invalidRegistry = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).hostname === "registry.npmjs.org")
+        return Response.json({ name: "react", version: invalid, deprecated: invalid === "19.1.0" });
+      return fake.transport(input, init);
+    }) as typeof fetch;
+    await assert.rejects(updateLatestMaintenance({ targetId, approved: true }, invalidRegistry), /stable, dépréciée/);
+    assert.ok(!fake.calls.some((call) => call.method !== "GET"));
+  }
+});
+
+test("Un clic : aucune rétrogradation des déclarations Node exactes", async () => {
+  const targetId = await fixtureTarget();
+  for (const fields of [
+    { engines: { node: "24.99.0" } },
+    { volta: { node: "24.99.0" } },
+    { devEngines: { runtime: { name: "node", version: "24.99.0" } } },
+    { devEngines: { runtime: [{ name: "node", version: "24.99.0" }] } },
+  ]) {
+    const fake = fakeGitHub({ manifest: { ...manifest, ...fields } });
+    await assert.rejects(updateLatestMaintenance({ targetId, approved: true }, fake.transport), /antérieure/);
+    assert.ok(!fake.calls.some((call) => call.method !== "GET"));
+  }
+});
+
 test("Plans : source attestée, cible supportée, approbation explicite et verrou par dépôt", async () => {
   const fake = fakeGitHub();
   const targetId = await fixtureTarget();

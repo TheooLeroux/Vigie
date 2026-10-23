@@ -181,7 +181,7 @@ export async function regenerateDependencies(
   const blocker = dependencyBlocker(snapshot);
   if (blocker) throw new ApiError(blocker);
   const operation = payload.operation;
-  if (operation.kind !== "dependencies")
+  if (operation.kind !== "dependencies" && operation.kind !== "all")
     throw new ApiError("Opération invalide.");
   const temp = await mkdtemp(join(tmpdir(), "vigie-maintenance-"));
   try {
@@ -233,10 +233,14 @@ export async function regenerateDependencies(
           await client.blob(payload.repository, workspace, 100_000),
         ),
       );
+    const nodeChanges = operation.kind === "all"
+      ? nodeFileChanges(snapshot, operation.version, payload.nodeMode)
+      : new Map<string, string>();
+    for (const [path, content] of nodeChanges) copied.set(path, content);
     copied.set(
       snapshot.manifestPath,
       jsonText(
-        updateManifest(snapshot.manifest, operation),
+        updateManifest(snapshot.manifest, operation, payload.nodeMode),
         copied.get(snapshot.manifestPath),
       ),
     );
@@ -379,6 +383,7 @@ export async function regenerateDependencies(
       throw new ApiError("Lockfile régénéré trop volumineux.");
     assertPublicLock(lock, snapshot.manager, workspaceManifests);
     return new Map([
+      ...nodeChanges,
       [snapshot.manifestPath, copied.get(snapshot.manifestPath)!],
       [snapshot.lockPath!, lock],
     ]);
@@ -527,7 +532,7 @@ export async function runMaintenanceWorker(
       "La branche a changé pendant la préparation ; aucune PR publiée.",
       409,
     );
-  const title = `[Vigie] ${payload.operation.kind === "node" ? `Node ${payload.operation.version}` : payload.operation.kind === "rollback" ? "Retour code" : "Dépendances applicatives"}`;
+  const title = `[Vigie] ${payload.operation.kind === "all" ? `Node ${payload.operation.version} et dépendances` : payload.operation.kind === "node" ? `Node ${payload.operation.version}` : payload.operation.kind === "rollback" ? "Retour code" : "Dépendances applicatives"}`;
   const base = await client.request(`${prefix}/git/commits/${payload.baseSha}`);
   const tree = await client.request(`${prefix}/git/trees`, "POST", {
     base_tree: base.tree.sha,

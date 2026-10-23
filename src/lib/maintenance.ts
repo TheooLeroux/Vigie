@@ -13,6 +13,10 @@ import {
 import { maintenanceToken } from "./maintenance-credentials";
 import { maintenanceNodeVersions } from "./connectors/software-releases";
 import {
+  compareStableVersions,
+  latestMaintenanceOperation,
+} from "./maintenance-latest";
+import {
   dependencyBlocker,
   listedDependencies,
   nodeFileChanges,
@@ -452,8 +456,8 @@ export async function createMaintenancePlan(
     inspection.baseSha,
     target.directory,
   );
-  let files: string[];
-  if (input.operation.kind === "node") {
+  let files: string[] = [];
+  if (input.operation.kind === "node" || input.operation.kind === "all") {
     if (!inspection.nodeVersions.includes(input.operation.version))
       throw new ApiError(
         "Sélectionnez une version LTS supportée proposée par le catalogue officiel.",
@@ -465,15 +469,19 @@ export async function createMaintenancePlan(
         target.provider === "Railway" ? "exact" : "major",
       ).keys(),
     ];
-    if (!files.length)
+    if (!files.length && input.operation.kind === "node")
       throw new ApiError(
         "Les fichiers ciblés déclarent déjà cette version ; aucune modification proposée.",
       );
-  } else if (input.operation.kind === "dependencies") {
+  }
+  if (input.operation.kind === "dependencies" || input.operation.kind === "all") {
     if (inspection.dependencyBlocker)
       throw new ApiError(inspection.dependencyBlocker);
     const next = updateManifest(snapshot.manifest, input.operation);
-    if (JSON.stringify(next) === JSON.stringify(snapshot.manifest))
+    if (
+      JSON.stringify(next) === JSON.stringify(snapshot.manifest) &&
+      !files.length
+    )
       throw new ApiError(
         "Ces versions sont déjà déclarées ; aucune modification proposée.",
       );
@@ -488,8 +496,8 @@ export async function createMaintenancePlan(
           `${release.name} ${release.version} requiert Node ${release.node}. Vérifier cette contrainte avec le runtime et les autres composants avant fusion.`,
         );
     }
-    files = [snapshot.manifestPath, snapshot.lockPath!];
-  } else {
+    files = [...new Set([...files, snapshot.manifestPath, snapshot.lockPath!])];
+  } else if (input.operation.kind === "rollback") {
     const previous = input.rollbackJobId
       ? await storedJob(input.rollbackJobId)
       : null;
@@ -555,6 +563,97 @@ export async function createMaintenancePlan(
     target.projectId,
   );
   return job;
+}
+export async function updateLatestMaintenance(
+  raw: unknown,
+  transport: typeof fetch = fetch,
+) {
+  const input = z
+    .object({
+      targetId: z.string().max(500),
+      approved: z.literal(true),
+    })
+    .strict()
+    .parse(raw);
+  const inspection = await inspectMaintenance(input.targetId, transport);
+  const db = await storage();
+  const lock = (await db
+    .prepare("SELECT job_id FROM maintenance_locks WHERE repository=?")
+    .get(inspection.target.repository!.toLowerCase())) as
+    | { job_id: string }
+    | undefined;
+  if (lock) {
+    const existing = await storedJob(lock.job_id);
+    if (existing.targetId !== input.targetId)
+      throw new ApiError(
+        "Une mise à jour est déjà en cours sur un autre service de ce dépôt.",
+        409,
+      );
+    return { job: existing, current: false, existing: true };
+  }
+  const client = clientFor(inspection.target.repository!, transport);
+  const snapshot = await readMaintenanceFiles(
+    client,
+    inspection.target.repository!,
+    inspection.baseSha,
+    inspection.target.directory,
+  );
+  if (
+    inspection.target.provider === "Railway" &&
+    snapshot.tree.some((entry) => {
+      const directory = entry.path.split("/").slice(0, -1).join("/");
+      return (
+        /(?:^|\/)Dockerfile(?:\.[A-Za-z0-9_-]+)?$/.test(entry.path) &&
+        (!directory || directory === inspection.target.directory ||
+          inspection.target.directory.startsWith(`${directory}/`))
+      );
+    })
+  )
+    throw new ApiError(
+      "Un Dockerfile peut imposer la version Node. Cette configuration doit être qualifiée avant la mise à jour en un clic ; aucune modification n’est lancée.",
+    );
+  const operation = await latestMaintenanceOperation(
+    inspection,
+    (name) => publicPackageRelease(name, undefined, transport),
+  );
+  const runtime = snapshot.manifest.devEngines?.runtime;
+  const runtimes = Array.isArray(runtime) ? runtime : [runtime];
+  const currentVersions = [
+    inspection.target.node,
+    snapshot.manifest.volta?.node,
+    snapshot.manifest.engines?.node,
+    ...runtimes.filter((item) => item?.name === "node").map((item) => item.version),
+    ...[...snapshot.files].filter(([path]) =>
+      /(?:^|\/)(?:\.nvmrc|\.node-version)$/.test(path),
+    ).map(([, content]) => content.trim().replace(/^v/, "")),
+  ];
+  for (const candidate of currentVersions) {
+    if (
+      typeof candidate === "string" && /^\d+\.\d+\.\d+$/.test(candidate) &&
+      compareStableVersions(candidate, operation.version) > 0
+    )
+      throw new ApiError(
+        "La version Node actuelle est plus récente que la cible LTS proposée. Aucun retour à une version antérieure n’est effectué.",
+      );
+  }
+  const nodeChanges = nodeFileChanges(
+    snapshot,
+    operation.version,
+    inspection.target.provider === "Railway" ? "exact" : "major",
+  );
+  if (!operation.updates.length && !nodeChanges.size)
+    return { job: null, current: true, existing: false };
+  const job = await createMaintenancePlan(
+    { targetId: input.targetId, operation },
+    transport,
+  );
+  if (job.payload.baseSha !== inspection.baseSha)
+    throw new ApiError("La branche a changé pendant la recherche des versions. Relancez l’analyse.", 409);
+  return {
+    job: await approveMaintenance(job.id, { approved: true }, transport),
+    current: false,
+    existing: false,
+  };
 }
 export async function approveMaintenance(
   id: string,

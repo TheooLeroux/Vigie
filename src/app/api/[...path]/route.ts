@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { maintenanceState, inspectMaintenance, packageRelease, createMaintenancePlan, approveMaintenance, refreshMaintenance, mergeMaintenance, closeMaintenance } from "@/lib/maintenance";
+import { maintenanceState, inspectMaintenance, packageRelease, createMaintenancePlan, updateLatestMaintenance, approveMaintenance, refreshMaintenance, mergeMaintenance, closeMaintenance } from "@/lib/maintenance";
 import {
   vercelState,
   saveVercelConnection,
@@ -152,6 +152,7 @@ async function handleRequest(request: Request, context: Context) {
       }
       if (method === "POST" && id === "package" && path.length === 2) return Response.json(await packageRelease(await body(request)));
       if (method === "POST" && id === "plans" && path.length === 2) return Response.json(await createMaintenancePlan(await body(request)));
+      if (method === "POST" && id === "latest" && path.length === 2) return Response.json(await updateLatestMaintenance(await body(request)));
       if (method === "POST" && id && child && path.length === 3) {
         if (child === "approve") return Response.json(await approveMaintenance(id, await body(request)));
         if (child === "refresh") return Response.json(await refreshMaintenance(id));

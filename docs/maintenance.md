@@ -2,12 +2,17 @@
 
 ## Périmètre implémenté
 
-Chaque fiche projet comporte une section **Mises à jour** et un bouton **Mettre à jour**. Ce bouton ouvre les options dans la fiche, limitées aux services et à l'historique du projet ; il ne modifie pas la production. Une cible unique est présélectionnée, plusieurs services restent au choix de l'opérateur. La vue générale **Mises à jour** conserve le suivi transversal du parc.
+Chaque fiche projet affiche directement sa section **Mises à jour**, limitée aux services et à l'historique du projet. Chaque service possède un bouton **Tout mettre à jour** : un clic choisit la dernière Node LTS supportée et les dernières versions stables publiques de toutes ses dépendances directes, puis approuve la préparation d'une seule PR. Aucune sélection manuelle de version ni seconde confirmation de création de PR n'est nécessaire. Le texte associé au bouton précise cette autorisation et les éventuelles previews. La fusion et la publication restent distinctes, avec les contrôles existants ; le clic ne déploie pas directement en production.
+
+Le parcours rapide accepte jusqu'à 100 dépendances directes, interroge le registre par lots de quatre et refuse une résolution partielle ou une rétrogradation détectée. Les déclarations particulières (workspace, catalogue, alias, plage complexe, préversion) nécessitent les options avancées. Un Dockerfile Railway dans le dossier cible ou un de ses parents bloque le parcours rapide tant que sa priorité n'est pas qualifiée. Les variables Railway ne sont toujours pas modifiées ; la version réellement exécutée doit être vérifiée. Une préparation déjà verrouillée est réutilisée pour la même cible ou bloque les autres services de ce dépôt. Si les fichiers déclarent déjà toutes les versions proposées, aucun plan n'est créé.
+
+Les **Options avancées**, repliées par défaut, conservent la sélection individuelle de versions et de composants. La vue générale **Mises à jour** conserve le suivi transversal du parc.
 
 Ce parcours permet de choisir une application Vercel ou un service Railway rattaché à une fiche active, d'analyser sa source GitHub puis de préparer :
 
 - Une évolution Node vers une version LTS encore supportée du catalogue officiel. Vercel conserve une branche majeure (`22.x` / `24.x`, liste fournisseur révisable dans le code) ; Railway reçoit une version exacte dans le manifeste pour provoquer une nouvelle construction reproductible. Les métadonnées Volta/devEngines et les fichiers `.nvmrc` / `.node-version` du dossier sont alignés lorsqu'ils existent.
 - Des mises à jour ciblées de dépendances directes de production, développement ou optionnelles : frameworks, React, outils de build, clients de base, etc. Les versions stables publiques choisies sont exactes, le manifeste et le lockfile sont régénérés ensemble. Jusqu'à douze composants peuvent être regroupés.
+- Une mise à jour groupée Node et dépendances dans une seule PR. Le préparateur aligne d'abord les déclarations Node, puis résout le lockfile avec le manifeste complet, sans scripts applicatifs et sans forcer les conflits de dépendances.
 - Une PR de retour code pour une mise à jour Vigie fusionnée par squash. Elle rétablit les fichiers antérieurs seulement si ces fichiers n'ont pas changé depuis la fusion. Elle ne restaure aucune base, aucun volume et aucun secret ; son approbation reste distincte.
 
 Les dépendances transitives peuvent évoluer lors de la résolution du lockfile mais ne sont pas choisies individuellement dans l'écran. Le diff entier et les prérequis des versions cibles doivent être relus. La dernière version stable du registre n'est pas une garantie de compatibilité ou d'absence de vulnérabilités.

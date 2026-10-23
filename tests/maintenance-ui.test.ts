@@ -3,10 +3,11 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProjectMaintenance } from "../src/components/project-maintenance";
+import { MaintenanceQuickUpdate } from "../src/components/maintenance-quick-update";
 import { maintenanceScope } from "../src/lib/maintenance-scope";
 import type { MaintenanceState } from "../src/lib/maintenance-contract";
 
-test("Fiche projet : entrée Mises à jour explicite, sans requête avant ouverture", () => {
+test("Fiche projet : parcours rapide visible, sans écriture au rendu", () => {
   let requests = 0;
   const html = renderToStaticMarkup(
     createElement(ProjectMaintenance, {
@@ -16,12 +17,35 @@ test("Fiche projet : entrée Mises à jour explicite, sans requête avant ouvert
     }),
   );
   assert.match(html, /Mises à jour de Alpha &amp; Beta/);
-  assert.match(html, /Mettre à jour/);
-  assert.match(html, /aria-expanded="false"/);
-  assert.match(html, /aria-controls="project-maintenance-project-alpha"/);
-  assert.match(html, /id="project-maintenance-project-alpha" hidden/);
+  assert.match(html, /Un clic par service/);
+  assert.match(html, /Une seule PR, sans choix de versions/);
+  assert.match(html, /<details class="maintenance-advanced"><summary>Options avancées/);
+  assert.doesNotMatch(html, /<details class="maintenance-advanced" open/);
   assert.match(html, /Aucun déploiement direct en production/);
   assert.equal(requests, 0);
+});
+
+test("Parcours rapide : un bouton par service, blocages et verrou partagé visibles", () => {
+  const targets = [
+    { id: "web", name: "Frontend", provider: "Vercel", repository: "team/app", directory: "", blocked: null },
+    { id: "docs", name: "Documentation", provider: "Railway", repository: "team/docs", directory: "docs", blocked: "Image externe" },
+  ] as MaintenanceState["targets"];
+  let writes = 0;
+  const render = (state: MaintenanceState, busy = false) => renderToStaticMarkup(createElement(MaintenanceQuickUpdate, {
+    state, targets, busy, onUpdate: () => { writes++; },
+  }));
+  const state = { configured: true, targets, jobs: [] } as unknown as MaintenanceState;
+  const html = render(state);
+  assert.match(html, /aria-label="Tout mettre à jour — Frontend"/);
+  assert.match(html, /aria-label="Tout mettre à jour — Documentation" disabled/);
+  assert.match(html, /sans fusion ni déploiement en production/);
+  assert.doesNotMatch(html, /<select/);
+  assert.equal(writes, 0);
+  state.jobs = [{ status: "pull_request", payload: { repository: "TEAM/APP" } }] as MaintenanceState["jobs"];
+  assert.match(render(state), /aria-label="Tout mettre à jour — Frontend" disabled/);
+  assert.match(render(state), /Une préparation existe déjà/);
+  state.jobs = [];
+  assert.match(render(state, true), /aria-label="Tout mettre à jour — Frontend" disabled/);
 });
 
 test("Fiche projet : services et suivi strictement limités au projet choisi", () => {

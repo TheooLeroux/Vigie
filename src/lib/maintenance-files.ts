@@ -148,7 +148,7 @@ export function updateManifest(
   nodeMode: "major" | "exact" = "major",
 ): Manifest {
   const updated = structuredClone(manifest);
-  if (operation.kind === "node") {
+  if (operation.kind === "node" || operation.kind === "all") {
     const major = operation.version.split(".")[0];
     const target = nodeMode === "exact" ? operation.version : `${major}.x`;
     updated.engines = { ...updated.engines, node: target };
@@ -160,7 +160,8 @@ export function updateManifest(
       for (const runtime of runtimes)
         if (runtime.name === "node") runtime.version = target;
     }
-  } else if (operation.kind === "dependencies") {
+  }
+  if (operation.kind === "dependencies" || operation.kind === "all") {
     const names = new Set<string>();
     for (const update of operation.updates) {
       if (names.has(update.name))
@@ -200,10 +201,11 @@ export function nodeFileChanges(
   const changed = new Map<string, string>();
   const operation = { kind: "node", version } as const;
   const next = updateManifest(snapshot.manifest, operation, nodeMode);
-  changed.set(
-    snapshot.manifestPath,
-    jsonText(next, snapshot.files.get(snapshot.manifestPath)),
-  );
+  if (JSON.stringify(next) !== JSON.stringify(snapshot.manifest))
+    changed.set(
+      snapshot.manifestPath,
+      jsonText(next, snapshot.files.get(snapshot.manifestPath)),
+    );
   const directory = snapshot.manifestPath.split("/").slice(0, -1).join("/");
   for (const [path, content] of snapshot.files) {
     if (
@@ -236,7 +238,8 @@ export function nodeFileChanges(
     const key = snapshot.lockDirectory
       ? directory.slice(snapshot.lockDirectory.length + 1)
       : directory;
-    if (lock.packages?.[key]) {
+    if (lock.packages?.[key] &&
+      JSON.stringify(lock.packages[key].engines) !== JSON.stringify(next.engines)) {
       lock.packages[key].engines = next.engines;
       changed.set(snapshot.lockPath, jsonText(lock, previous));
     }

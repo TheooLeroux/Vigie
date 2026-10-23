@@ -61,6 +61,13 @@ export const operationSchema = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({
+      kind: z.literal("all"),
+      version: versionSchema,
+      updates: z.array(dependencyUpdateSchema).max(100),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("rollback"),
       pullNumber: z.number().int().positive(),
     })

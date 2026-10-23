@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   GitPullRequest,
@@ -13,6 +13,7 @@ import type {
   MaintenanceState,
 } from "@/lib/maintenance-contract";
 import { maintenanceScope } from "@/lib/maintenance-scope";
+import { MaintenanceQuickUpdate } from "./maintenance-quick-update";
 import { Field, formatDate, Modal, OutLink } from "./ui";
 
 type RequestApi = (
@@ -52,6 +53,8 @@ export function MaintenancePanel({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const updating = useRef(false);
   const [confirmation, setConfirmation] = useState<{
     action: "approve" | "merge" | "close" | "rollback";
     job: MaintenanceJob;
@@ -78,6 +81,28 @@ export function MaintenancePanel({
       cancelled = true;
     };
   }, [request]);
+  useEffect(() => {
+    const pending = jobs.filter((job) =>
+      ["queued", "dispatching"].includes(job.status),
+    );
+    if (busy || !pending.length) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        for (const job of pending)
+          await request(`maintenance/${job.id}/refresh`, "POST", {});
+        const next = await request("maintenance");
+        if (!cancelled) setState(next);
+      } catch {
+        if (!cancelled)
+          setError("Le suivi automatique est indisponible. Utilisez Actualiser le suivi ; ne relancez pas la mise à jour.");
+      }
+    }, 10_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [state, projectId, busy, request]);
   async function act(run: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -129,6 +154,29 @@ export function MaintenancePanel({
     await reload();
     confirm("approve", job);
   }
+  async function updateLatest(targetId: string) {
+    if (updating.current) return;
+    updating.current = true;
+    setNotice("");
+    try {
+      await act(async () => {
+        try {
+          const result = await request("maintenance/latest", "POST", { targetId, approved: true });
+          setNotice(result.current
+            ? "Les fichiers déclarent déjà les dernières versions proposées. Aucun changement nécessaire."
+            : result.existing
+              ? "Une préparation existe déjà : retrouvez-la dans le suivi."
+              : result.job?.status === "queued"
+                ? "Préparation lancée : Node et dépendances seront regroupés dans une seule PR. Rien n’est fusionné ni publié."
+                : "L’envoi nécessite une vérification : consultez le suivi avant toute nouvelle tentative.");
+        } finally {
+          await reload();
+        }
+      });
+    } finally {
+      updating.current = false;
+    }
+  }
   async function confirmed() {
     if (!confirmation) return;
     const { job, action } = confirmation;
@@ -168,10 +216,9 @@ export function MaintenancePanel({
             <h2>Mises à jour contrôlées</h2>
           </div>
           <p>
-            Node et dépendances npm/pnpm : proposition, PR, contrôles puis
-            confirmation de fusion. Les frameworks et bibliothèques sont traités
-            comme des dépendances. Aucun changement direct sur la branche de
-            production.
+            Un clic pour préparer Node LTS, frameworks et dépendances npm/pnpm
+            aux dernières versions stables dans une seule PR. Aucun changement
+            direct sur la branche de production.
           </p>
           <p>
             WordPress, PHP, images externes et bases de données ne sont pas mis à
@@ -186,6 +233,8 @@ export function MaintenancePanel({
           {error}
         </p>
       )}
+      {notice && <p role="status">{notice}</p>}
+      {busy && <p role="status">Opération en cours… La recherche des versions peut prendre quelques instants.</p>}
       {!state && !error && (
         <p role="status">
           <Loader2 size={16} /> Chargement de la maintenance…
@@ -207,6 +256,11 @@ export function MaintenancePanel({
           </p>
         </section>
       )}
+      {state && (
+        <MaintenanceQuickUpdate state={state} targets={targets} busy={busy} onUpdate={(id) => void updateLatest(id)} />
+      )}
+      <details className="maintenance-advanced">
+        <summary>Options avancées — choisir les versions ou les composants</summary>
       {state && (
         <section className="panel maintenance-editor">
           <h3>Préparer une mise à jour</h3>
@@ -392,6 +446,7 @@ export function MaintenancePanel({
           )}
         </section>
       )}
+      </details>
       <section className="panel maintenance-jobs">
         <div className="maintenance-heading">
           <h3>Suivi des mises à jour</h3>
@@ -416,7 +471,9 @@ export function MaintenancePanel({
               <span className="badge neutral">{labels[job.status]}</span>
             </div>
             <p>
-              {job.payload.operation.kind === "node"
+              {job.payload.operation.kind === "all"
+                ? `Node → ${job.payload.operation.version} · ${job.payload.operation.updates.length} dépendance(s) · mise à jour groupée`
+                : job.payload.operation.kind === "node"
                 ? `Node → ${job.payload.operation.version}`
                 : job.payload.operation.kind === "rollback"
                   ? `Retour code de la PR #${job.payload.operation.pullNumber}`
@@ -430,6 +487,13 @@ export function MaintenancePanel({
             </small>
             <details>
               <summary>Plan et portée</summary>
+              {job.payload.operation.kind === "all" && (
+                <ul>
+                  {job.payload.operation.updates.map((update) => (
+                    <li key={update.name}>{update.name} → {update.version}</li>
+                  ))}
+                </ul>
+              )}
               <ul>
                 {job.files.map((file) => (
                   <li key={file}>
