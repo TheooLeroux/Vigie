@@ -5,7 +5,7 @@ import { log, transaction } from "../db";
 import { isPostgres } from "../storage";
 import { hostingDiscovery, hostingInstallation } from "../hosting-discovery";
 import { hostingConnections, withHostingCredentials } from "../hosting-connections";
-import { agentBundle, provisionLocalAgent } from "./wordpress-agent";
+import { agentBundle, provisionLocalAgent, cpanelAgentFiles, openAgentPayload, type LocalAgentSettings } from "./wordpress-agent";
 import { githubRequest, updateRunner } from "./github";
 import { readUpdateSource, updateStorage, writeUpdateSource } from "./storage";
 import type { SourceSettings, UpdateTarget } from "./types";
@@ -40,7 +40,7 @@ export async function requestAgentInstallation(id: string, dispatch = dispatchAg
     await lockSource(targetId, site.project!.id);
     if (await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE scope=?").get(`o2switch:${site.connectionId}:${site.id}:`)) return null;
     const current = await readUpdateSource(targetId), setup = current?.settings.agentInstallation;
-    if (current?.settings.localAgent?.ready && (!setup || setup.state === "ready")) return null;
+    if (!retry && current?.settings.localAgent?.ready && (!setup || setup.state === "ready")) return null;
     if (activeLease(setup)) return null;
     if (!retry && setup?.nextAttemptAt && Date.parse(setup.nextAttemptAt) > Date.now()) return null;
     if (!retry && setup?.state === "queued" && setup.dispatchedAt && Date.now() - Date.parse(setup.dispatchedAt) < 5 * 60_000) return null;
@@ -137,16 +137,31 @@ export async function requestLinkedAgents(connectionId: string, dispatch = dispa
   for (const site of sites) if ((await requestAgentInstallation(site.id, dispatch)).queued) queued++;
   return { queued };
 }
-export async function reconcileAgentInstallations() {
+async function agentHeartbeatHealthy(site: HostingInstallationView, settings: LocalAgentSettings) {
+  try {
+    return await withHostingCredentials(site.connectionId, async connection => {
+      const raw = await cpanelAgentFiles(connection, settings.directory).read("heartbeat.json");
+      if (!raw) return false;
+      const value = z.object({ protocol: z.literal("vigie-local-v1"), root: z.string(), php: z.string(), time: z.number().int() }).parse(openAgentPayload(JSON.parse(raw), settings.secret));
+      return value.root === site.documentRoot && Math.abs(Date.now() / 1000 - value.time) <= 180;
+    });
+  } catch { return false; }
+}
+export async function reconcileAgentInstallations(dependencies: { healthy?: typeof agentHeartbeatHealthy; prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}) {
   let ready = 0, failed = 0;
   for (const connection of (await hostingConnections()).filter(connection => connection.configured)) {
     const sites = (await hostingDiscovery(connection.id)).installations.filter(eligible);
     for (const site of sites) {
       try {
+        const previous = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
+        if (previous?.localAgent?.ready && (!previous.agentInstallation || previous.agentInstallation.state === "ready")) {
+          if (await (dependencies.healthy || agentHeartbeatHealthy)(site, previous.localAgent)) { ready++; continue; }
+          await requestAgentInstallation(site.id, async () => {}, true);
+        }
         await requestAgentInstallation(site.id, async () => {});
         const settings = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
-        if (settings?.localAgent?.ready) { ready++; continue; }
-        if (await processAgentInstallation(site.id)) ready++; else if ((await readUpdateSource(`wordpress:${site.id}`))?.settings.agentInstallation?.state === "failed") failed++;
+        if (settings?.localAgent?.ready && (!settings.agentInstallation || settings.agentInstallation.state === "ready")) { ready++; continue; }
+        if (await processAgentInstallation(site.id, undefined, dependencies)) ready++; else if ((await readUpdateSource(`wordpress:${site.id}`))?.settings.agentInstallation?.state === "failed") failed++;
       } catch {
         failed++;
         await log("live", "hosting.agent_failed", `La préparation de l’agent sur ${site.domains[0]} sera réessayée au prochain contrôle.`, site.project!.id);

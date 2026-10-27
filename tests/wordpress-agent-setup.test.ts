@@ -8,7 +8,7 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
 import { applyDiscoverySnapshot, hostingDiscovery, hostingInstallation } from "../src/lib/hosting-discovery";
 import { hostingStorage } from "../src/lib/hosting-storage";
-import { processAgentInstallation, requestAgentInstallation, requestLinkedAgents } from "../src/lib/updates/wordpress-agent-setup";
+import { processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations } from "../src/lib/updates/wordpress-agent-setup";
 import { readUpdateSource, writeUpdateSource, updateStorage } from "../src/lib/updates/storage";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
@@ -112,4 +112,18 @@ test("Installation automatique : aucune installation pendant une maintenance ver
   assert.equal((await readUpdateSource(f.targetId))!.settings.agentInstallation!.state, "queued");
   await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(runId);
   assert.equal(await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} }), true);
+});
+
+test("Installation automatique : un agent arrêté est réparé par le contrôle du parc, sans changer sa clé", async () => {
+  const f = await fixture(); await requestAgentInstallation(f.site.id, async () => {});
+  await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
+  const secret = (await readUpdateSource(f.targetId))!.settings.localAgent!.secret;
+  let repairs = 0;
+  const deps = { prepare: hostingInstallation, healthy: async (site: typeof f.site) => site.id !== f.site.id, provision: async (target: { remoteId: string }) => { if (target.remoteId === f.site.id) repairs++; } };
+  await reconcileAgentInstallations(deps);
+  assert.equal(repairs, 1);
+  assert.equal((await readUpdateSource(f.targetId))!.settings.localAgent!.secret, secret);
+  assert.equal((await readUpdateSource(f.targetId))!.settings.agentInstallation!.state, "ready");
+  await reconcileAgentInstallations({ ...deps, healthy: async () => true });
+  assert.equal(repairs, 1);
 });
