@@ -10,7 +10,8 @@ import { synchronizeRailway } from "../railway";
 import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
-import { changedSources, latestNode, prepareNodeSources, snapshotSources } from "./node";
+import { changedSources, latestNode, snapshotSources, type NodeUpdateChecks } from "./node";
+import { prepareNodeServices } from "./node-services";
 import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, waitForDeployment } from "./providers";
 import { confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
@@ -98,6 +99,13 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const nodeScan = createNodeScanCache(sourceFolder, roots);
     const trivyCache = join(temporary, "trivy-cache");
     await mkdir(trivyCache, { mode: 0o700 });
+    let imageScans = Promise.resolve();
+    function scanImage(image: string, baseline = false) {
+      const pending = imageScans.then(() => scanDockerImage(image, undefined, baseline, trivyCache));
+      // Trivy's shared cache is exclusive; serialize scanners, not service builds.
+      imageScans = pending.then(() => {}, () => {});
+      return pending;
+    }
     async function record(check: UpdateCheck, selected = results) {
       for (const result of selected) { result.checks ||= []; result.checks.push(check); }
       await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
@@ -118,32 +126,50 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const dockerfile = (root ? root + "/" : "") + "Dockerfile";
       if (!names.includes(dockerfile)) continue;
       const image = dockerRuntimeBase(await readFile(join(sourceFolder, dockerfile), "utf8"));
-      const findings = (await scanDockerImage(image, undefined, true, trivyCache)).map(entry => ({ ...entry, scope: root }));
+      const findings = (await scanImage(image, true)).map(entry => ({ ...entry, scope: root }));
       imageBaselines.set(root, findings);
       await record(securityCheck("Trivy", "before", `Image de base actuelle ${image} (hors code applicatif)`, findings), results.filter((_, index) => targets[index].root === root));
     }
     await progress("updating", "Actualisation de Node et des dépendances, puis validation isolée.");
-    const prepared = await prepareNodeSources(sourceFolder, roots, names, version, fetch, targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root), undefined, {
+    function serviceChecks(workingFolder: string, selectedRoots: string[]): NodeUpdateChecks {
+      const scanSources = createNodeScanCache(workingFolder, selectedRoots);
+      const selectedResults = results.filter((_, index) => selectedRoots.includes(targets[index].root));
+      return {
       resolved: async resolvedNames => {
-        const scan = await nodeScan(resolvedNames);
-        const check = securityCheck("OSV", "candidate", "Dépendances directes et transitives verrouillées", scan.findings, baseline);
-        await record({ ...check, checkedAt: scan.checkedAt, message: check.message + (scan.reused.length ? ` ${scan.reused.length} verrou(s) inchangé(s) : analyse de cette exécution réutilisée (moins de cinq minutes).` : "") });
+        const scan = await scanSources(resolvedNames);
+        const check = securityCheck("OSV", "candidate", `Dépendances verrouillées : ${selectedRoots.map(root => root || "racine").join(", ")}`, scan.findings, baseline);
+        await record({ ...check, checkedAt: scan.checkedAt, message: check.message + (scan.reused.length ? ` ${scan.reused.length} verrou(s) inchangé(s) : analyse de cette exécution réutilisée (moins de cinq minutes).` : "") }, selectedResults);
       },
-      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanDockerImage(image, undefined, false, trivyCache)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
+      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanImage(image)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
       reused: message => progress("updating", message),
       validated: async (root, scripts) => {
         const browser = scripts.includes("test:e2e"), tests = scripts.some(name => name === "test" || name === "test:integration");
         await record({ tool: "Validation", phase: "candidate", scope: root || "racine", checkedAt: new Date().toISOString(), status: browser && tests ? "passed" : "warning", message: `Scripts réussis : ${scripts.join(", ")}. ${!browser ? "Aucun parcours navigateur test:e2e déclaré : les parcours métier ne sont pas certifiés." : "Le périmètre navigateur dépend des assertions du projet."} ${!tests ? "Aucun test unitaire ou d’intégration déclaré." : ""}`, findings: [] }, results.filter((_, index) => targets[index].root === root));
       },
       remediating: async message => {
-        for (const result of results) result.warnings.push(message);
+        for (const result of selectedResults) result.warnings.push(message);
         await progress("updating", message);
+      },
+      };
+    }
+    const prepared = await prepareNodeServices(sourceFolder, roots, names, version, serviceChecks, {
+      dockerRoots: targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root),
+      progress: async (root, phase) => {
+        const message = { preparing: "Préparation des versions", prepared: "Versions préparées ; attente du contrôle de l’ensemble", validating: "Validation des versions assemblées", ready: "Proposition validée ; attente de publication" }[phase];
+        for (const [index, target] of targets.entries()) if (target.root === root) {
+          results[index].stage = "updating";
+          results[index].message = message;
+        }
+        await progress("updating", `${root || "racine"} : ${message}.`);
       },
     });
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
     await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de tous les verrous avant publication", finalScan.findings, baseline), checkedAt: finalScan.checkedAt });
-    for (const result of results) result.warnings = [...new Set([...result.warnings, ...prepared.warnings])];
+    for (const [index, result] of results.entries()) {
+      const warnings = "services" in prepared ? prepared.services.find(service => service.root === targets[index].root)?.warnings || [] : prepared.warnings;
+      result.warnings = [...new Set([...result.warnings, ...warnings])];
+    }
     for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     async function verifyNode(index: number, deploymentId: string) {
       const result = results[index];

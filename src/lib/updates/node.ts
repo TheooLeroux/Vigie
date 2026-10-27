@@ -37,12 +37,15 @@ async function fetchJson(url: string, transport: typeof fetch) {
   return JSON.parse(content);
 }
 export async function snapshotSources(folder: string, names: string[]): Promise<SourceFile[]> {
-  return Promise.all(names.map(async name => {
+  const result: SourceFile[] = [];
+  // Parallel service copies must not multiply thousands of open descriptors.
+  for (let offset = 0; offset < names.length; offset += 64) result.push(...await Promise.all(names.slice(offset, offset + 64).map(async name => {
     const path = join(folder, name);
     if (!(await realpath(path)).startsWith(resolve(folder) + (process.platform === "win32" ? "\\" : "/"))) throw new ApiError("Source située hors du répertoire autorisé.");
     if ((await lstat(path)).isSymbolicLink()) throw new ApiError("Lien symbolique non autorisé dans les sources.");
     return { path: name, hash: createHash("sha256").update(await readFile(path)).digest("hex") };
-  }));
+  })));
+  return result;
 }
 export async function changedSources(folder: string, before: SourceFile[], allowed: Set<string>) {
   const files: { path: string; content: string }[] = [];
@@ -110,11 +113,64 @@ export type NodeUpdateChecks = {
 };
 type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
-type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; priority?: string };
+export type NodeValidationRuntime = { image: () => Promise<string> };
+export function nodeValidationRuntime(nodeVersion: string, execute = runCommand): NodeValidationRuntime {
+  let pending: Promise<string> | undefined;
+  return { image: () => pending ||= (async () => {
+    const tag = `node:${nodeVersion}-bookworm`;
+    const inspect = () => execute("docker", ["image", "inspect", tag, "--format", "{{.Id}}"]);
+    let value: string;
+    try { value = await inspect(); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 502) throw error;
+      await execute("docker", ["pull", tag], { timeout: 180_000 });
+      value = await inspect();
+    }
+    const id = value.trim();
+    if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new ApiError("L’image Node de validation ne possède pas d’identité exacte.", 502);
+    return id;
+  })() };
+}
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; priority?: string; runtime?: NodeValidationRuntime };
+function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
+  return async (root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) => {
+    const name = `vigie-check-${crypto.randomUUID()}`;
+    try {
+      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
+    } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
+  };
+}
+
+// Validate a frozen, assembled proposal without selecting versions again. This
+// is mandatory after independently prepared services have been joined.
+export async function validatePreparedNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, validations: Set<string>, security: NodeUpdateChecks, runtime = nodeValidationRuntime(nodeVersion)) {
+  const protectedFiles = await snapshotSources(folder, names);
+  await security.resolved(names);
+  await changedSources(folder, protectedFiles, new Set());
+  const isolated = nodeSandbox(folder, runtime);
+  for (const root of [...new Set(roots)]) {
+    const prefix = root ? root + "/" : "";
+    const manifest = JSON.parse(await readFile(join(folder, prefix + "package.json"), "utf8"));
+    if (manifest.engines?.node !== nodeVersion || !manifest.scripts?.test && !manifest.scripts?.build) throw new ApiError("Proposition assemblée non validable : version Node exacte et scripts obligatoires.", 422);
+    const manager = managerCommands(manifest, names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length)));
+    const schema = prefix + "src/config/env.ts";
+    const environment = nodeTestProfile(manifest, names.includes(schema) ? await readFile(join(folder, schema), "utf8") : "")?.environment || {};
+    const files = await snapshotSources(folder, [...names].sort());
+    const key = createHash("sha256").update(JSON.stringify([nodeVersion, root, manager.validate, environment, files, await runtime.image()])).digest("hex");
+    if (validations.has(key)) await security.reused?.(`${root || "racine"} : validation déjà réussie pour les sources assemblées exactes ; résultat de cette exécution réutilisé.`);
+    else {
+      await isolated(root, manager.validate, undefined, environment);
+      await changedSources(folder, files, new Set());
+      validations.add(key);
+    }
+    await security.validated(root, ["typecheck", "test", "build", "test:integration", "test:e2e"].filter(name => manifest.scripts?.[name]));
+  }
+  await changedSources(folder, protectedFiles, new Set());
+}
 export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: PreparationRetry = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
-  retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set() };
+  retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
   const resolutionKey = (root: string) => JSON.stringify([root, Object.entries(remediation.constraints.get(root) || {}).sort(), Object.entries(retry.limits.get(root) || {}).sort()]);
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
@@ -192,17 +248,12 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
     if (profile) warnings.push(profile.message);
     checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, packages: Object.keys(upgraded.versions), environment: profile?.environment || {} });
   }
-  async function isolated(root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) {
-    const name = `vigie-check-${crypto.randomUUID()}`;
-    try {
-      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, `node:${nodeVersion}-bookworm`, "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
-    } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
-  }
+  const isolated = nodeSandbox(folder, retry.runtime!);
   async function validate(check: typeof checks[number], indirects: string[], locations?: Record<string, string>) {
     const files = await snapshotSources(folder, [...new Set([...names, ...allowed])].sort());
     // Include the WHOLE repository, not only this root: tests may import sibling
     // services. Changing any source, lock, Node, script or test profile invalidates it.
-    const key = createHash("sha256").update(JSON.stringify([nodeVersion, check.root, check.validate, check.environment, files])).digest("hex");
+    const key = createHash("sha256").update(JSON.stringify([nodeVersion, check.root, check.validate, check.environment, files, await retry.runtime!.image()])).digest("hex");
     if (retry.validations!.has(key)) {
       await security?.reused?.(`${check.root || "racine"} : installation et tests déjà réussis pour ces sources, verrous et version Node exacts ; résultat de cette exécution réutilisé.`);
       return;
