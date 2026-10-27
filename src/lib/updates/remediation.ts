@@ -60,6 +60,12 @@ export function npmGraph(raw: string) {
   }
   return { nodes, resolve, edges, paths };
 }
+function publicNpmArtifact(node: { resolved?: string; integrity?: string }) {
+  try {
+    const url = new URL(node.resolved || "");
+    return url.origin === "https://registry.npmjs.org" && !url.username && !url.password && !!node.integrity && /^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+$/.test(node.integrity);
+  } catch { return false; }
+}
 export function validateNpmProposal(before: string, after: string) {
   const original = npmGraph(before), proposed = npmGraph(after);
   const rootBefore = original.nodes.get("")!, rootAfter = proposed.nodes.get("")!;
@@ -72,9 +78,7 @@ export function validateNpmProposal(before: string, after: string) {
     const previous = original.nodes.get(path);
     if ((!previous || previous.version !== node.version) && !stableVersion(node.version)) throw new ApiError("La remédiation a sélectionné une version non stable.");
     const artifactChanged = !previous || previous.version !== node.version || previous.resolved !== node.resolved || previous.integrity !== node.integrity;
-    let publicOrigin = false;
-    try { const url = new URL(node.resolved || ""); publicOrigin = url.origin === "https://registry.npmjs.org" && !url.username && !url.password; } catch {}
-    if (artifactChanged && (!publicOrigin || !node.integrity || !/^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+$/.test(node.integrity))) throw new ApiError("Le correctif indirect ne fournit pas une origine npm publique et une intégrité vérifiable.");
+    if (artifactChanged && !publicNpmArtifact(node)) throw new ApiError("Le correctif indirect ne fournit pas une origine npm publique et une intégrité vérifiable.");
     for (const edge of proposed.edges(path)) {
       const range = dependencyRange(edge.range), installed = proposed.nodes.get(edge.target)?.version;
       if (!range || !installed || !satisfies(installed, range)) throw new ApiError(`La correction de ${edge.name} sort des contraintes déclarées par ${node.name || packageName(path)}. Aucun override automatique autorisé.`);
@@ -85,11 +89,109 @@ export function validateNpmProposal(before: string, after: string) {
     if (previous?.version !== next?.version) throw new ApiError("Une correction indirecte ne peut pas changer silencieusement une version directe.");
   }
 }
-export type RemediationDecision = { kind: "lock"; roots: string[]; messages: string[] } | { kind: "parents"; constraints: Map<string, Record<string, string>>; messages: string[] };
+export function npmChangedIndirectPackages(before: string, after: string) {
+  const candidate = npmGraph(after), versions = new Map<string, Set<string>>();
+  let original: ReturnType<typeof npmGraph>;
+  try { original = npmGraph(before); }
+  catch (error) { if (error instanceof ApiError || error instanceof z.ZodError || error instanceof SyntaxError) return []; throw error; }
+  for (const [path, item] of original.nodes) if (path && item.version) {
+    const name = item.name || packageName(path);
+    versions.set(name, new Set([...(versions.get(name) || []), item.version]));
+  }
+  const direct = new Set(candidate.edges("").map(edge => edge.target));
+  return [...new Set([...candidate.nodes].flatMap(([path, item]) => {
+    const previous = versions.get(item.name || packageName(path));
+    return path && !direct.has(path) && item.version && (!previous || !previous.has(item.version)) ? [item.name || packageName(path)] : [];
+  }))].sort();
+}
+export function npmIndirectVersionsChanged(before: string, after: string) {
+  return npmChangedIndirectPackages(before, after).length > 0;
+}
+export function seedNpmIndirectVersions(before: string, after: string, names: string[]) {
+  const original = npmGraph(before), candidate = npmGraph(after), direct = new Set(candidate.edges("").map(edge => edge.target));
+  const incoming = new Map<string, string[]>();
+  for (const path of candidate.nodes.keys()) for (const edge of candidate.edges(path, true)) incoming.set(edge.target, [...incoming.get(edge.target) || [], edge.range]);
+  const proposed = JSON.parse(after);
+  let changed = false;
+  for (const [path, current] of candidate.nodes) {
+    const name = current.name || packageName(path), ranges = incoming.get(path);
+    if (!path || direct.has(path) || !names.includes(name) || !stableVersion(current.version) || !ranges?.length) continue;
+    const previous = [...original.nodes].filter(([location, item]) => location && (item.name || packageName(location)) === name && stableVersion(item.version) && compare(item.version!, current.version!) < 0 && publicNpmArtifact(item) && ranges.every(range => { const declared = dependencyRange(range); return declared && satisfies(item.version!, declared); })).map(([, item]) => item).sort((first, second) => compare(second.version!, first.version!))[0];
+    if (previous) { proposed.packages[path] = previous; changed = true; }
+  }
+  return changed ? JSON.stringify(proposed) + "\n" : null;
+}
+export function seedNpmCatalogVersion(raw: string, name: string, item: PackageVersion, locations: string[] = [], coordinateParents = false) {
+  if (!stableVersion(item.version) || item.deprecated || !publicNpmArtifact({ resolved: item.dist?.tarball, integrity: item.dist?.integrity })) return null;
+  const graph = npmGraph(raw), direct = new Set(graph.edges("").map(edge => edge.target)), incoming = new Map<string, { parent: string; range: string }[]>();
+  for (const path of graph.nodes.keys()) for (const edge of graph.edges(path, true)) incoming.set(edge.target, [...incoming.get(edge.target) || [], { parent: path, range: edge.range }]);
+  const proposed = JSON.parse(raw), paths: string[] = [];
+  for (const [path, current] of graph.nodes) {
+    const ranges = incoming.get(path);
+    if (!path || direct.has(path) || locations.length && !locations.includes(path) || (current.name || packageName(path)) !== name || !ranges?.length || !stableVersion(current.version) || compare(item.version, current.version) >= 0 || !ranges.every(edge => { const declared = dependencyRange(edge.range); return coordinateParents && !!edge.parent && !direct.has(edge.parent) || declared && satisfies(item.version, declared); })) continue;
+    const replacement = { ...current, version: item.version, resolved: item.dist!.tarball, integrity: item.dist!.integrity, dependencies: item.dependencies || {}, optionalDependencies: item.optionalDependencies || {}, peerDependencies: item.peerDependencies || {}, peerDependenciesMeta: item.peerDependenciesMeta || {}, engines: item.engines || {}, hasInstallScript: !!item.hasInstallScript || ["preinstall", "install", "postinstall"].some(script => !!item.scripts?.[script]), bin: typeof item.bin === "string" ? { [name.split("/").at(-1)!]: item.bin } : item.bin || {} };
+    for (const field of ["os", "cpu", "libc"] as const) {
+      delete (replacement as Record<string, unknown>)[field];
+      if (item[field]) (replacement as Record<string, unknown>)[field] = item[field];
+    }
+    proposed.packages[path] = replacement;
+    paths.push(path);
+  }
+  return paths.length ? { lock: JSON.stringify(proposed) + "\n", paths } : null;
+}
+export function seedNpmCoordinatedVersion(originalRaw: string, failed: string, name: string, item: PackageVersion, targets: string[] = []) {
+  const original = npmGraph(originalRaw), initial = npmGraph(failed), direct = new Set(initial.edges("").map(edge => edge.target));
+  const first = seedNpmCatalogVersion(failed, name, item, targets, true);
+  if (!first) return null;
+  const proposed = JSON.parse(failed), seeded = JSON.parse(first.lock), changed = new Set(first.paths);
+  for (const path of first.paths) proposed.packages[path] = seeded.packages[path];
+  const tried = new Set<string>();
+  for (let round = 0; round < 12; round++) {
+    const graph = npmGraph(JSON.stringify(proposed));
+    // npm may create nested copies for normal dependencies. Visible peer assignments
+    // must be coordinated here; the complete resolved graph is checked afterwards.
+    const conflict = [...graph.nodes.keys()].flatMap(path => graph.edges(path, true).filter(edge => changed.has(edge.target)).map(edge => ({ parent: path, ...edge }))).find(edge => {
+      const parent = graph.nodes.get(edge.parent)!, peer = parent.peerDependencies[edge.name];
+      if (edge.parent && !peer) return false;
+      const range = dependencyRange(peer || edge.range), version = graph.nodes.get(edge.target)?.version;
+      return !range || !version || !satisfies(version, range);
+    });
+    if (!conflict) return { lock: JSON.stringify(proposed) + "\n", paths: first.paths, coordinated: [...changed].filter(path => !first.paths.includes(path)) };
+    if (!conflict.parent || direct.has(conflict.parent) || first.paths.includes(conflict.parent)) return null;
+    const parent = graph.nodes.get(conflict.parent)!, parentName = parent.name || packageName(conflict.parent), targetVersion = graph.nodes.get(conflict.target)!.version!;
+    const choices = [...original.nodes].filter(([path, value]) => path && (value.name || packageName(path)) === parentName && stableVersion(value.version) && publicNpmArtifact(value) && !tried.has(`${conflict.parent}@${value.version}`)).map(([, value]) => value).sort((a, b) => compare(b.version!, a.version!));
+    const replacement = choices.find(value => {
+      const range = value.peerDependencies[conflict.name];
+      const declared = range && dependencyRange(range);
+      return !range || !!declared && satisfies(targetVersion, declared);
+    });
+    if (!replacement) return null;
+    tried.add(`${conflict.parent}@${replacement.version}`);
+    proposed.packages[conflict.parent] = replacement;
+    changed.add(conflict.parent);
+  }
+  return null;
+}
+export function npmCoordinationCandidates(raw: string, findings: SecurityFinding[]) {
+  const graph = npmGraph(raw), versions = new Map<string, Set<string>>();
+  for (const [path, item] of graph.nodes) if (path && stableVersion(item.version)) {
+    const name = item.name || packageName(path);
+    versions.set(name, new Set([...(versions.get(name) || []), item.version]));
+  }
+  const candidates = new Set<string>();
+  for (const finding of findings) for (const path of graph.paths(finding.package, finding.version)) for (const location of path.slice(0, -1)) {
+    const item = graph.nodes.get(location)!, name = item.name || packageName(location);
+    if ((versions.get(name)?.size || 0) > 1) candidates.add(name);
+  }
+  return [...candidates].sort();
+}
+export type RemediationDecision = { kind: "lock"; roots: string[]; messages: string[] } | { kind: "balance"; roots: string[]; messages: string[] } | { kind: "parents"; constraints: Map<string, Record<string, string>>; messages: string[] };
 class RejectedNpmProposal extends Error {}
 export function createNodeRemediator(transport: typeof fetch = fetch, execute = runCommand) {
   const catalogs = new Map<string, Promise<PackageVersion[]>>();
   const safe = new Map<string, Promise<PackageVersion[]>>();
+  type Route = { graph: ReturnType<typeof npmGraph>; path: string[]; alert: SecurityFinding };
+  const history = new Map<string, Map<string, Route>>();
   const catalog = (name: string) => {
     if (!catalogs.has(name)) catalogs.set(name, packageCatalog(name, transport));
     return catalogs.get(name)!;
@@ -134,7 +236,7 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       return canonical(JSON.parse(lock)) === canonical(JSON.parse(proposed)) ? null : proposed;
     } finally { await rm(temporary, { recursive: true, force: true }); }
   }
-  return async (folder: string, roots: string[], names: string[], findings: SecurityFinding[], node: string, originals: Map<string, string | null>, tried: Set<string>): Promise<RemediationDecision> => {
+  return async (folder: string, roots: string[], names: string[], findings: SecurityFinding[], node: string, originals: Map<string, string | null>, tried: Set<string>, proposalContext = ""): Promise<RemediationDecision> => {
     const updated: string[] = [], messages: string[] = [], contexts: { root: string; manifest: Record<string, any>; originalManifest: Record<string, any>; graph: ReturnType<typeof npmGraph>; original: ReturnType<typeof npmGraph>; alerts: SecurityFinding[] }[] = [];
     for (const root of [...new Set(findings.map(item => item.scope))]) {
       if (root === undefined || !roots.includes(root)) throw new ApiError("Le périmètre de la dépendance vulnérable n’est pas confirmé.");
@@ -144,7 +246,7 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       const name = prefix + lockName, manifestName = prefix + "package.json";
       const lock = await readFile(join(folder, name), "utf8"), manifest = await readFile(join(folder, manifestName), "utf8");
       const alerts = findings.filter(item => item.scope === root);
-      const lockAttempt = `lock:${root}:${createHash("sha256").update(lock).digest("hex")}`;
+      const lockAttempt = `lock:${root}:${createHash("sha256").update(proposalContext + "\n" + lock).digest("hex")}`;
       let proposed: string | null = null;
       if (!tried.has(lockAttempt)) {
         tried.add(lockAttempt);
@@ -162,38 +264,59 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       contexts.push({ root, manifest: JSON.parse(manifest), originalManifest: JSON.parse(originals.get(manifestName) || manifest), graph: npmGraph(lock), original: npmGraph(originals.get(name) || lock), alerts });
     }
     if (updated.length) return { kind: "lock", roots: updated, messages };
+    for (const { root, graph, alerts } of contexts) {
+      const routes = history.get(root) || new Map<string, Route>();
+      for (const alert of [...new Map(alerts.map(item => [item.package + "@" + item.version, item])).values()]) for (const path of graph.paths(alert.package, alert.version)) {
+        const fingerprint = createHash("sha256").update(canonical([alert.package, alert.version, path.map(location => [location, graph.nodes.get(location)])])).digest("hex");
+        routes.set(fingerprint, { graph, path, alert });
+      }
+      history.set(root, routes);
+    }
+    const coordinated: string[] = [];
+    for (const { root, graph, alerts } of contexts) {
+      const raw = canonical([proposalContext, Object.fromEntries(graph.nodes)]), fingerprint = `balance:${root}:${createHash("sha256").update(raw).digest("hex")}`;
+      if (tried.has(fingerprint)) continue;
+      const names = npmCoordinationCandidates(JSON.stringify({ lockfileVersion: 3, packages: Object.fromEntries(graph.nodes) }), alerts);
+      if (!names.length) continue;
+      tried.add(fingerprint);
+      coordinated.push(root);
+      messages.push(`${root || "racine"} : coordination des versions indirectes de ${names.slice(0, 8).join(", ")} dans les contraintes existantes ; le manifeste et les versions directes restent figés, puis installation stricte et nouveau scan obligatoires.`);
+    }
+    if (coordinated.length) return { kind: "balance", roots: coordinated, messages };
     const constraints = new Map<string, Record<string, string>>();
     let visits = 0;
     for (const { root, manifest, originalManifest, graph, original, alerts } of contexts) {
-      const requirements = new Map<string, { path: string[]; fixed: PackageVersion[]; alert: SecurityFinding }[]>();
-      for (const alert of [...new Map(alerts.map(item => [item.package + "@" + item.version, item])).values()]) {
+      const affected = new Set(alerts.flatMap(alert => graph.paths(alert.package, alert.version).map(path => packageName(path[0]))));
+      const requirements = new Map<string, { graph: ReturnType<typeof npmGraph>; path: string[]; fixed: PackageVersion[]; alert: SecurityFinding }[]>();
+      for (const { graph: source, path, alert } of history.get(root)!.values()) {
+        if (!affected.has(packageName(path[0]))) continue;
         const installedVersions = [...original.nodes].filter(([location, item]) => location && (item.name || packageName(location)) === alert.package && stableVersion(item.version)).map(([, item]) => item.version!).sort((first, second) => compare(second, first));
         const fixed = await safeVersions(alert.package, node, installedVersions[0] || "0.0.0");
-        const paths = graph.paths(alert.package, alert.version);
-        if (!paths.length) throw new ApiError(`${root || "racine"} : la chaîne de ${alert.package}@${alert.version} n’a pas pu être prouvée dans le verrou.`);
-        for (const path of paths) requirements.set(path[0], [...requirements.get(path[0]) || [], { path, fixed, alert }]);
+        const direct = packageName(path[0]);
+        requirements.set(direct, [...requirements.get(direct) || [], { graph: source, path, fixed, alert }]);
       }
+      if (!requirements.size) throw new ApiError(`${root || "racine"} : la chaîne vulnérable n’a pas pu être prouvée dans le verrou.`);
       for (const related of requirements.values()) {
         const path = related[0].path;
-        const direct = packageName(path[0]), current = graph.nodes.get(path[0])!;
+        const direct = packageName(path[0]), current = graph.nodes.get(graph.resolve("", direct) || "")!;
         const range = sections.map(section => Object.hasOwn(manifest[section] || {}, direct) ? manifest[section][direct] : undefined).find(Boolean);
         if (!range || !validRange(range)) throw new ApiError(`La source particulière de ${direct} exige une remédiation dédiée.`);
         const installed = original.nodes.get(original.resolve("", direct) || "")?.version;
         const originalRange = sections.map(section => Object.hasOwn(originalManifest[section] || {}, direct) ? originalManifest[section][direct] : undefined).find(Boolean);
         if (!originalRange || !validRange(originalRange)) throw new ApiError(`Les contraintes initiales de ${direct} ne permettent pas une remédiation automatique.`);
         const floor = minVersion(originalRange)!.version;
-        async function supports(path: string[], index: number, candidate: PackageVersion, fixed: PackageVersion[]): Promise<boolean> {
+        async function supports(source: ReturnType<typeof npmGraph>, path: string[], index: number, candidate: PackageVersion, fixed: PackageVersion[]): Promise<boolean> {
           if (++visits > 5000) throw new ApiError("La recherche de parents corrigés atteint sa limite. Aucun contrôle n’a été contourné.");
           if (index === path.length - 1) return fixed.some(item => item.version === candidate.version);
-          const child = graph.nodes.get(path[index + 1])!, childName = child.name || packageName(path[index + 1]);
-          const edge = graph.edges(path[index], true).find(edge => edge.target === path[index + 1])!;
+          const child = source.nodes.get(path[index + 1])!, childName = child.name || packageName(path[index + 1]);
+          const edge = source.edges(path[index], true).find(edge => edge.target === path[index + 1])!;
           const dependencies = { ...candidate.peerDependencies, ...candidate.dependencies, ...candidate.optionalDependencies };
           const childRange = Object.hasOwn(dependencies, edge.name) ? dependencies[edge.name] : undefined;
           if (!childRange) return true;
           const declared = dependencyRange(childRange);
           if (!declared) return false;
           const candidates = index + 1 === path.length - 1 ? fixed : (await catalog(childName)).filter(item => usable(item, node)).slice(0, 40);
-          for (const next of candidates) if (satisfies(next.version, declared) && await supports(path, index + 1, next, fixed)) return true;
+          for (const next of candidates) if (satisfies(next.version, declared) && await supports(source, path, index + 1, next, fixed)) return true;
           return false;
         }
         const candidates = (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, 40);
@@ -201,15 +324,15 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
         for (const candidate of candidates) {
           if (tried.has(`${root}:${direct}@${candidate.version}`)) continue;
           let supported = true;
-          for (const route of related) if (!await supports(route.path, 0, candidate, route.fixed)) { supported = false; break; }
+          for (const route of related) if (!await supports(route.graph, route.path, 0, candidate, route.fixed)) { supported = false; break; }
           if (supported) { chosen = candidate; break; }
         }
         if (!chosen) {
-          const details = [...new Set(related.map(({ path, fixed, alert }) => {
-            const chain = path.map(location => { const item = graph.nodes.get(location)!; return `${item.name || packageName(location)}@${item.version}`; }).join(" → ");
+          const details = [...new Set(related.map(({ graph: source, path, fixed, alert }) => {
+            const chain = path.map(location => { const item = source.nodes.get(location)!; return `${item.name || packageName(location)}@${item.version}`; }).join(" → ");
             const fixes = fixed.slice(0, 3).map(item => item.version).join(", ") || alert.fixedVersions?.join(", ") || "aucun correctif stable vérifié";
             return `${chain}. Correctifs vérifiés de ${alert.package} : ${fixes}`;
-          }))].join(" ; ");
+          }))].slice(0, 5).join(" ; ");
           throw new ApiError(`${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé dans la recherche bornée (40 versions par paquet). Aucun override ni contrôle désactivé.`, 422);
         }
         const selected = constraints.get(root) || {};

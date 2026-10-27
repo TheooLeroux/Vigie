@@ -4,7 +4,7 @@ import type { PeerConflict } from "./process";
 
 export class CompatibilitySelectionError extends ApiError {}
 
-export type PackageVersion = { version: string; deprecated?: string; engines?: { node?: string }; peerDependencies?: Record<string, string>; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> };
+export type PackageVersion = { version: string; deprecated?: string; engines?: { node?: string }; peerDependencies?: Record<string, string>; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; dist?: { tarball?: string; integrity?: string }; bin?: string | Record<string, string>; hasInstallScript?: boolean; scripts?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; os?: string[]; cpu?: string[]; libc?: string[] };
 export const stableVersion = (value: unknown): value is string => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value);
 const sections = ["dependencies", "devDependencies", "optionalDependencies"] as const;
 

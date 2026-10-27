@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ApiError } from "../http";
 import { runCommand } from "./process";
 import { stableVersion } from "./versions";
 import { compare } from "semver";
+import { SecurityPolicyError } from "./security";
 
 type Replacement = { start: number; end: number; name: string; suffix: string; version: string; image: boolean };
 function replacements(source: string) {
@@ -17,7 +18,7 @@ function replacements(source: string) {
     if (from) {
       const image = from[1];
       if (!stages.has(image.toLowerCase())) {
-        const node = image.match(/^node:(\d+(?:\.\d+){0,2})(-(?:slim|bookworm(?:-slim)?|bullseye(?:-slim)?|alpine(?:\d+\.\d+)?))?$/);
+        const node = image.match(/^node:(\d+(?:\.\d+){0,2})(-(?:slim|trixie(?:-slim)?|bookworm(?:-slim)?|bullseye(?:-slim)?|alpine(?:\d+\.\d+)?))?$/);
         if (!node) throw new ApiError("Seuls les Dockerfiles utilisant les images officielles Node avec une version explicite sont mis à jour automatiquement.");
         changes.push({ start: offset + line.indexOf(image), end: offset + line.indexOf(image) + image.length, name: "node", suffix: node[2] || "", version: node[1], image: true });
         bases++;
@@ -51,25 +52,74 @@ export function dockerRuntimeBase(source: string) {
   const last = bases.at(-1)!;
   return `node:${last.version}${last.suffix}`;
 }
-export function rewriteDockerfile(source: string, nodeVersion: string, versions: Record<string, string>) {
+export function rewriteDockerfile(source: string, nodeVersion: string, versions: Record<string, string>, release?: "trixie" | "bookworm" | "alpine") {
   if (!stableVersion(nodeVersion)) throw new ApiError("Version Node invalide pour le Dockerfile.");
   let result = source;
   for (const item of replacements(source).reverse()) {
     const version = item.image ? nodeVersion : versions[item.name];
     if (!stableVersion(version)) throw new ApiError(`Version compatible manquante pour ${item.name} dans le Dockerfile.`);
-    const value = item.image ? `node:${version}${item.suffix}` : `${item.name}@${version}`;
+    if (item.image && release && release !== "alpine" && item.suffix.startsWith("-alpine")) throw new ApiError("Le changement de distribution ne peut pas remplacer Alpine par Debian.");
+    const suffix = item.image && release ? release === "alpine" ? "-alpine" : `-${release}${item.suffix.endsWith("-slim") ? "-slim" : ""}` : item.suffix;
+    const value = item.image ? `node:${version}${suffix}` : `${item.name}@${version}`;
     result = result.slice(0, item.start) + value + result.slice(item.end);
   }
   return result;
 }
 export function versionOnlyDockerfile(before: string, after: string) {
   try {
-    const normalize = (source: string) => rewriteDockerfile(source, "0.0.0", Object.fromEntries(Object.keys(dockerPackages(source)).map(name => [name, "0.0.0"])));
+    const images = (source: string) => replacements(source).filter(item => item.image);
+    const portableTransition = images(before).every(item => item.suffix.endsWith("-slim")) && images(after).every(item => item.suffix.startsWith("-alpine")) && portableNodeDockerfile(before) && portableNodeDockerfile(after);
+    const normalize = (source: string) => {
+      let result = source;
+      for (const item of replacements(source).reverse()) {
+        const suffix = portableTransition && item.image ? "-portable-minimal" : item.image && !item.suffix.startsWith("-alpine") ? item.suffix.endsWith("-slim") ? "-debian-slim" : "-debian" : item.suffix;
+        const value = item.image ? `node:0.0.0${suffix}` : `${item.name}@0.0.0`;
+        result = result.slice(0, item.start) + value + result.slice(item.end);
+      }
+      return result;
+    };
     return before !== after && normalize(before) === normalize(after);
   } catch { return false; }
 }
 
-export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
+function portableNodeDockerfile(source: string) {
+  return source.split(/\r?\n/).every(line => {
+    const value = line.trim();
+    if (!value || value.startsWith("#") || /^(FROM|WORKDIR|COPY|EXPOSE)\s/i.test(value)) return true;
+    if (/^ENV\s+(NODE_ENV=production|PORT=\d+)$/i.test(value) || /^USER\s+(node|1000(?::1000)?)$/i.test(value)) return true;
+    if (/^RUN\s+npm\s+(install|i|ci|run\s+[a-z0-9:_-]+)(\s+[a-z0-9@/_.:=+-]+)*$/i.test(value)) return true;
+    if (/^CMD\s+\[/i.test(value)) {
+      try { const command = JSON.parse(value.replace(/^CMD\s+/i, "")); return Array.isArray(command) && command[0] === "node" && command.every(item => typeof item === "string"); } catch { return false; }
+    }
+    return false;
+  });
+}
+export function dockerBaseAlternatives(source: string, nodeVersion: string) {
+  if (replacements(source).some(item => item.image && item.suffix.startsWith("-alpine"))) return [];
+  const releases: ("trixie" | "bookworm" | "alpine")[] = ["trixie", "bookworm"];
+  if (replacements(source).filter(item => item.image).every(item => item.suffix.endsWith("-slim")) && portableNodeDockerfile(source)) releases.push("alpine");
+  return [...new Set(releases.map(release => rewriteDockerfile(source, nodeVersion, dockerPackages(source), release)))].filter(candidate => candidate !== source);
+}
+export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>, notify: (message: string) => Promise<void> = async () => {}) {
+  const path = join(folder, root ? root + "/Dockerfile" : "Dockerfile"), initial = await readFile(path, "utf8");
+  const candidates = [initial, ...dockerBaseAlternatives(initial, nodeVersion)];
+  let failure: unknown;
+  for (const [index, candidate] of candidates.entries()) {
+    if (index) {
+      if (!versionOnlyDockerfile(initial, candidate)) throw new ApiError("Le repli Docker ne respecte pas les changements de versions autorisés.");
+      await notify(`Image refusée par Trivy ; essai de ${dockerRuntimeBase(candidate)}, même version Node et mêmes instructions. ${dockerRuntimeBase(candidate).includes("-alpine") ? "Dockerfile Node minimal et portable : la compatibilité Alpine reste à démontrer." : "Famille Debian conservée."} Nouvelle construction, nouveau scan et démarrage obligatoires.`);
+      await writeFile(path, candidate);
+    }
+    try { await validateDockerfileCandidate(folder, root, names, nodeVersion, inspectImage); return; }
+    catch (error) {
+      await writeFile(path, initial);
+      if (!(error instanceof SecurityPolicyError) || error.check.tool !== "Trivy") throw error;
+      failure = error;
+    }
+  }
+  throw failure;
+}
+async function validateDockerfileCandidate(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
   const prefix = root ? root + "/" : "", source = await readFile(join(folder, prefix + "Dockerfile"), "utf8");
   replacements(source);
   const expose = [...source.matchAll(/^\s*EXPOSE\s+(\d+)(?:\/tcp)?\s*$/gim)].at(-1);

@@ -3,13 +3,44 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createNodeRemediator, dependencyRange, npmGraph, validateNpmProposal } from "../src/lib/updates/remediation";
+import { createNodeRemediator, dependencyRange, npmCoordinationCandidates, npmGraph, npmIndirectVersionsChanged, seedNpmIndirectVersions, validateNpmProposal } from "../src/lib/updates/remediation";
 import { requireSecurityPass, securityCheck, SecurityPolicyError, parseOsv } from "../src/lib/updates/security";
 import type { SecurityFinding } from "../src/lib/updates/types";
 import type { PackageVersion } from "../src/lib/updates/versions";
-import type { runCommand } from "../src/lib/updates/process";
+import { runCommand, IndirectValidationError } from "../src/lib/updates/process";
 
 const alert: SecurityFinding = { id: "GHSA-test-test-test", aliases: [], package: "indirect", version: "1.1.0", severity: "critical", scope: "", fixedVersions: ["2.1.2"] };
+test("Le repli du verrou distingue un changement indirect d’un changement direct et refuse une référence inexploitable", () => {
+  assert.equal(npmIndirectVersionsChanged(lock(), lock("3.0.0")), false);
+  assert.equal(npmIndirectVersionsChanged(lock(), lock("2.0.0", "^2", "2.1.2")), true);
+  assert.equal(npmIndirectVersionsChanged('{"lockfileVersion":3,"packages":{}}', lock()), false);
+});
+test("Le repli ciblé reste dans les plages actuelles, avec des artefacts publics, sans changer les paquets directs", () => {
+  const original = lock("1.0.0", "^1 || ^2", "1.1.0"), current = lock("2.0.0", "^1 || ^2", "2.2.0");
+  const seeded = seedNpmIndirectVersions(original, current, ["parent", "indirect"]);
+  assert.ok(seeded);
+  validateNpmProposal(current, seeded);
+  assert.equal(npmGraph(seeded).nodes.get("node_modules/parent")?.version, "2.0.0");
+  assert.equal(npmGraph(seeded).nodes.get("node_modules/indirect")?.version, "1.1.0");
+  assert.equal(seedNpmIndirectVersions(original, lock("2.0.0", "^2", "2.2.0"), ["indirect"]), null);
+  const peers = JSON.parse(current);
+  peers.packages[""].dependencies.consumer = "1.0.0";
+  peers.packages["node_modules/consumer"] = { version: "1.0.0", peerDependencies: { indirect: "^2" } };
+  assert.equal(seedNpmIndirectVersions(original, JSON.stringify(peers), ["indirect"]), null);
+  assert.equal(seedNpmIndirectVersions(original.replace("https://registry.npmjs.org/indirect", "https://private.invalid/indirect"), current, ["indirect"]), null);
+});
+test("Le diagnostic indirect ne conserve que les paquets autorisés, sans exposer les chemins ou journaux", async () => {
+  const diagnostic = "\n    at compiler (/tmp/secret/node_modules/@vendor/compiler/lib.js:1:1) private-marker /tmp/node_modules/unknown/index.js";
+  const program = `process.stderr.write('warning '.repeat(5000));console.error(${JSON.stringify(diagnostic)});process.stderr.write('schema '.repeat(5000));process.exit(1)`;
+  await assert.rejects(runCommand(process.execPath, ["-e", program], { diagnosticIndirectPackages: ["@vendor/compiler", "absent"], diagnosticIndirectLocations: { "node_modules/@vendor/compiler": "@vendor/compiler" } }), error => {
+    assert.ok(error instanceof IndirectValidationError);
+    assert.deepEqual(error.packages, ["@vendor/compiler"]);
+    assert.deepEqual(error.locations, ["node_modules/@vendor/compiler"]);
+    assert.ok(!JSON.stringify(error).includes("private-marker"));
+    assert.ok(!error.message.includes("/tmp/secret"));
+    return true;
+  });
+});
 function lock(parent = "2.0.0", range = "^1.0.0", child = "1.1.0") {
   return JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: { parent } }, "node_modules/parent": { version: parent, dependencies: { indirect: range }, resolved: `https://registry.npmjs.org/parent/-/parent-${parent}.tgz`, integrity: "sha512-Zml4dHVyZQ==" }, "node_modules/indirect": { version: child, resolved: `https://registry.npmjs.org/indirect/-/indirect-${child}.tgz`, integrity: "sha512-Zml4dHVyZQ==" } } });
 }
@@ -196,6 +227,51 @@ test("Remédiation : absence de parent compatible expliquée, aucun override ou 
     await assert.rejects(createNodeRemediator(transport, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set()), /parent@2\.0\.0 → indirect@1\.1\.0.*2\.2\.0.*Aucun override/);
     assert.equal(await readFile(join(current.folder, "package-lock.json"), "utf8"), current.content);
     assert.equal(await readFile(join(current.folder, "package.json"), "utf8"), current.manifest);
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
+
+test("Remédiation : coordonner les versions indirectes avant de changer de nouveau les parents directs", async () => {
+  const current = await fixture();
+  const data = JSON.parse(current.content);
+  data.packages[""].dependencies.anchor = "1.0.0";
+  data.packages["node_modules/parent"].dependencies = { provider: "^1 || ^2" };
+  data.packages["node_modules/provider"] = { version: "2.0.0", dependencies: { indirect: "^1" } };
+  data.packages["node_modules/anchor"] = { version: "1.0.0", dependencies: { provider: "1.0.0" } };
+  data.packages["node_modules/anchor/node_modules/provider"] = { version: "1.0.0" };
+  const raw = JSON.stringify(data);
+  await writeFile(join(current.folder, "package-lock.json"), raw);
+  const manifest = JSON.stringify({ dependencies: { parent: "2.0.0", anchor: "1.0.0" } });
+  await writeFile(join(current.folder, "package.json"), manifest);
+  assert.deepEqual(npmCoordinationCandidates(raw, [alert]), ["provider"]);
+  try {
+    const tried = new Set<string>(), repair = createNodeRemediator(registry([{ version: "3.0.0", dependencies: { indirect: "^2" } }]), noPatch);
+    const decision = await repair(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, tried);
+    assert.equal(decision.kind, "balance");
+    assert.ok(decision.messages.some(message => message.includes("versions indirectes de provider")));
+    assert.equal(await readFile(join(current.folder, "package-lock.json"), "utf8"), raw);
+    assert.equal(await readFile(join(current.folder, "package.json"), "utf8"), manifest);
+    assert.ok([...tried].some(key => key.startsWith("balance:")));
+    const next = await repair(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, tried);
+    assert.equal(next.kind, "parents");
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
+
+test("Remédiation : une nouvelle chaîne ne fait pas oublier le parent qui réintroduisait déjà la faille", async () => {
+  const current = await fixture("4.0.0");
+  const parents: PackageVersion[] = [{ version: "4.0.0", dependencies: { indirect: "^1" } }, { version: "3.0.0", dependencies: { bridge: "^1" } }, { version: "2.0.0" }];
+  const repair = createNodeRemediator(registry(parents, ["2.2.0"], { bridge: [{ version: "1.0.0", dependencies: { indirect: "^1" } }] }), noPatch), tried = new Set<string>();
+  try {
+    const first = await repair(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, tried);
+    assert.equal(first.kind, "parents");
+    if (first.kind === "parents") assert.equal(first.constraints.get("")?.parent, "3.0.0");
+    const nextLock = JSON.parse(lock("3.0.0"));
+    nextLock.packages["node_modules/parent"].dependencies = { bridge: "^1" };
+    nextLock.packages["node_modules/bridge"] = { version: "1.0.0", dependencies: { indirect: "^1" } };
+    await writeFile(join(current.folder, "package-lock.json"), JSON.stringify(nextLock));
+    await writeFile(join(current.folder, "package.json"), JSON.stringify({ dependencies: { parent: "3.0.0" } }));
+    const second = await repair(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, tried);
+    assert.equal(second.kind, "parents");
+    if (second.kind === "parents") assert.equal(second.constraints.get("")?.parent, "2.0.0");
   } finally { await rm(current.folder, { recursive: true, force: true }); }
 });
 test("Remédiation : registre ou service OSV indisponible ne deviennent pas une version sûre", async () => {

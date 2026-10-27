@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { compatibleVersions, verifiedPeerConflicts, type PackageVersion } from "../src/lib/updates/versions";
 import { npmPeerConflicts, PeerResolutionError, runCommand } from "../src/lib/updates/process";
-import { dockerPackages, rewriteDockerfile, versionOnlyDockerfile } from "../src/lib/updates/dockerfile";
+import { dockerBaseAlternatives, dockerPackages, rewriteDockerfile, versionOnlyDockerfile } from "../src/lib/updates/dockerfile";
 import { prepareNodeSources } from "../src/lib/updates/node";
 import { nodeTestProfile } from "../src/lib/updates/node-test-profile";
 
@@ -113,6 +113,29 @@ test("Dockerfile : toutes les étapes Node et la dépendance runtime sont actual
   assert.throws(() => rewriteDockerfile("FROM node:20\nRUN npm install express@latest\n", "24.14.0", {}), /version explicite/);
   assert.throws(() => rewriteDockerfile("FROM node:20\nRUN --mount=type=ssh npm ci\n", "24.14.0", {}), /validation dédiée/);
   assert.equal(rewriteDockerfile("FROM node:20\nRUN npm install\n", "24.14.0", {}), "FROM node:24.14.0\nRUN npm install\n");
+});
+
+test("Docker : alternatives Debian officielles, étapes coordonnées et instructions protégées", () => {
+  const original = "FROM node:22-bookworm AS builder\nWORKDIR /app\nFROM node:22-slim\nRUN npm install --no-save express@4.21.2\n";
+  const candidates = dockerBaseAlternatives(original, "24.14.0");
+  assert.equal(candidates.length, 2);
+  assert.ok(candidates[0].includes("node:24.14.0-trixie AS builder"));
+  assert.ok(candidates[0].includes("node:24.14.0-trixie-slim"));
+  assert.ok(candidates[0].includes("express@4.21.2"));
+  assert.ok(versionOnlyDockerfile(original, candidates[0]));
+  assert.ok(!versionOnlyDockerfile(original, candidates[0].replace("-trixie-slim", "-trixie")));
+  assert.ok(!versionOnlyDockerfile(original, candidates[0] + "RUN echo changed\n"));
+  assert.deepEqual(dockerBaseAlternatives("FROM node:22-alpine\n", "24.14.0"), []);
+  assert.throws(() => rewriteDockerfile("FROM node:22-alpine\n", "24.14.0", {}, "trixie"), /Alpine/);
+  const portable = 'FROM node:22-slim AS builder\nRUN npm ci\nFROM node:22-slim\nENV NODE_ENV=production\nCOPY --from=builder /app/build ./build\nCMD ["node","server.js"]\n';
+  const alpine = dockerBaseAlternatives(portable, "24.14.0").at(-1)!;
+  assert.equal(alpine.match(/node:24\.14\.0-alpine/g)?.length, 2);
+  assert.ok(versionOnlyDockerfile(portable, alpine));
+  for (const extra of ["RUN apt-get update\n", "RUN ldd --version\n", "SHELL [\"bash\",\"-c\"]\n", "ENV LD_PRELOAD=/lib/library.so\n"]) {
+    assert.equal(dockerBaseAlternatives(portable + extra, "24.14.0").length, 2);
+    assert.ok(!versionOnlyDockerfile(portable + extra, alpine + extra));
+  }
+  assert.ok(!versionOnlyDockerfile(portable, alpine + "RUN npm run changed\n"));
 });
 
 test("Profil de test NesAppli : valeurs factices locales uniquement, aucune récupération des secrets du worker", () => {
