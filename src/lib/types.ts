@@ -59,6 +59,7 @@ export type WordPressComponent = UpdateInfo & {
   template: string | null;
 };
 export type SiteInventory = {
+  localAgent?: { detected: true; lastSeenAt: string };
   source: "cpanel-files" | "wordpress-observer";
   collectionMode?: "normal" | "early";
   observedAt: string | null;

@@ -4,7 +4,7 @@ import { projectHostingInstallations } from "../hosting-discovery";
 import { requireProject } from "../db";
 import { ApiError } from "../http";
 import { githubUpdateToken, repositoryAllowed } from "./github";
-import { updateStorage } from "./storage";
+import { readUpdateSource, updateStorage } from "./storage";
 import type { UpdateTarget } from "./types";
 
 export function sourceRoot(value: string | null) {
@@ -30,12 +30,14 @@ export async function updateTargets(projectId: string): Promise<UpdateTarget[]> 
     }
   }
   for (const item of hosting.filter(item => item.kind === "wordpress")) {
+    const source = await readUpdateSource(`wordpress:${item.id}`);
+    const agent = source?.settings.localAgent;
     let url = item.domains[0] ? `https://${item.domains[0]}/` : null;
     try {
       const home = new URL(item.inventory?.site?.home || "");
       if (home.protocol === "https:" && !home.username && !home.password && [...item.domains, ...item.aliases].includes(home.hostname)) url = home.href;
     } catch {}
-    targets.push({ id: `wordpress:${item.id}`, projectId, name: item.domains[0] || project.name, provider: "o2switch", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: null, branch: null, root: item.documentRoot, url, mode: "wordpress", configured: configured.has(`wordpress:${item.id}`), unavailable: item.missingSince ? "Installation non retrouvée." : item.inventory?.site?.multisite ? "WordPress multisite : intervention spécifique nécessaire." : item.inventory?.configuration?.fileModsDisabled ? "Les mises à jour sont désactivées dans WordPress." : null });
+    targets.push({ id: `wordpress:${item.id}`, projectId, name: item.domains[0] || project.name, provider: "o2switch", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: null, branch: null, root: item.documentRoot, url, mode: "wordpress", configured: agent ? agent.ready : configured.has(`wordpress:${item.id}`), unavailable: item.missingSince ? "Installation non retrouvée." : agent?.environment === "production" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1" ? "L’agent local reste limité aux copies de test." : item.inventory?.site?.multisite ? "WordPress multisite : intervention spécifique nécessaire." : item.inventory?.configuration?.fileModsDisabled ? "Les mises à jour sont désactivées dans WordPress." : null });
   }
   return targets.map(target => ({ ...target, unavailable: project.lifecycle !== "active" ? "Projet archivé." : target.unavailable || (!target.url ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) }));
 }

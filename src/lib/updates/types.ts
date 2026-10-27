@@ -67,6 +67,7 @@ export type UpdateState = {
   runs: UpdateRun[];
 };
 export type SourceSettings = {
+  localAgent?: import("./wordpress-agent").LocalAgentSettings;
   archive?: string;
   filename?: string;
   deploymentId?: string | null;

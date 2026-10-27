@@ -17,6 +17,7 @@ import { runCommand } from "./process";
 import { readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
+import { executeLocalWordPress } from "./wordpress-agent-execution";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
 import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
 import { requireSecurityPass, scanDockerImage, createNodeScanCache, securityCheck } from "./security";
@@ -216,6 +217,7 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
   if (!fresh || fresh.source !== "wordpress-observer" || fresh.collectionMode === "early" || !fresh.php || fresh.error || !fresh.observedAt || Date.now() - Date.parse(fresh.observedAt) > 5 * 60_000) throw new ApiError("Un relevé WordPress récent avec la version PHP web est nécessaire avant la mise à jour.");
   if (fresh.site?.multisite || fresh.configuration?.fileModsDisabled) throw new ApiError("La configuration WordPress actuelle ne permet pas cette mise à jour automatique.");
   if (fresh.plugins.some(plugin => plugin.mustUse)) result.warnings.push("Extensions MU présentes : elles ne sont ni mises à jour ni qualifiées automatiquement ; une recette spécifique reste nécessaire.");
+  if ((await readUpdateSource(target.id))?.settings.localAgent) return executeLocalWordPress(run, target, result, fresh, progress);
   await withWordPressUpdater(target, async (execute, username) => {
     const plan = parseWordPressPlan(await execute(wordpressPlanScript(target.root)));
     checkWordPressRequirements(plan);

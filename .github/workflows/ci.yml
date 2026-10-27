@@ -37,5 +37,6 @@ jobs:
         env:
           VIGIE_TEST_DOCKER: "1"
           VIGIE_TEST_WORDPRESS: "1"
+          VIGIE_TEST_WORDPRESS_AGENT: "1"
           VIGIE_UPDATES_TEST_DATABASE_URL: postgresql://vigie_test:vigie_test_local@127.0.0.1:5432/vigie_test
       - run: npm run build

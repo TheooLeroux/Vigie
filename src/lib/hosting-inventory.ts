@@ -292,7 +292,7 @@ export async function observerPlan(id: string) {
     project: item.project.name,
     path: posix.join(item.documentRoot, "wp-content/mu-plugins", observerFile),
     url: (await inventoryUrl(item)),
-    version: "1.0.3",
+    version: "1.0.4",
     sourceSha256: createHash("sha256").update(source).digest("hex"),
     installed: Boolean((await observerRow(id))),
     source,

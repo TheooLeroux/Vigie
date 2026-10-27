@@ -21,7 +21,7 @@ export function checkWordPressRequirements(plan: WordPressUpdatePlan) {
     if (item.requiresPlugins.some(slug => !plan.plugins.some(plugin => plugin.slug === slug))) throw new ApiError(`${item.slug} dépend d’une extension absente. Mise à jour annulée.`);
   }
 }
-export function wordpressPlanScript(root: string) {
+export function wordpressPlanPhp() {
   const php = `require_once ABSPATH . 'wp-admin/includes/update.php';
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
 wp_version_check(); wp_update_plugins(); wp_update_themes();
@@ -41,7 +41,10 @@ foreach (wp_get_themes() as $slug => $theme) {
   $data['themes'][] = array('slug' => $slug, 'current' => $theme->get('Version'), 'target' => $update['new_version'] ?? $theme->get('Version'), 'requiresPhp' => $update['requires_php'] ?? $theme->get('RequiresPHP'), 'requiresWordPress' => $update['requires'] ?? $theme->get('RequiresWP'), 'requiresPlugins' => array());
 }
 echo 'VIGIE_PLAN=' . base64_encode(wp_json_encode($data)) . "\\n";`;
-  return `set -eu\nwp --path=${shellQuote(root)} eval ${shellQuote(php)}\n`;
+  return php;
+}
+export function wordpressPlanScript(root: string) {
+  return `set -eu\nwp --path=${shellQuote(root)} eval ${shellQuote(wordpressPlanPhp())}\n`;
 }
 export function parseWordPressPlan(output: string) {
   const encoded = output.match(/^VIGIE_PLAN=([A-Za-z0-9+/]+=*)$/m)?.[1];

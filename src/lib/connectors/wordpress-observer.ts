@@ -35,6 +35,7 @@ const component = z.object({
   template: nullable,
 });
 export const observerPayloadSchema = z.object({
+  localAgent: z.object({ detected: z.literal(true), lastSeenAt: z.iso.datetime({ offset: true }) }).optional(),
   format: z.literal("vigie.wordpress.v1"),
   collectionMode: z.enum(["normal", "early"]).optional(),
   nonce: z.string().regex(/^[a-f0-9]{32}$/),
@@ -196,6 +197,7 @@ export function parseObserverPayload(
     );
   return {
     source: "wordpress-observer",
+    ...(data.localAgent ? { localAgent: data.localAgent } : {}),
     collectionMode: data.collectionMode || "normal",
     observedAt: data.collectedAt,
     lastAttemptAt: new Date().toISOString(),

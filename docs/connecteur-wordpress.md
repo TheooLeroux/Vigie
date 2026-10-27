@@ -12,5 +12,7 @@ Le connecteur renvoie uniquement : version WordPress, PHP réellement exécuté 
 
 La collecte peut rafraîchir les caches de vérification des mises à jour WordPress, au plus toutes les quinze minutes. Cela écrit les caches habituels de WordPress ; cela ne télécharge ni n'installe de mise à jour, n'active aucune autre extension et ne modifie aucune option de sécurité. Les mises à jour des extensions payantes dépendent du bon fonctionnement de leur licence et de leur flux : une absence d'information reste « non vérifiable ».
 
-Si WordPress échoue en HTTP 500 pendant le chargement de ses extensions, une seconde requête authentifiée relève les données avant ce chargement. Ce mode de repli n'exécute pas les vérifications des flux et conserve leurs dernières dates ; les réglages dynamiques ne sont pas présentés comme vérifiés. Il ne désactive ni ne modifie aucune extension sur les visites ordinaires. La version actuelle du connecteur est 1.0.3.
+Si WordPress échoue en HTTP 500 pendant le chargement de ses extensions, une seconde requête authentifiée relève les données avant ce chargement. Ce mode de repli n'exécute pas les vérifications des flux et conserve leurs dernières dates ; les réglages dynamiques ne sont pas présentés comme vérifiés. Il ne désactive ni ne modifie aucune extension sur les visites ordinaires. La version du connecteur dans les sources est 1.0.4 ; ce numéro ne prouve pas son déploiement sur les sites.
+
+La version 1.0.4 peut signaler passivement un battement d’agent local. Elle ne lit pas sa clé de maintenance et ne déclenche aucune tâche. Le parcours sans SSH et sa récupération indépendante sont décrits dans [Agent WordPress local](agent-wordpress-local.md). Le déploiement de maintenance reste limité aux copies de test par défaut.
 

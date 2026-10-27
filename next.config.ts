@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 const config: NextConfig = {
   serverExternalPackages: ["node:sqlite"],
   outputFileTracingIncludes: {
-    "/api/*": ["./connectors/wordpress/vigie-observer.php"],
+    "/api/*": ["./connectors/wordpress/vigie-observer.php", "./connectors/wordpress/local-agent.php"],
   },
   poweredByHeader: false,
   devIndicators: false,

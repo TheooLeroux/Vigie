@@ -15,7 +15,7 @@ export function UpdateProgress({ run }: { run: UpdateRun }) {
   </div>;
 }
 function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTarget; projectId: string; request: Request; onSaved: () => Promise<void> }) {
-  const [sshKey, setSshKey] = useState(""), [hostKey, setHostKey] = useState(""), [file, setFile] = useState<File | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [file, setFile] = useState<File | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   return <form className="updates-setup" onSubmit={async event => {
     event.preventDefault(); setBusy(true); setError("");
     try {
@@ -26,9 +26,9 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
         let binary = "";
         for (const byte of bytes) binary += String.fromCharCode(byte);
         payload = { ...payload, archive: btoa(binary), filename: file.name };
-      } else payload = { ...payload, ...(sshKey ? { sshKey } : {}), ...(hostKey ? { hostKey } : {}) };
+      } else payload = { ...payload, localAgent: true };
       await request(`updates/${projectId}/source`, "POST", payload);
-      setSshKey(""); setHostKey(""); setFile(null);
+      setFile(null);
       await onSaved();
     } catch (error) { setError(error instanceof Error ? error.message : "Configuration non enregistrée."); }
     finally { setBusy(false); }
@@ -38,12 +38,10 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
       <label>Sources du projet — ZIP, 2 Mo maximum<input type="file" accept=".zip,application/zip" onChange={event => setFile(event.target.files?.[0] || null)} required /></label>
       <a className="text-button" href={`/api/updates/${projectId}/source?targetId=${encodeURIComponent(target.id)}`}><Download size={13} /> Télécharger les sources conservées</a>
     </> : <>
-      <p>Accès SSH o2switch avec WP-CLI disponible. La clé privée est chiffrée et n’est jamais réaffichée. Faites confirmer la clé publique du serveur par l’hébergeur.</p>
-      <label>Clé SSH privée<textarea autoComplete="off" spellCheck={false} value={sshKey} onChange={event => setSshKey(event.target.value)} placeholder={target.configured ? "Laisser vide pour conserver la clé" : "-----BEGIN OPENSSH PRIVATE KEY-----"} required={!target.configured} /></label>
-      <label>Clé publique du serveur SSH<input autoComplete="off" value={hostKey} onChange={event => setHostKey(event.target.value)} placeholder="ssh-ed25519 AAAA…" required={!target.configured} /></label>
+      <p>Installez l’agent local avec la connexion o2switch déjà enregistrée. Il prépare les sauvegardes et applique les mises à jour sans accès SSH. L’installation reste limitée aux copies de test tant que le pilote n’est pas validé.</p>
     </>}
     {error && <p role="alert" className="updates-error">{error}</p>}
-    <button className="button secondary" disabled={busy}>{busy ? "Enregistrement…" : "Enregistrer la configuration"}</button>
+    <button className="button secondary" disabled={busy}>{busy ? "Configuration en cours…" : target.mode === "wordpress" ? "Configurer l’agent local" : "Enregistrer la configuration"}</button>
   </form>;
 }
 export function ProjectUpdates({ projectId, request, onComplete }: { projectId: string; request: Request; onComplete: () => Promise<void> }) {

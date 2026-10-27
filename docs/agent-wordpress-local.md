@@ -1,0 +1,41 @@
+# Agent WordPress local sans SSH
+
+## Parcours et déploiement
+
+L’agent complète le connecteur d’inventaire existant. Le connecteur reste en lecture seule ; la version 1.0.4 peut signaler passivement la présence d’un agent. Les autorisations de maintenance utilisent une autre clé, conservée chiffrée dans `update_sources` et dans un dossier privé de l’hébergement. La clé de l’observateur n’autorise aucune mutation.
+
+Depuis les détails des mises à jour d’une fiche WordPress, **Configurer l’agent local** dépose les fichiers par cPanel, crée une tâche cron et attend un battement signé. Aucune clé SSH ni dépôt Git du site n’est nécessaire. L’exécuteur Vigie existant reste chargé de la préparation et des contrôles WPScan ; GitHub Actions est son hébergement, pas le dépôt des sources WordPress.
+
+L’installation et l’exécution sur un site identifié comme production sont bloquées par défaut. `VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED=1` est une activation administrative distincte à définir dans l’application et comme variable de l’environnement GitHub `vigie-maintenance`, seulement après validation du pilote. Elle n’est pas ajoutée automatiquement aux environnements réels par cette livraison. Les installations reconnues comme préproduction peuvent être configurées sans cette activation. Le déploiement sur une copie client chez o2switch reste une qualification différente du test Docker isolé.
+
+Le dossier est `/home/COMPTE/.vigie-agent/EMPREINTE_RACINE/`, en 0700, hors des racines web cPanel. Il contient `agent.php`, `plan.php`, `config.json`, `jobs/`, `results/`, `backups/` et le battement. Le fichier de configuration contient les empreintes SHA-256 du code de l’agent et du générateur de plan. Un fichier existant différent n’est jamais écrasé automatiquement. Les tentatives d’installation interrompues conservent leur clé pour permettre une reprise vérifiable.
+
+La tâche cron appelle le PHP de la branche web (`/opt/alt/phpXX/usr/bin/php`) et l’agent une fois par minute. WP-CLI est utilisé **localement**, avec ce même PHP et sans connexion SSH. Son emplacement initial est `/usr/local/bin/wp` ; une différence réelle d’installation doit être diagnostiquée avant activation. Le battement puis une opération d’inspection doivent confirmer le même PHP exact que le relevé web, un WordPress chargeable et le domaine attendu. Une installation partielle ou un PHP différent ne marque pas la cible prête.
+
+## Protocole et opérations
+
+Vigie dépose dans `jobs/` des fichiers JSON enveloppés dans une signature HMAC-SHA256. Le canal est l’API cPanel authentifiée avec les accès existants ; aucun nouvel endpoint public d’écriture n’est exposé dans WordPress. Le nom du fichier, l’identifiant de demande, le traitement Vigie et la racine sont liés par la signature. L’agent refuse les ordres non signés, périmés, les autres racines et les opérations inconnues. Il n’accepte ni commande shell, ni script, ni chemin de sauvegarde fourni librement par une requête.
+
+Les quatre opérations sont `inspect`, `backup`, `update` et `restore`. Les commandes locales sont construites par le code de l’agent avec des tableaux d’arguments, sans shell. La même combinaison traitement/opération a un identifiant stable : un double envoi récupère le même résultat. Une demande ayant commencé, échoué ou été interrompue n’est pas rejouée automatiquement. Un verrou de fichier empêche deux instances du cron de travailler simultanément sur l’installation. Une seule opération est traitée par passage.
+
+Les résultats et battements sont signés dans l’autre sens. L’exécuteur vérifie la signature, les identifiants et la racine avant de les utiliser. Les journaux bruts PHP/WP-CLI ne quittent pas le compte ; les erreurs sont des codes bornés. Une absence de confirmation arrête le suivi sans réémettre une mutation.
+
+`inspect` relève un plan frais et les réglages effectifs WordPress. Vigie conserve les contrôles existants : inventaire web récent, PHP identique, refus des multisites et des modifications désactivées, prérequis et WPScan avant sauvegarde et mise à jour. Le secret WPScan reste sur l’exécuteur Vigie.
+
+`backup` refuse les liens symboliques et fichiers spéciaux, vérifie une réserve de disque, active la maintenance et crée une archive des fichiers et un export SQL transactionnel. Une liste d’archive et des empreintes sont vérifiées ; un manifeste signé lie la copie à la racine et au traitement. La maintenance ne bloque pas toutes les écritures externes : les intégrations, commandes et moteurs de tables doivent être qualifiés pour chaque site avant de revendiquer une sauvegarde métier cohérente. Les sauvegardes sont conservées hors racine web, mais restent sur le même hébergement : une copie externe et une rétention restent à organiser.
+
+`update` relit les versions installées, vérifie le manifeste de sauvegarde et applique les numéros de version explicitement validés, sans `update --all`. Le cœur, son schéma, les extensions et les thèmes utilisent WP-CLI local. Le cœur est contrôlé et le cache purgé. L’agent vérifie les versions réellement installées ; Vigie contrôle ensuite HTTPS et WPScan. Les flux premium doivent fournir les versions demandées ; un flux non disponible reste un échec ou une réserve explicite. Les personnalisations et MU-plugins ne sont pas remplacés comme des extensions publiques.
+
+## Récupération
+
+La récupération ne dépend pas du chargement du WordPress en panne. L’agent CLI et les sauvegardes sont hors de son dossier. L’opération `restore` vérifie les empreintes, extrait l’ancienne archive dans un dossier privé, met les fichiers défaillants en quarantaine et rétablit les fichiers puis la base. La base est importée après restauration du code, afin qu’un cœur cassé n’empêche pas la réparation. Une erreur conserve les sauvegardes et la quarantaine ; une restauration incomplète peut laisser la maintenance active et demande une intervention.
+
+La restauration complète est actuellement réservée aux préproductions avec `confirmDataLoss=true` explicite. Elle n’est jamais déclenchée automatiquement, et n’est pas proposée comme retour de production sans décision sur les commandes ou contenus reçus depuis la sauvegarde. Une requête de restauration refusée garde son résultat : une nouvelle décision utilise un nouvel identifiant de demande.
+
+Les états `running` laissés par un arrêt forcé et les expirations de suivi exigent un diagnostic ; l’agent ne promet pas une reprise sûre d’une mutation partiellement effectuée. Les fichiers de tâches, les résultats, sauvegardes et quarantaines ne sont pas purgés automatiquement dans cette version. Surveiller le quota et prévoir leur archivage.
+
+## Validation isolée
+
+`VIGIE_TEST_WORDPRESS_AGENT=1 npx tsx --test tests/wordpress-agent.integration.test.ts` crée un WordPress et une base MariaDB jetables, en fait une copie avec une base distincte, installe l’agent uniquement sur cette copie et appelle le même client de tâches que Vigie. Le test exécute les mises à jour réelles, contrôle HTTP, vérifie que l’original est inchangé, casse volontairement le cœur de la copie et restaure fichiers et données sans SSH. Les signatures invalides, répétitions, refus PHP et confirmations de restauration sont aussi contrôlés. Les conteneurs et volumes créés par le test sont supprimés à la fin ; un rapport sans secret reste dans `.data/analysis/wordpress-local-agent-pilot.json`.
+
+Ce test valide l’agent sur un vrai WordPress isolé. Il ne prétend pas avoir testé une copie d’un client, l’API cPanel réelle de provisionnement, le cron o2switch, les extensions premium, WPScan avec un jeton réel ou les paiements d’une boutique. Ces qualifications précèdent tout déploiement de production.

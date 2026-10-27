@@ -9,6 +9,10 @@ import { updateScope, updateTargets } from "./targets";
 import { activeUpdateStages, type UpdateRun, type UpdateState } from "./types";
 import { currentSourceDeployment } from "./providers";
 import { isPostgres } from "../storage";
+import { agentBundle, provisionLocalAgent, cpanelAgentFiles, assertAgentRunStopped } from "./wordpress-agent";
+import { hostingInstallation } from "../hosting-discovery";
+import { withHostingCredentials } from "../hosting-connections";
+import type { SourceSettings } from "./types";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -70,6 +74,7 @@ const settingsSchema = z.object({
   filename: z.string().max(120).optional(),
   sshKey: z.string().trim().min(50).max(20000).optional(),
   hostKey: z.string().trim().regex(/^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/]+={0,2}$/).max(2000).optional(),
+  localAgent: z.boolean().optional(),
 });
 export async function configureUpdateSource(projectId: string, raw: unknown, readDeployment = currentSourceDeployment) {
   const input = settingsSchema.parse(raw);
@@ -79,13 +84,32 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
   const scope = updateScope(target), db = await updateStorage();
   const previous = await readUpdateSource(target.id);
-  const settings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
-  if (target.mode === "wordpress" && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
+  let settings: SourceSettings;
+  let webPhp = "";
+  if (target.mode === "wordpress" && input.localAgent) {
+    const installation = await hostingInstallation(target.remoteId);
+    if (installation.suggestedEnvironment !== "staging" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1") throw new ApiError("L’agent local est limité aux copies de test tant que le pilote n’est pas validé.");
+    if (!installation.inventory?.php || installation.inventory.collectionMode === "early" || !installation.inventory.observedAt || Date.now() - Date.parse(installation.inventory.observedAt) > 24 * 3600_000) throw new ApiError("Un inventaire WordPress normal et récent est nécessaire pour installer l’agent.");
+    webPhp = installation.inventory.php.version;
+    settings = await withHostingCredentials(target.connectionId, async connection => ({ localAgent: (await agentBundle(target.root, connection.username, webPhp, installation.suggestedEnvironment, previous?.settings.localAgent)).settings }));
+  } else settings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
+  if (target.mode === "wordpress" && !settings.localAgent && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
   await transaction(async () => {
     if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) throw new ApiError("Attendez la fin de la mise à jour avant de modifier ses accès ou ses sources.", 409);
+    if ((await readUpdateSource(target.id))?.revision !== previous?.revision) throw new ApiError("La configuration vient de changer. Rechargez avant de réessayer.", 409);
     await writeUpdateSource(target.id, projectId, settings);
     await log("live", "updates.source_configured", `Accès de mise à jour configuré pour ${target.name}.`, projectId);
   });
+  if (settings.localAgent) {
+    await provisionLocalAgent(target, settings.localAgent, webPhp);
+    settings.localAgent.ready = true;
+    await transaction(async () => {
+      if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) throw new ApiError("Une maintenance a commencé pendant la configuration de l’agent.", 409);
+      const current = await readUpdateSource(target.id);
+      if (current?.settings.localAgent?.secret !== settings.localAgent!.secret) throw new ApiError("La configuration de l’agent a changé.", 409);
+      await writeUpdateSource(target.id, projectId, settings);
+    });
+  }
   return { configured: true };
 }
 export async function closeInterruptedUpdate(id: string, raw: unknown) {
@@ -100,6 +124,10 @@ export async function closeInterruptedUpdate(id: string, raw: unknown) {
   const remote = await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-updates.yml/runs?event=workflow_dispatch&per_page=100`, runner.token);
   const matches = remote.workflow_runs.filter((item: { display_title: string }) => item.display_title === `vigie-update-${id}`);
   if (!matches.length || matches.some((item: { status: string }) => item.status !== "completed")) throw new ApiError("L’arrêt de l’exécuteur n’est pas confirmé. Vérifiez GitHub Actions.", 409);
+  for (const target of run.targets.filter(target => target.mode === "wordpress")) {
+    const settings = (await readUpdateSource(target.id))?.settings.localAgent;
+    if (settings) await withHostingCredentials(target.connectionId, connection => assertAgentRunStopped(cpanelAgentFiles(connection, settings.directory), settings, target.root, run.id));
+  }
   await transaction(async () => {
     const current = await readUpdateRun(id);
     if (current?.updatedAt !== run.updatedAt) throw new ApiError("Le traitement vient de reprendre. Rechargez son suivi.", 409);

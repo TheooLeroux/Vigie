@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Vigie — Inventaire
  * Description: Inventaire privé en lecture seule pour le plateau interne Vigie.
- * Version: 1.0.3
+ * Version: 1.0.4
  * Requires PHP: 7.4
  */
 if (!defined('ABSPATH')) { exit; }
@@ -80,6 +80,13 @@ add_action($vigie_observer_early ? 'muplugins_loaded' : 'wp_loaded', static func
         'site' => array('name' => $clean(get_option('blogname')), 'url' => esc_url_raw(site_url()), 'home' => esc_url_raw(home_url()), 'locale' => $clean(get_locale()), 'timezone' => $clean(wp_timezone_string()), 'multisite' => is_multisite(), 'searchEnginesVisible' => (bool)get_option('blog_public'), 'https' => is_ssl()),
         'configuration' => array('debug' => defined('WP_DEBUG') && (bool)WP_DEBUG, 'debugDisplay' => defined('WP_DEBUG_DISPLAY') && (bool)WP_DEBUG_DISPLAY, 'cronDisabled' => defined('DISABLE_WP_CRON') && (bool)DISABLE_WP_CRON, 'fileEditDisabled' => defined('DISALLOW_FILE_EDIT') && (bool)DISALLOW_FILE_EDIT, 'fileModsDisabled' => defined('DISALLOW_FILE_MODS') && (bool)DISALLOW_FILE_MODS, 'pageCache' => defined('WP_CACHE') && (bool)WP_CACHE, 'objectCache' => (bool)wp_using_ext_object_cache()),
         'database' => array('version' => $clean($wpdb->db_version())), 'plugins' => $plugins, 'themes' => $themes);
+    // Passive discovery only: the maintenance key and queue never enter WordPress.
+    if (preg_match('#^(/home/[a-zA-Z0-9_-]+)/#', ABSPATH, $home)) {
+        $agent_heartbeat = $home[1].'/.vigie-agent/'.substr(hash('sha256', rtrim(wp_normalize_path(ABSPATH), '/')), 0, 16).'/heartbeat.json';
+        if (is_file($agent_heartbeat) && !is_link($agent_heartbeat)) {
+            $payload['localAgent'] = array('detected' => true, 'lastSeenAt' => gmdate('c', filemtime($agent_heartbeat)));
+        }
+    }
     nocache_headers(); header('Cache-Control: private, no-store, max-age=0'); header('X-Robots-Tag: noindex, nofollow');
     wp_send_json($payload);
 }, -9999);
