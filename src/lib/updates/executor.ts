@@ -24,6 +24,7 @@ import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
 import { requireSecurityPass, scanDockerImage, createNodeScanCache, securityCheck } from "./security";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
 import { freeWordPressScanner } from "./wordpress-free-security";
+import { refreshWordPressWeb } from "./wordpress-web-check";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -237,8 +238,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress) {
-  await checkPublicSite(target.url!);
-  await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
+  await refreshWordPressWeb(target, "preflight");
   const fresh = (await hostingInstallation(target.remoteId)).inventory;
   if (!fresh || fresh.source !== "wordpress-observer" || fresh.collectionMode === "early" || !fresh.php || fresh.error || !fresh.observedAt || Date.now() - Date.parse(fresh.observedAt) > 5 * 60_000) throw new ApiError("Un relevé WordPress récent avec la version PHP web est nécessaire avant la mise à jour.");
   if (fresh.site?.multisite || fresh.configuration?.fileModsDisabled) throw new ApiError("La configuration WordPress actuelle ne permet pas cette mise à jour automatique.");

@@ -47,3 +47,4 @@ jobs:
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
           VIGIE_AGENT_INSTALLATION_ID: ${{ inputs.installation_id }}
           VIGIE_AGENT_REQUEST_ID: ${{ inputs.request_id }}
+          VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app

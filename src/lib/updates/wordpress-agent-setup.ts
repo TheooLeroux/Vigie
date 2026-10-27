@@ -11,6 +11,7 @@ import { readUpdateSource, updateStorage, writeUpdateSource } from "./storage";
 import type { SourceSettings, UpdateTarget } from "./types";
 import type { HostingInstallationView } from "../types";
 import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
+import { refreshWordPressWeb } from "./wordpress-web-check";
 
 type Installation = NonNullable<SourceSettings["agentInstallation"]>;
 async function lockSource(targetId: string, projectId: string) {
@@ -70,7 +71,7 @@ async function prepareSite(id: string) {
   const { provisionLinkedObserver, collectHostingInventories } = await import("../hosting-inventory");
   if (!site.observerConfigured) { await provisionLinkedObserver(id); site = await hostingInstallation(id); }
   if (!site.inventory?.observedAt || Date.now() - Date.parse(site.inventory.observedAt) > 5 * 60_000 || site.inventory.error) {
-    await collectHostingInventories(site.connectionId, fetch, fetch, id);
+    await refreshWordPressWeb({ remoteId: id, connectionId: site.connectionId, url: null }, "inventory");
     site = await hostingInstallation(id);
   }
   if (!site.inventory?.php || site.inventory.source !== "wordpress-observer" || !site.inventory.observedAt || Date.now() - Date.parse(site.inventory.observedAt) > 5 * 60_000) throw new ApiError("L’agent attend un inventaire WordPress récent avec le PHP web.");

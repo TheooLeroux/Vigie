@@ -9,7 +9,7 @@ const numeric = /^\d+(?:\.\d+){0,7}$/;
 const operators = z.enum(["lt", "le", "eq", "ne", "gt", "ge"]);
 const range = z.object({ min_version: z.string().max(80).nullable().optional(), min_operator: operators.nullable().optional(), max_version: z.string().max(80).nullable().optional(), max_operator: operators.nullable().optional() });
 const vulnerability = z.object({ uuid: z.string().regex(/^[a-z0-9-]{1,128}$/i), operator: range.optional(), impact: z.unknown().optional(), source: z.array(z.object({ id: z.string().max(160).nullable().optional() })).max(1000).optional() });
-const advisory = z.object({ error: z.literal(0), updated: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), data: z.object({ core: z.string().optional(), plugin: z.string().optional(), name: z.string().nullable().optional(), closed: z.number().int().nullable().optional(), vulnerability: z.array(vulnerability).max(20000).nullable(), supplychain: z.array(z.object({ verdict: z.enum(["malicious", "suspicious", "cleaned"]), audit_id: z.number().int(), affected_versions: range.optional() })).max(1000).optional() }) });
+const advisory = z.object({ error: z.literal(0), updated: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), data: z.object({ core: z.string().optional(), plugin: z.string().optional(), name: z.string().nullable().optional(), link: z.string().nullable().optional(), closed: z.number().int().nullable().optional(), vulnerability: z.array(vulnerability).max(20000).nullable(), supplychain: z.array(z.object({ verdict: z.enum(["malicious", "suspicious", "cleaned"]), audit_id: z.number().int(), affected_versions: range.optional() })).max(1000).optional() }) });
 type Advisory = z.infer<typeof advisory>;
 
 function affected(version: string, bounds?: z.infer<typeof range>) {
@@ -68,7 +68,7 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
   const warn = (message: string) => { if (!warnings.includes(message)) warnings.push(message); };
   async function load(kind: "core" | "plugin", identity: string) {
     if (!(kind === "core" ? numeric : /^[a-z0-9_-]{1,150}$/i).test(identity)) throw new ApiError("Identifiant de contrôle WordPress invalide.");
-    const key = `security:wpv:1:${kind}:${identity}`;
+    const key = `security:wpv:2:${kind}:${identity}`;
     if (cache.has(key)) return cache.get(key)!;
     const persistent = options.persistentCache ?? transport === fetch;
     if (persistent) {
@@ -93,7 +93,9 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
     for (const item of plan.plugins) {
       if (!numeric.test(item.current)) { item.target = item.current; warn(`${item.slug} : version non standard, extension conservée et hors du contrôle de vulnérabilités.`); continue; }
       const report = await load("plugin", item.slug);
-      if (!report.data.name || report.data.closed === 1) {
+      let publicPackage = false;
+      try { const url = new URL(report.data.link || ""); publicPackage = ["wordpress.org", "www.wordpress.org"].includes(url.hostname) && url.pathname.replace(/\/+$/, "") === `/plugins/${item.slug}`; } catch {}
+      if (!report.data.name || report.data.closed === 1 || !publicPackage) {
         item.target = item.current;
         warn(`${item.slug} : catalogue privé, non identifié ou fermé ; extension conservée, couverture de sécurité limitée.`);
       }
@@ -107,7 +109,7 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
     for (const item of plan.plugins) {
       if (!numeric.test(item.current)) continue;
       const report = await load("plugin", item.slug);
-      if (!report.data.name) { warn(`${item.slug} : extension absente du catalogue public, couverture de sécurité limitée.`); continue; }
+      if (!report.data.name) { if (!warnings.some(message => message.startsWith(`${item.slug} :`))) warn(`${item.slug} : extension absente du catalogue public, couverture de sécurité limitée.`); continue; }
       findings.push(...freeWordPressFindings(report, "plugin", item.slug, candidate ? item.target : item.current));
     }
     return findings;

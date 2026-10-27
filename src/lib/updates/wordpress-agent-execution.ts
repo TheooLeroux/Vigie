@@ -9,6 +9,7 @@ import { requireSecurityPass, securityCheck } from "./security";
 import { checkPublicSite } from "./providers";
 import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
+import { refreshWordPressWeb } from "./wordpress-web-check";
 
 export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget, result: UpdateResult, inventory: SiteInventory, progress: (stage: UpdateStage, message: string) => Promise<void>) {
   return withLocalWordPressAgent(target, async (operation, settings) => {
@@ -44,10 +45,9 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
       const key = kind as "plugins" | "themes";
       return installed[key].length !== plan[key].length || plan[key].some(item => installed[key].find(next => next.slug === item.slug)?.current !== item.target);
     })) throw new ApiError("Les versions installées ne correspondent pas au plan vérifié.");
-    await checkPublicSite(target.url!);
     // A cached public page can still answer while the actual WordPress is broken.
     const checkedAt = Date.now();
-    await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
+    await refreshWordPressWeb(target, "postflight");
     const web = (await hostingInstallation(target.remoteId)).inventory;
     if (!web || web.source !== "wordpress-observer" || web.collectionMode === "early" || web.error || !web.observedAt || Date.parse(web.observedAt) < checkedAt - 5000 || web.wordpress?.version !== installed.wordpress.current || web.php?.version !== installed.php || installed.plugins.some(item => (web.plugins.find(plugin => !plugin.mustUse && plugin.slug === item.slug)?.version || "") !== item.current) || installed.themes.some(item => (web.themes.find(theme => theme.slug === item.slug)?.version || "") !== item.current)) throw new ApiError("Le WordPress chargé côté web ne confirme pas les versions installées. Les sauvegardes sont conservées.");
     const final = securityCheck("WPVulnerability", "after", "WordPress et extensions réellement installés", await scan(installed, false), baseline);

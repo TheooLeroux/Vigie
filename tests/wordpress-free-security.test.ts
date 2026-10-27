@@ -7,7 +7,7 @@ import { securityCheck, requireSecurityPass } from "../src/lib/updates/security"
 import { assertManagedAgentFile, agentFileHash } from "../src/lib/updates/wordpress-agent-package";
 
 const plan = () => wordpressPlanSchema.parse({ wordpress: { current: "6.8.3", target: "7.1.3", requiresPhp: "8.1" }, php: "8.2.35", plugins: [{ slug: "example", current: "1", target: "2", requiresPhp: "8.1", requiresWordPress: "6.8" }], themes: [{ slug: "custom-child", current: "", target: "", requiresPhp: "", requiresWordPress: "" }, { slug: "integer-theme", current: "27", target: "27", requiresPhp: "", requiresWordPress: "" }] });
-const report = (plugin = "example", vulnerabilities: unknown[] | null = []) => ({ error: 0, updated: "1792736835", data: { plugin, name: "Example", closed: 0, vulnerability: vulnerabilities } });
+const report = (plugin = "example", vulnerabilities: unknown[] | null = []) => ({ error: 0, updated: "1792736835", data: { plugin, name: "Example", link: `https://wordpress.org/plugins/${plugin}/`, closed: 0, vulnerability: vulnerabilities } });
 const issue = (min: string | null, minOp: string | null, max: string | null, maxOp: string | null) => ({ uuid: "fixture-123", operator: { min_version: min, min_operator: minOp, max_version: max, max_operator: maxOp }, impact: { cvss3: { score: "9.8" } }, source: [{ id: "CVE-2026-12345" }] });
 
 test("Contrôle gratuit : bornes réelles, correctifs, CVSS, alias et risques de chaîne de distribution", () => {
@@ -44,6 +44,8 @@ test("Catalogue inconnu : extension conservée avec réserve explicite ; erreur 
   const prepared = await scan.prepare(plan());
   assert.equal(prepared.plugins[0].target, "1");
   assert.ok(scan.warnings.some(warning => warning.includes("conservée")));
+  const privateCatalog = freeWordPressScanner((async () => Response.json({ ...report(), data: { ...report().data, link: null } })) as typeof fetch);
+  assert.equal((await privateCatalog.prepare(plan())).plugins[0].target, "1");
   for (const response of [new Response("", { status: 503 }), Response.json({ error: 1, data: null }), Response.json({ error: 0, updated: 1, data: { plugin: "example", name: "Example" } })]) {
     await assert.rejects(freeWordPressScanner((async () => response) as typeof fetch).prepare(plan()), /indisponible|incomplet/);
   }
