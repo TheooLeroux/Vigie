@@ -81,13 +81,18 @@ wp --path=${root} option update siteurl ${url}
     assert.equal(await exec(["stat", "-c", "%Y", `${directory}/backups/${run}/manifest.json`]), beforeReplay); check("duplicate backup was not executed twice");
     await docker(["exec", "--user", "82:82", "-d", cli, "php", "-d", "opcache.enable=0", "-S", "0.0.0.0:8080", "-t", root]);
     await new Promise(resolve=>setTimeout(resolve,500));
-    assert.equal((await fetch(url)).status, 200); check("updated copy answers HTTP");
+    const httpStatus = async () => {
+      const response = await fetch(url, { headers: { Connection: "close" } });
+      await response.arrayBuffer(); // Drain responses before deliberately breaking/restoring the PHP server.
+      return response.status;
+    };
+    assert.equal(await httpStatus(), 200); check("updated copy answers HTTP");
     assert.equal((await shell(`wp --path=${original} core version`)).trim(), "6.8.3");
     assert.equal((await shell(`wp --path=${original} plugin get akismet --field=version`)).trim(), "5.3"); check("original files and database untouched");
     assert.equal((await shell(`wp --path=${original} option get home`)).trim(), "http://fixture.invalid");
     await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/introduced-after-backup.php`], "<?php // Fixture file absent from the backup.\n");
     await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-includes/version.php`], "<?php throw new RuntimeException('intentional fixture failure');");
-    assert.equal((await fetch(url)).status, 500); check("intentional core failure reproduced");
+    assert.equal(await httpStatus(), 500); check("intentional core failure reproduced");
     await assert.rejects(op(run, "restore"), /restore_requires_staging_confirmation/);
     // Restore has its own immutable operation ID. A refused request is never replayed with new contents.
     assert.equal((await op(run, "restore", { confirmDataLoss: true }, randomUUID())).restored, true);
@@ -95,7 +100,7 @@ wp --path=${root} option update siteurl ${url}
     assert.equal((await shell(`wp --path=${root} plugin get akismet --field=version`)).trim(), "5.3");
     assert.match(await shell(`wp --path=${root} post list --format=json`), /Vigie copy proof/);
     await shell(`test ! -f ${root}/introduced-after-backup.php`);
-    assert.equal((await fetch(url)).status, 200); check("independent agent restored code and database after WordPress failed");
+    assert.equal(await httpStatus(), 200); check("independent agent restored code and database after WordPress failed");
     report.completedAt = new Date().toISOString(); report.status = "passed";
   } catch (error) { report.status = "failed"; report.failure = error instanceof Error ? error.message : "test failure"; throw error; }
   finally {
