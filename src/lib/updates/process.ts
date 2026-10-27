@@ -1,5 +1,19 @@
 import { spawn } from "node:child_process";
 import { ApiError } from "../http";
+import { validRange } from "semver";
+
+export type PeerConflict = { peer: string; range: string; consumer: string; version: string };
+export class PeerResolutionError extends ApiError {
+  constructor(readonly conflicts: PeerConflict[]) { super(`Résolution stricte npm refusée : ${conflicts.map(item => `${item.consumer}@${item.version} exige ${item.peer} ${item.range}`).join(" ; ")}.`, 502); }
+}
+export function npmPeerConflicts(diagnostics: string): PeerConflict[] {
+  if (!/\bERESOLVE\b/.test(diagnostics)) return [];
+  const pattern = /(?:^|\n)(?:npm (?:error|ERR!)\s+)?\s*peer(?:Optional)? ((?:@[a-z0-9._-]+\/)?[a-z0-9._-]+)@"([0-9xXvV.*^~<>=| +\-]{1,200})" from ((?:@[a-z0-9._-]+\/)?[a-z0-9._-]+)@(\d+\.\d+\.\d+)(?=\s|$)/gi;
+  return [...new Map([...diagnostics.matchAll(pattern)].filter(match => validRange(match[2])).map(match => {
+    const conflict = { peer: match[1], range: match[2], consumer: match[3], version: match[4] };
+    return [JSON.stringify(conflict), conflict];
+  })).values()].slice(0, 30);
+}
 
 export class DependencyValidationError extends ApiError {
   constructor(message: string, readonly packages: string[]) { super(message, 502); }
@@ -12,7 +26,7 @@ function affectedPackages(diagnostics: string, allowed: string[]) {
   return [...new Set(result)];
 }
 
-export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[] } = {}): Promise<string> {
+export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[]; peerResolution?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env || process.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let output = "", errorOutput = "", size = 0, settled = false;
@@ -35,7 +49,8 @@ export function runCommand(command: string, args: string[], options: { cwd?: str
       const known = options.errorPatterns?.find(item => item.pattern.test(output + "\n" + errorOutput));
       const message = reason && options.errorMessages?.[reason] || known?.message || `L’étape ${command} a échoué. Aucune publication supplémentaire n’a été lancée.`;
       const packages = options.diagnosticPackages ? affectedPackages(output + "\n" + errorOutput, options.diagnosticPackages) : [];
-      finish(code === 0 || code !== null && options.acceptedExitCodes?.includes(code) ? undefined : packages.length ? new DependencyValidationError(message, packages) : new ApiError(message, 502));
+      const peers = options.peerResolution ? npmPeerConflicts(output + "\n" + errorOutput) : [];
+      finish(code === 0 || code !== null && options.acceptedExitCodes?.includes(code) ? undefined : peers.length ? new PeerResolutionError(peers) : packages.length ? new DependencyValidationError(message, packages) : new ApiError(message, 502));
     });
     child.stdin.on("error", () => {});
     child.stdin.end(options.input || "");

@@ -1,11 +1,24 @@
 import { compare, minVersion, rcompare, satisfies, validRange } from "semver";
 import { ApiError } from "../http";
+import type { PeerConflict } from "./process";
 
-export type PackageVersion = { version: string; deprecated?: string; engines?: { node?: string }; peerDependencies?: Record<string, string> };
+export class CompatibilitySelectionError extends ApiError {}
+
+export type PackageVersion = { version: string; deprecated?: string; engines?: { node?: string }; peerDependencies?: Record<string, string>; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> };
 export const stableVersion = (value: unknown): value is string => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value);
 const sections = ["dependencies", "devDependencies", "optionalDependencies"] as const;
 
 async function metadata(name: string, transport: typeof fetch, all = false) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await readMetadata(name, transport, all); }
+    catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (attempt === 1) throw new ApiError(`La lecture du catalogue de ${name} a échoué après deux tentatives. Aucune version non vérifiée n’a été retenue.`, 502);
+    }
+  }
+  throw new ApiError(`Le catalogue de ${name} est indisponible.`, 502);
+}
+async function readMetadata(name: string, transport: typeof fetch, all: boolean) {
   const response = await transport(`https://registry.npmjs.org/${encodeURIComponent(name)}${all ? "" : "/latest"}`, { headers: { Accept: all ? "application/vnd.npm.install-v1+json" : "application/json" }, redirect: "error", signal: AbortSignal.timeout(30_000) });
   if (!response.ok || !response.body) throw new ApiError(`Le catalogue de ${name} est indisponible. Aucune version n’a été choisie au hasard.`, 502);
   const reader = response.body.getReader(), chunks: Uint8Array[] = [];
@@ -19,8 +32,27 @@ async function metadata(name: string, transport: typeof fetch, all = false) {
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
+export async function packageCatalog(name: string, transport: typeof fetch = fetch) {
+  if (!/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name)) throw new ApiError("Nom de paquet invalide pour la remédiation.");
+  const data = await metadata(name, transport, true);
+  const latest = data["dist-tags"]?.latest || (await metadata(name, transport)).version;
+  if (!stableVersion(latest) || !data.versions || typeof data.versions !== "object") throw new ApiError(`Le catalogue de remédiation de ${name} est invalide.`, 502);
+  return (Object.values(data.versions) as PackageVersion[]).filter(item => stableVersion(item.version) && !item.deprecated && compare(item.version, latest) <= 0).sort((first, second) => rcompare(first.version, second.version));
+}
 
-export async function compatibleVersions(manifest: Record<string, any>, nodeVersion: string, transport: typeof fetch = fetch, extra: Record<string, string> = {}, limits: Record<string, string> = {}) {
+export async function verifiedPeerConflicts(conflicts: PeerConflict[], selected: Record<string, string>, transport: typeof fetch = fetch) {
+  const verified: PeerConflict[] = [], catalogs = new Map<string, PackageVersion[]>();
+  for (const conflict of conflicts) {
+    if (!Object.hasOwn(selected, conflict.peer) || !stableVersion(selected[conflict.peer]) || satisfies(selected[conflict.peer], conflict.range)) continue;
+    if (!catalogs.has(conflict.consumer)) catalogs.set(conflict.consumer, await packageCatalog(conflict.consumer, transport));
+    const consumer = catalogs.get(conflict.consumer)!.find(item => item.version === conflict.version);
+    if (!consumer || consumer.peerDependencies?.[conflict.peer] !== conflict.range) throw new ApiError("Le catalogue npm ne confirme pas le conflit de pairs signalé. Recherche arrêtée.", 502);
+    verified.push(conflict);
+  }
+  return verified;
+}
+
+export async function compatibleVersions(manifest: Record<string, any>, nodeVersion: string, transport: typeof fetch = fetch, extra: Record<string, string> = {}, limits: Record<string, string | string[]> = {}) {
   const next = structuredClone(manifest), warnings: string[] = [];
   const ranges = new Map<string, string[]>();
   for (const section of [...sections, "extra"] as const) for (const [name, range] of Object.entries(section === "extra" ? extra : manifest[section] || {})) {
@@ -33,7 +65,7 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
   if (ranges.size > 250) throw new ApiError("Le projet contient trop de dépendances directes pour cette validation automatique.");
   const domains = new Map<string, PackageVersion[]>(), latest = new Map<string, PackageVersion>(), expanded = new Set<string>();
   const floor = (name: string) => (ranges.get(name) || []).map(range => minVersion(range)?.version || "0.0.0").sort(rcompare)[0];
-  const usable = (name: string, item: PackageVersion) => stableVersion(item.version) && !item.deprecated && compare(item.version, floor(name)) >= 0 && (name !== "@types/node" || item.version.split(".")[0] === nodeVersion.split(".")[0]) && (!Object.hasOwn(limits, name) || satisfies(item.version, limits[name])) && (!item.engines?.node || !!validRange(item.engines.node) && satisfies(nodeVersion, item.engines.node));
+  const usable = (name: string, item: PackageVersion) => stableVersion(item.version) && !item.deprecated && compare(item.version, floor(name)) >= 0 && (name !== "@types/node" || item.version.split(".")[0] === nodeVersion.split(".")[0]) && (!Object.hasOwn(limits, name) || [limits[name]].flat().every(range => satisfies(item.version, range))) && (!item.engines?.node || !!validRange(item.engines.node) && satisfies(nodeVersion, item.engines.node));
   for (const name of [...ranges.keys()].sort()) {
     const item = await metadata(name, transport) as PackageVersion;
     if (!stableVersion(item.version) || item.deprecated || compare(item.version, floor(name)) < 0) {
@@ -84,7 +116,7 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
     for (const name of conflicts) if (await expand(name)) changed = true;
     if (!changed) break;
   }
-  if (!chosen) throw new ApiError("Aucun ensemble de versions stables compatible avec Node et les dépendances du projet n’a été trouvé. Rien n’a été publié.");
+  if (!chosen) throw new CompatibilitySelectionError("Aucun ensemble de versions stables compatible avec Node et les dépendances du projet n’a été trouvé. Rien n’a été publié.");
   const versions = Object.fromEntries([...chosen].map(([name, item]) => [name, item.version]));
   for (const [name, item] of chosen) if (item.version !== latest.get(name)!.version) warnings.push(`${name} : ${item.version} retenue pour la compatibilité de l’ensemble (dernière publiée : ${latest.get(name)!.version}).`);
   for (const section of sections) for (const name of Object.keys(next[section] || {})) if (versions[name]) next[section][name] = versions[name];

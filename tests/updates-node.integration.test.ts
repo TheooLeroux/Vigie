@@ -4,6 +4,9 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNodeSources, snapshotSources, changedSources } from "../src/lib/updates/node";
+import { createNodeRemediator } from "../src/lib/updates/remediation";
+import { requireSecurityPass, securityCheck } from "../src/lib/updates/security";
+import { runCommand } from "../src/lib/updates/process";
 
 const docker = { skip: process.env.VIGIE_TEST_DOCKER !== "1" };
 const nodeVersion = "24.14.0";
@@ -54,6 +57,38 @@ test("Docker réel : une alerte de sécurité arrête le parcours avant les scri
     assert.equal(validated, false);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+test("Docker réel : la boucle sécurité recherche une autre proposition si les tests refusent la première", docker, async () => {
+  const program = "if(require('is-number/package.json').version.startsWith('6.')){console.error('error TS2614: Module \"is-number\" has no exported member fixture');process.exit(1)}";
+  const { folder, names } = await fixture(undefined, `node -e ${JSON.stringify(program)}`);
+  const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+  manifest.dependencies["is-number"] = "5.0.0";
+  await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
+  await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { name: manifest.name, version: "1.0.0", dependencies: manifest.dependencies }, "node_modules/is-number": { version: "5.0.0" } } }));
+  const transport: typeof fetch = async (input, options) => {
+    if (String(input).startsWith("https://api.osv.dev/")) {
+      const queries = JSON.parse(String(options?.body)).queries as { version: string }[];
+      return Response.json({ results: queries.map(item => item.version === "7.0.0" ? { vulns: [{ id: "GHSA-fixture-security" }] } : {}) });
+    }
+    const versions = ["7.0.0", "6.0.0", "5.0.0"].map(version => ({ version }));
+    return Response.json(String(input).endsWith("/latest") ? versions[0] : { "dist-tags": { latest: "7.0.0" }, versions: Object.fromEntries(versions.map(item => [item.version, item])) });
+  };
+  const scanned: string[] = [], messages: string[] = [];
+  try {
+    const retry = { limits: new Map<string, Record<string, string>>(), attempt: 0, remediation: { iterations: 0, constraints: new Map<string, Record<string, string>>(), tried: new Set<string>(), seen: new Set<string>(), repair: createNodeRemediator(transport, async () => JSON.stringify({ patches: [] })) } };
+    const prepared = await prepareNodeSources(folder, [""], names, nodeVersion, transport, [], retry, {
+      resolved: async () => {
+        const next = JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["is-number"];
+        scanned.push(next);
+        requireSecurityPass(securityCheck("OSV", "candidate", "fixture", next === "7.0.0" ? [{ id: "GHSA-fixture-security", aliases: [], package: "is-number", version: next, severity: "critical", scope: "" }] : []));
+      },
+      image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
+    });
+    assert.deepEqual(scanned, ["7.0.0", "6.0.0", "7.0.0", "5.0.0"]);
+    assert.equal(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["is-number"], "5.0.0");
+    assert.ok(messages.some(message => message.includes("écartée après échec des tests")));
+    assert.ok(prepared.warnings.some(message => message.includes("sans ignorer les assertions")));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 
 test("Docker réel : un conflit de dépendances est résolu sans forcer l’installation", docker, async () => {
   const { folder, names } = await fixture();
@@ -72,6 +107,68 @@ test("Docker réel : un conflit de dépendances est résolu sans forcer l’inst
     assert.ok(result.warnings.some(warning => warning.includes("react")));
   }
   finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : une proposition sans intersection de pairs est écartée sans contraindre les parents suivants", docker, async () => {
+  const { folder, names } = await fixture();
+  const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+  manifest.dependencies["is-number"] = "5.0.0";
+  await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
+  await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { name: manifest.name, version: "1.0.0", dependencies: manifest.dependencies }, "node_modules/is-number": { version: "5.0.0" } } }));
+  const transport: typeof fetch = async (input, options) => {
+    if (String(input).startsWith("https://api.osv.dev/")) {
+      const queries = JSON.parse(String(options?.body)).queries as { version: string }[];
+      return Response.json({ results: queries.map(item => item.version === "7.0.0" ? { vulns: [{ id: "GHSA-fixture-security" }] } : {}) });
+    }
+    const versions = ["7.0.0", "6.0.0", "5.0.0"].map(version => ({ version }));
+    return Response.json(String(input).endsWith("/latest") ? versions[0] : { "dist-tags": { latest: "7.0.0" }, versions: Object.fromEntries(versions.map(item => [item.version, item])) });
+  };
+  const scanned: string[] = [], messages: string[] = [];
+  const key = JSON.stringify(["", [["is-number", "6.0.0"]], []]);
+  const retry = { limits: new Map<string, Record<string, string>>(), attempt: 0, resolution: { attempts: 1, learned: new Map([[key, { "is-number": ["<6.0.0"] }]]) }, remediation: { iterations: 1, constraints: new Map([["", { "is-number": "6.0.0" }]]), tried: new Set([":is-number@6.0.0"]), seen: new Set<string>(), repair: createNodeRemediator(transport, async () => JSON.stringify({ patches: [] })) } };
+  try {
+    await prepareNodeSources(folder, [""], names, nodeVersion, transport, [], retry, {
+      resolved: async () => {
+        const version = JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["is-number"];
+        scanned.push(version);
+        requireSecurityPass(securityCheck("OSV", "candidate", "fixture", version === "7.0.0" ? [{ id: "GHSA-fixture-security", aliases: [], package: "is-number", version, severity: "critical", scope: "" }] : []));
+      },
+      image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
+    });
+    assert.deepEqual(scanned, ["7.0.0", "5.0.0"]);
+    assert.ok(messages.some(message => message.includes("pairs indirects ne permettent aucun ensemble admissible")));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Docker réel : un pair indirect refusé par npm fait recalculer les versions directes", docker, async () => {
+  const { folder, names } = await fixture();
+  await mkdir(join(folder, "package"));
+  await writeFile(join(folder, "package/package.json"), JSON.stringify({ name: "vigie-indirect-parent", version: "1.0.0", peerDependencies: { react: "^18 || ^19", "react-dom": "^18 || ^19" }, dependencies: { "react-json-view-lite": "1.5.0" } }));
+  await runCommand("tar", ["-czf", join(folder, "parent.tgz"), "-C", folder, "package"]);
+  names.push("parent.tgz", "package/package.json");
+  await writeFile(join(folder, "package.json"), JSON.stringify({ name: "vigie-transitive-peer-fixture", private: true, dependencies: { "vigie-indirect-parent": "file:parent.tgz", react: "^18.0.0", "react-dom": "^18.0.0" }, scripts: { test: "node -e \"if(!require('react/package.json').version.startsWith('18.'))process.exit(1)\"" } }));
+  const versions: Record<string, any[]> = { react: [{ version: "19.0.0" }, { version: "18.3.1" }], "react-dom": [{ version: "19.0.0", peerDependencies: { react: "^19" } }, { version: "18.3.1", peerDependencies: { react: "^18" } }], "react-json-view-lite": [{ version: "1.5.0", peerDependencies: { react: "^16.13.1 || ^17.0.0 || ^18.0.0", "react-dom": "^16.13.1 || ^17.0.0 || ^18.0.0" } }] };
+  const transport: typeof fetch = async input => {
+    const path = new URL(String(input)).pathname.slice(1), all = !path.endsWith("/latest"), name = decodeURIComponent(all ? path : path.slice(0, -7));
+    assert.ok(versions[name], name);
+    const items = versions[name];
+    return Response.json(all ? { "dist-tags": { latest: items[0].version }, versions: Object.fromEntries(items.map(item => [item.version, item])) } : items[0]);
+  };
+  const messages: string[] = [], scanned: string[] = [];
+  try {
+    await prepareNodeSources(folder, [""], names, nodeVersion, transport, [], undefined, {
+      resolved: async () => { scanned.push(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies.react); },
+      image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
+    });
+    const dependencies = JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies;
+    assert.equal(dependencies.react, "18.3.1");
+    assert.equal(dependencies["react-dom"], "18.3.1");
+    assert.deepEqual(scanned, ["18.3.1"]);
+    assert.ok(messages.some(message => message.includes("react-json-view-lite@1.5.0 exige")));
+  } catch (error) {
+    const selected = JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies;
+    throw new Error(`Pair indirect : ${JSON.stringify({ selected, messages, scanned })}`, { cause: error });
+  } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
 test("Docker réel : le verrou npm est reconstruit sans conserver un ancien arbre contradictoire", docker, async () => {

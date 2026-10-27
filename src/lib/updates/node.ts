@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile, lstat, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ApiError } from "../http";
-import { runCommand, DependencyValidationError } from "./process";
+import { runCommand, DependencyValidationError, PeerResolutionError } from "./process";
 import { minVersion, satisfies, validRange } from "semver";
-import { compatibleVersions } from "./versions";
+import { compatibleVersions, CompatibilitySelectionError, verifiedPeerConflicts } from "./versions";
 import { dockerPackages, rewriteDockerfile, validateDockerfile } from "./dockerfile";
 import { nodeTestProfile } from "./node-test-profile";
+import { SecurityPolicyError } from "./security";
+import { createNodeRemediator } from "./remediation";
 export { stableVersion } from "./versions";
 import { stableVersion } from "./versions";
 
@@ -83,8 +85,9 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
     const modern = Number(version.split(".")[0]) > 1;
     const tool = `npx --yes --package=${modern ? "@yarnpkg/cli-dist" : "yarn"}@${version} -- yarn`;
     const mode = Number(version.split(".")[0]) >= 4 ? "skip-build" : "skip-builds";
-    const resolve = modern ? `YARN_ENABLE_IMMUTABLE_INSTALLS=false ${tool} install --mode=${mode}` : `${tool} install --ignore-scripts`;
-    const install = modern ? `${tool} install --immutable` : `${tool} install --frozen-lockfile --force`;
+    const resolve = modern ? `YARN_ENABLE_IMMUTABLE_INSTALLS=false ${tool} install --mode=${mode}` : `${tool} install --ignore-scripts --modules-folder /tmp/vigie-yarn-resolution`;
+    const cleanModules = `node -e "require('node:fs').rmSync('node_modules',{recursive:true,force:true})"`;
+    const install = modern ? `${tool} install --immutable` : `${cleanModules} && ${tool} install --frozen-lockfile`;
     const scripts = ["typecheck", "test", "build", ...additional].filter(name => manifest.scripts?.[name]).map(name => `${tool} run ${name}`);
     return { lock: "yarn.lock", resolve, validate: [install, ...scripts].join(" && ") };
   }
@@ -94,14 +97,23 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
   const npmVersion = declared ? declared.slice(4) : null;
   if (npmVersion && !stableVersion(npmVersion)) throw new ApiError("Version de npm non stable ou non précisée.");
   const tool = npmVersion ? `npx --yes --package=npm@${npmVersion} -- npm` : "npm";
-  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts --strict-peer-deps --no-audit --no-fund`, validate: `${tool} ci --strict-peer-deps --no-audit --no-fund && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
+  const strict = "--strict-peer-deps --legacy-peer-deps=false --force=false --no-audit --no-fund";
+  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts ${strict}`, verify: `${tool} ci --ignore-scripts ${strict} && ${tool} ls --all --json`, validate: `${tool} ci ${strict} && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
 }
 export type NodeUpdateChecks = {
   resolved: (names: string[]) => Promise<void>;
   image: (root: string, image: string) => Promise<void>;
   validated: (root: string, scripts: string[]) => Promise<void>;
+  remediating?: (message: string) => Promise<void>;
 };
-export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: { limits: Map<string, Record<string, string>>; attempt: number } = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
+type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
+type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState };
+export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: PreparationRetry = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
+  const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
+  const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
+  retry = { ...retry, remediation, resolution };
+  const resolutionKey = (root: string) => JSON.stringify([root, Object.entries(remediation.constraints.get(root) || {}).sort(), Object.entries(retry.limits.get(root) || {}).sort()]);
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
     if (!/(^|\/)(Dockerfile|mise\.toml|\.tool-versions|railpack\.json)$/.test(name)) return false;
@@ -116,7 +128,13 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
   const initialSources = await snapshotSources(folder, names);
   const originalVersions = new Map<string, string | null>();
   async function remember(name: string) { if (!originalVersions.has(name)) originalVersions.set(name, await readFile(join(folder, name), "utf8").catch(error => { if (error.code === "ENOENT") return null; throw error; })); }
-  const allowed = new Set<string>(), warnings: string[] = [], checks: { root: string; resolve: string; validate: string; docker: boolean; original: Record<string, any>; packages: string[]; environment: Record<string, string> }[] = [], intended = new Map<string, string>();
+  async function restoreVersions() {
+    for (const [name, content] of originalVersions) {
+      if (content === null) await rm(join(folder, name), { force: true });
+      else await writeFile(join(folder, name), content);
+    }
+  }
+  const allowed = new Set<string>(), warnings: string[] = [], checks: { root: string; resolve: string; validate: string; verify?: string; docker: boolean; original: Record<string, any>; packages: string[]; environment: Record<string, string> }[] = [], intended = new Map<string, string>();
   for (const root of [...new Set(roots)]) {
     const prefix = root ? `${root}/` : "", path = `${prefix}package.json`;
     if (!names.includes(path)) throw new ApiError("Sources Node introuvables dans le répertoire configuré.");
@@ -126,7 +144,23 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
     const manager = managerCommands(manifest, localNames);
     const dockerName = prefix + "Dockerfile", docker = names.includes(dockerName), dockerSource = docker ? await readFile(join(folder, dockerName), "utf8") : "";
     const extra = docker ? dockerPackages(dockerSource) : {};
-    const upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, retry.limits.get(root));
+    const limits: Record<string, string | string[]> = Object.assign(Object.create(null), retry.limits.get(root));
+    for (const [name, range] of Object.entries(remediation.constraints.get(root) || {})) limits[name] = Object.hasOwn(limits, name) ? [limits[name], range].flat() : range;
+    const learned = resolution.learned.get(resolutionKey(root)) || {};
+    for (const [name, ranges] of Object.entries(learned)) limits[name] = Object.hasOwn(limits, name) ? [limits[name], ranges].flat() : ranges;
+    let upgraded: Awaited<ReturnType<typeof compatibleVersions>>;
+    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits); }
+    catch (error) {
+      if (!(error instanceof CompatibilitySelectionError) || !Object.keys(learned).length || !Object.keys(remediation.constraints.get(root) || {}).length) throw error;
+      await changedSources(folder, initialSources, allowed);
+      await restoreVersions();
+      remediation.constraints.delete(root);
+      const message = `${root || "racine"} : proposition de sécurité écartée car ses pairs indirects ne permettent aucun ensemble admissible ; recherche d’autres parents.`;
+      await security?.remediating?.(message);
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, retry, security);
+      result.warnings.push(...warnings, message);
+      return result;
+    }
     warnings.push(...upgraded.warnings);
     const content = JSON.stringify(upgraded.manifest, null, 2) + "\n";
     await remember(path);
@@ -150,24 +184,120 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
     const schemaName = prefix + "src/config/env.ts";
     const profile = nodeTestProfile(manifest, names.includes(schemaName) ? await readFile(join(folder, schemaName), "utf8") : "");
     if (profile) warnings.push(profile.message);
-    checks.push({ root, resolve: manager.resolve, validate: manager.validate, docker, original: manifest, packages: Object.keys(upgraded.versions), environment: profile?.environment || {} });
+    checks.push({ root, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, docker, original: manifest, packages: Object.keys(upgraded.versions), environment: profile?.environment || {} });
   }
-  async function isolated(root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}) {
+  async function isolated(root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false) {
     const name = `vigie-check-${crypto.randomUUID()}`;
     try {
-      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, `node:${nodeVersion}-bookworm`, "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
+      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, `node:${nodeVersion}-bookworm`, "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
     } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
   }
-  for (const check of checks) await isolated(check.root, check.resolve);
+  for (const check of checks) {
+    try { await isolated(check.root, check.resolve, undefined, {}, true); }
+    catch (error) {
+      if (!(error instanceof PeerResolutionError) || resolution.attempts >= 8) throw error;
+      const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
+      const selected = Object.assign({}, candidate.dependencies, candidate.devDependencies, candidate.optionalDependencies);
+      const conflicts = await verifiedPeerConflicts(error.conflicts, selected, transport);
+      const key = resolutionKey(check.root);
+      let learned = { ...resolution.learned.get(key) };
+      let progress = false;
+      const messages: string[] = [];
+      for (const conflict of conflicts) {
+        const ranges = Object.hasOwn(learned, conflict.peer) ? learned[conflict.peer] : [];
+        if (ranges.includes(conflict.range)) continue;
+        learned = { ...learned, [conflict.peer]: [...ranges, conflict.range] };
+        progress = true;
+        messages.push(`${check.root || "racine"} : ${conflict.consumer}@${conflict.version} exige ${conflict.peer} ${conflict.range} ; nouvelle recherche coordonnée après refus de l’installation stricte.`);
+      }
+      if (!progress) throw error;
+      await changedSources(folder, initialSources, allowed);
+      for (const [path, content] of intended) if (await readFile(join(folder, path), "utf8") !== content) throw new ApiError("La résolution a modifié un manifeste ou le Dockerfile au-delà des versions demandées.");
+      resolution.attempts++;
+      resolution.learned.set(key, learned);
+      for (const message of messages) await security?.remediating?.(message);
+      await restoreVersions();
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, retry, security);
+      result.warnings.push(...warnings, ...messages);
+      return result;
+    }
+  }
   for (const [path, content] of intended) if (await readFile(join(folder, path), "utf8") !== content) throw new ApiError("Le gestionnaire a modifié un manifeste au-delà des versions demandées.");
-  const resolvedFiles = await snapshotSources(folder, [...allowed]);
-  await security?.resolved([...new Set([...names, ...allowed])]);
+  let resolvedFiles = await snapshotSources(folder, [...allowed]);
+  for (;;) {
+    try {
+      await security?.resolved([...new Set([...names, ...allowed])]);
+      break;
+    } catch (error) {
+      if (!(error instanceof SecurityPolicyError) || error.check.tool !== "OSV") throw error;
+      if (++remediation.iterations > 6) throw new ApiError("La recherche de versions sécurisées atteint sa limite de six propositions. Aucun contrôle n’a été désactivé.", 422);
+      await changedSources(folder, resolvedFiles, new Set());
+      await changedSources(folder, initialSources, allowed);
+      const fingerprint = JSON.stringify({ files: resolvedFiles.map(file => [file.path, file.hash]), tried: [...remediation.tried].sort(), limits: [...retry.limits] });
+      if (remediation.seen.has(fingerprint)) throw new ApiError("La remédiation reproduit un ensemble déjà refusé. Aucun changement n’a été publié.", 422);
+      remediation.seen.add(fingerprint);
+      await security?.remediating?.("Recherche de correctifs indirects et de versions compatibles des paquets parents.");
+      const lockCopies = new Map<string, string>();
+      for (const file of resolvedFiles.filter(file => /(^|\/)(package-lock\.json|npm-shrinkwrap\.json)$/.test(file.path))) lockCopies.set(file.path, await readFile(join(folder, file.path), "utf8"));
+      const decision = await remediation.repair(folder, roots, [...new Set([...names, ...allowed])], error.check.blockers || error.check.findings, nodeVersion, originalVersions, remediation.tried);
+      for (const message of decision.messages) { warnings.push(message); await security?.remediating?.(message); }
+      if (decision.kind === "lock") {
+        try {
+          for (const root of decision.roots) {
+            const check = checks.find(check => check.root === root);
+            if (!check?.verify) throw new ApiError("Le gestionnaire ne permet pas de vérifier strictement le correctif indirect.");
+            await isolated(root, check.verify);
+          }
+        } catch (validationError) {
+          if (!(validationError instanceof ApiError) || validationError.status !== 502) throw validationError;
+          await changedSources(folder, initialSources, allowed);
+          for (const [path, content] of intended) if (await readFile(join(folder, path), "utf8") !== content) throw new ApiError("La vérification du correctif a altéré un manifeste ou le Dockerfile.");
+          for (const [path, content] of lockCopies) await writeFile(join(folder, path), content);
+          const message = "Proposition de verrou rejetée par l’installation stricte ; recherche d’une correction par les paquets parents.";
+          warnings.push(message);
+          await security?.remediating?.(message);
+          resolvedFiles = await snapshotSources(folder, [...allowed]);
+          continue;
+        }
+        for (const [path, content] of intended) if (await readFile(join(folder, path), "utf8") !== content) throw new ApiError("La remédiation a modifié un manifeste hors de sa proposition validée.");
+        await changedSources(folder, initialSources, allowed);
+        resolvedFiles = await snapshotSources(folder, [...allowed]);
+        continue;
+      }
+      for (const [root, constraints] of decision.constraints) remediation.constraints.set(root, { ...remediation.constraints.get(root), ...constraints });
+      for (const [name, content] of originalVersions) {
+        if (content === null) await rm(join(folder, name), { force: true });
+        else await writeFile(join(folder, name), content);
+      }
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, remediation }, security);
+      result.warnings.push(...warnings);
+      return result;
+    }
+  }
   for (const check of checks) {
     try { await isolated(check.root, check.validate, check.packages, check.environment); }
     catch (error) {
-      if (!(error instanceof DependencyValidationError) || retry.attempt >= 3) throw error;
+      if (retry.attempt >= 3) throw error;
+      const secured = remediation.constraints.get(check.root) || {};
+      const rejected = error instanceof DependencyValidationError ? error.packages.filter(name => Object.hasOwn(secured, name)) : error instanceof ApiError && error.status === 502 ? Object.keys(secured) : [];
+      if (!(error instanceof DependencyValidationError) && !rejected.length) throw error;
       await changedSources(folder, resolvedFiles, new Set());
       await changedSources(folder, initialSources, allowed);
+      if (rejected.length) {
+        const remaining = { ...secured };
+        for (const name of rejected) delete remaining[name];
+        remediation.constraints.set(check.root, remaining);
+        const message = `${check.root || "racine"} : proposition de sécurité écartée après échec des tests (${rejected.join(", ")}) ; recherche d’une autre combinaison sans ignorer les assertions.`;
+        await security?.remediating?.(message);
+        for (const [name, content] of originalVersions) {
+          if (content === null) await rm(join(folder, name), { force: true });
+          else await writeFile(join(folder, name), content);
+        }
+        const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1, remediation }, security);
+        result.warnings.push(...warnings, message);
+        return result;
+      }
+      if (!(error instanceof DependencyValidationError)) throw error;
       const limits = structuredClone(retry.limits), held: string[] = [];
       let rootLimits = limits.get(check.root) || {};
       const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
@@ -185,7 +315,7 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
         if (content === null) await rm(join(folder, name), { force: true });
         else await writeFile(join(folder, name), content);
       }
-      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { limits, attempt: retry.attempt + 1 }, security);
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { limits, attempt: retry.attempt + 1, remediation, resolution }, security);
       result.warnings.push(...held.map(name => `${name} : montée majeure écartée après les tests ; dernière version compatible de la branche actuelle retenue.`));
       return result;
     }

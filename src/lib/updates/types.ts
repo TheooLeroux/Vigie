@@ -23,6 +23,7 @@ export type SecurityFinding = {
   version: string;
   severity: "critical" | "high" | "moderate" | "low" | "unknown";
   scope?: string;
+  fixedVersions?: string[];
 };
 export type UpdateCheck = {
   tool: "OSV" | "Trivy" | "WPScan" | "Validation";
@@ -32,6 +33,7 @@ export type UpdateCheck = {
   status: "passed" | "warning" | "blocked";
   message: string;
   findings: SecurityFinding[];
+  blockers?: SecurityFinding[];
 };
 export type UpdateResult = {
   targetId: string;

@@ -59,6 +59,8 @@ test("OSV : seuls les manifestes et verrous sont fournis, jamais les sources ou 
       assert.deepEqual(options?.acceptedExitCodes, [1]);
       assert.ok(!JSON.stringify(options).includes("private-fixture"));
       assert.ok(!options?.env?.DATABASE_URL && !options?.env?.VIGIE_CONNECTOR_ENCRYPTION_KEY);
+      assert.equal(options?.env?.HOME, options?.cwd);
+      assert.equal(options?.env?.TMPDIR, options?.cwd);
       await assert.rejects(readFile(join(options!.cwd!, "private.txt")));
       const path = args.find(arg => arg.startsWith("--lockfile="))!.slice(11);
       return JSON.stringify({ results: [{ source: { path }, packages: [] }] });

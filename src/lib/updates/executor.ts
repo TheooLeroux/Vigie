@@ -118,9 +118,13 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const browser = scripts.includes("test:e2e"), tests = scripts.some(name => name === "test" || name === "test:integration");
         await record({ tool: "Validation", phase: "candidate", scope: root || "racine", checkedAt: new Date().toISOString(), status: browser && tests ? "passed" : "warning", message: `Scripts réussis : ${scripts.join(", ")}. ${!browser ? "Aucun parcours navigateur test:e2e déclaré : les parcours métier ne sont pas certifiés." : "Le périmètre navigateur dépend des assertions du projet."} ${!tests ? "Aucun test unitaire ou d’intégration déclaré." : ""}`, findings: [] }, results.filter((_, index) => targets[index].root === root));
       },
+      remediating: async message => {
+        for (const result of results) result.warnings.push(message);
+        await progress("updating", message);
+      },
     });
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
-    for (const result of results) result.warnings.push(...prepared.warnings);
+    for (const result of results) result.warnings = [...new Set([...result.warnings, ...prepared.warnings])];
     for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     if (!changes.length) {
       for (const result of results) { result.stage = "completed"; result.message = "Node et les dépendances sont déjà à jour."; }
