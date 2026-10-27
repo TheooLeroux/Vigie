@@ -9,9 +9,12 @@ import type { HostingConnection } from "../types";
 import type { UpdateTarget } from "./types";
 import { readUpdateSource } from "./storage";
 import { wordpressPlanPhp, wordpressPlanSchema, type WordPressUpdatePlan } from "./wordpress-security";
+import { wordpressAgentPackageVersion, agentFileHash, assertManagedAgentFile } from "./wordpress-agent-package";
+import { database, transaction } from "../db";
+import { isPostgres } from "../storage";
 
 export const agentProtocol = "vigie-local-v1" as const;
-export type LocalAgentSettings = { protocol: typeof agentProtocol; directory: string; secret: string; phpBinary: string; wpBinary: string; environment: "production" | "staging"; ready: boolean };
+export type LocalAgentSettings = { protocol: typeof agentProtocol; directory: string; secret: string; phpBinary: string; wpBinary: string; environment: "production" | "staging"; ready: boolean; bundleVersion?: string; fileHashes?: Record<string, string>; previousFileHashes?: Record<string, string>; previousPhpBinary?: string };
 export type AgentOperation = "inspect" | "backup" | "update" | "restore";
 export function agentDirectory(root: string, username: string) {
   if (!/^[a-zA-Z0-9_-]{1,32}$/.test(username) || !root.startsWith(`/home/${username}/`) || posix.normalize(root) !== root || /[\x00-\x1f]/.test(root)) throw new ApiError("Répertoire WordPress non autorisé.");
@@ -93,6 +96,9 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
       if (!privateMode) throw new ApiError("Le dossier de l’agent doit être privé (0700).");
     },
     async addCron(command: string, previousCommand?: string) {
+      return transaction(async () => {
+      // cPanel deletes by line number: serialize each complete read/edit/verify sequence per account.
+      if (isPostgres()) await database().prepare("SELECT pg_advisory_xact_lock(hashtext(?))").get(`vigie:agent-cron:${connection.id}`);
       const rows = await api2("Cron", "listcron");
       if (!Array.isArray(rows)) throw new ApiError("Les tâches cron n’ont pas pu être vérifiées.");
       if (!rows.some(row => row.command === command)) await api2("Cron", "add_line", { command, minute: "*", hour: "*", day: "*", month: "*", weekday: "*" });
@@ -107,7 +113,8 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
         }
       }
       const saved = await api2("Cron", "listcron");
-      if (!Array.isArray(saved) || !saved.some(row => row.command === command) || (previousCommand !== command && saved.some(row => row.command === previousCommand))) throw new ApiError("La tâche cron de l’agent n’a pas été confirmée.");
+      if (!Array.isArray(saved) || !saved.some(row => row.command === command) || (previousCommand && previousCommand !== command && saved.some(row => row.command === previousCommand))) throw new ApiError("La tâche cron de l’agent n’a pas été confirmée.");
+      });
     },
     async assertPrivateLocation() {
       const rows = await call("/execute/DomainInfo/domains_data?format=list");
@@ -121,12 +128,20 @@ export async function agentBundle(root: string, username: string, webPhp: string
   if (!match) throw new ApiError("L’agent local nécessite PHP 8.1 ou plus récent.");
   const settings: LocalAgentSettings = previous ? { ...previous, ready: false } : { protocol: agentProtocol, directory: agentDirectory(root, username), secret: randomBytes(32).toString("hex"), phpBinary: `/opt/alt/php${match[1].replace(".", "")}/usr/bin/php`, wpBinary: "/usr/local/bin/wp", environment, ready: false };
   if (settings.directory !== agentDirectory(root, username) || settings.environment !== environment) throw new ApiError("Le rattachement de l’agent a changé.");
+  const phpBinary = `/opt/alt/php${match[1].replace(".", "")}/usr/bin/php`;
+  if (settings.phpBinary !== phpBinary) { settings.previousPhpBinary = settings.phpBinary; settings.phpBinary = phpBinary; }
+  if (previous?.bundleVersion !== wordpressAgentPackageVersion) settings.previousFileHashes = previous?.fileHashes || previous?.previousFileHashes;
+  settings.bundleVersion = wordpressAgentPackageVersion;
   const worker = await readFile(join(process.cwd(), "connectors/wordpress/local-agent.php"), "utf8");
   const bootstrap = await readFile(join(process.cwd(), "connectors/wordpress/agent-bootstrap.php"), "utf8");
   const plan = "<?php\n" + wordpressPlanPhp() + "\n";
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
   const config = JSON.stringify({ protocol: agentProtocol, root, secret: settings.secret, phpBinary: settings.phpBinary, wpBinary: settings.wpBinary, environment, workerSha256: hash(worker), planSha256: hash(plan) });
-  return { settings, files: { "agent.php": worker, "plan.php": plan, "config.json": config, "bootstrap.php": bootstrap, "php.d/10-phar.ini": "extension=phar.so\n" }, cron: `${settings.phpBinary} '${settings.directory}/bootstrap.php' '${settings.directory}/config.json' >/dev/null 2>&1`, previousCron: `${settings.phpBinary} '${settings.directory}/agent.php' '${settings.directory}/config.json' >/dev/null 2>&1` };
+  const files = { "agent.php": worker, "plan.php": plan, "config.json": config, "bootstrap.php": bootstrap, "php.d/10-phar.ini": "extension=phar.so\n" };
+  settings.fileHashes = Object.fromEntries(Object.entries(files).map(([name, text]) => [name, agentFileHash(text)]));
+  const cron = `${settings.phpBinary} '${settings.directory}/bootstrap.php' '${settings.directory}/config.json' >/dev/null 2>&1`;
+  const previousCrons = [...new Set([settings.phpBinary, settings.previousPhpBinary].filter((value): value is string => !!value).flatMap(binary => ["agent.php", "bootstrap.php"].map(file => `${binary} '${settings.directory}/${file}' '${settings.directory}/config.json' >/dev/null 2>&1`)))].filter(value => value !== cron);
+  return { settings, files, cron, previousCrons };
 }
 export async function provisionLocalAgent(target: UpdateTarget, settings: LocalAgentSettings, webPhp: string) {
   const installation = await hostingInstallation(target.remoteId);
@@ -136,18 +151,20 @@ export async function provisionLocalAgent(target: UpdateTarget, settings: LocalA
     const bundle = await agentBundle(target.root, connection.username, webPhp, environment, settings);
     const files = cpanelAgentFiles(connection, settings.directory);
     await files.assertPrivateLocation();
-    // This is a new installation only. Never overwrite an agent/config from another owner.
+    // Managed upgrades retain ownership, keys, jobs and backups. Unknown remote edits are refused.
     await files.mkdir(posix.dirname(settings.directory));
     await files.mkdir(settings.directory);
     await files.mkdir(settings.directory + "/php.d");
     for (const name of Object.keys(bundle.files) as (keyof typeof bundle.files)[]) {
       const current = await files.read(name);
-      if (current !== null && current !== bundle.files[name]) throw new ApiError("Un fichier d’agent différent existe déjà ; aucun écrasement.");
+      assertManagedAgentFile(name, current, bundle.files[name], bundle.files["config.json"], settings.previousFileHashes, settings.previousPhpBinary);
     }
     for (const dir of ["jobs", "results", "backups"]) await files.mkdir(settings.directory + "/" + dir);
     const startedAt = Date.now() / 1000;
-    for (const [name, source] of Object.entries(bundle.files)) { await files.write(name, source); if (await files.read(name) !== source) throw new ApiError("Le dépôt de l’agent n’a pas été vérifié."); }
-    await files.addCron(bundle.cron, bundle.previousCron);
+    // Publish the new checksums last; a concurrent cron fails closed during a partial upload.
+    for (const name of [...Object.keys(bundle.files).filter(name => name !== "config.json"), "config.json"] as (keyof typeof bundle.files)[]) { const source = bundle.files[name]; await files.write(name, source); if (await files.read(name) !== source) throw new ApiError("Le dépôt de l’agent n’a pas été vérifié."); }
+    await files.addCron(bundle.cron);
+    for (const previous of bundle.previousCrons) await files.addCron(bundle.cron, previous);
     const deadline = Date.now() + 8 * 60_000;
     while (Date.now() < deadline) {
       const heartbeat = await files.read("heartbeat.json");
@@ -222,6 +239,7 @@ export async function withLocalWordPressAgent<T>(target: UpdateTarget, callback:
   const site = await hostingInstallation(target.remoteId);
   if (site.documentRoot !== target.root || site.project?.id !== target.projectId || site.missingSince || site.kind !== "wordpress" || site.suggestedEnvironment !== settings.environment) throw new ApiError("Le rattachement WordPress a changé.");
   if (settings.environment === "production" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1") throw new ApiError("Les mises à jour de production par l’agent local ne sont pas encore activées.");
+  if (settings.bundleVersion !== wordpressAgentPackageVersion) throw new ApiError("L’agent doit terminer sa mise à niveau automatique avant de lancer une mise à jour WordPress.");
   return withHostingCredentials(target.connectionId, async connection => {
     if (settings.directory !== agentDirectory(target.root, connection.username)) throw new ApiError("Dossier d’agent inattendu.");
     const files = cpanelAgentFiles(connection, settings.directory);

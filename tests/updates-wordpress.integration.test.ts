@@ -56,10 +56,11 @@ wp --path=${root} post create --post_title='Vigie backup proof' --post_status=pu
     assert.match(updated, /^VIGIE_WORDPRESS=/m);
     assert.doesNotMatch(updated, /^VIGIE_WORDPRESS=6\.8\.3$/m);
     assert.match(updated, /^VIGIE_PLUGINS=0$/m);
-    assert.match(updated, /^VIGIE_THEMES=0$/m);
+    assert.match(updated, /^VIGIE_THEMES=\d+$/m);
+    assert.equal((await execute(`wp --path=${root} theme get twentytwentyfour --field=version`)).trim(), "1.1");
     const repeated = await execute(wordpressUpdateScript(root, backup));
     assert.match(repeated, /^VIGIE_PLUGINS=0$/m);
-    assert.match(repeated, /^VIGIE_THEMES=0$/m);
+    assert.match(repeated, /^VIGIE_THEMES=\d+$/m);
     await execute(`test ! -f ${root}/.maintenance`);
     await docker(["exec", "--user", "82:82", "-d", cli, "php", "-S", "0.0.0.0:8080", "-t", root]);
     let response: Response | undefined;

@@ -4,6 +4,8 @@ import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { agentBundle, agentDirectory, localAgentOperation, signAgentPayload, agentPlan, type AgentFiles, type AgentOperation } from "../src/lib/updates/wordpress-agent";
+import { freeWordPressScanner } from "../src/lib/updates/wordpress-free-security";
+import { securityCheck, requireSecurityPass } from "../src/lib/updates/security";
 
 async function docker(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -39,6 +41,10 @@ wp --path=${original} config set AUTOMATIC_UPDATER_DISABLED true --raw
 wp --path=${original} core install --url=http://fixture.invalid --title='Original immutable' --admin_user=fixture --admin_password=fixture-only-password --admin_email=fixture@example.test --skip-email
 wp --path=${original} plugin install akismet --version=5.3 --force
 wp --path=${original} theme install twentytwentyfour --version=1.1 --force
+mkdir -p ${original}/wp-content/themes/custom-child ${original}/wp-content/themes/integer-theme
+printf '/* Theme Name: Custom child\nTemplate: twentytwentyfour\n*/\n' > ${original}/wp-content/themes/custom-child/style.css
+printf '/* Theme Name: Integer theme\nVersion: 27\n*/\n' > ${original}/wp-content/themes/integer-theme/style.css
+touch ${original}/wp-content/themes/integer-theme/index.php
 wp --path=${original} post create --post_title='Vigie copy proof' --post_status=publish
 wp --path=${original} db export /home/vigietest/copy.sql --single-transaction
 cp -a ${original} ${root}
@@ -60,7 +66,17 @@ wp --path=${root} option update siteurl ${url}
     };
     const op = (run: string, name: AgentOperation, extra = {}, requestId?: string) => localAgentOperation(files, settings, root, run, name, extra, { timeoutMs: 600_000, pollMs: 1, sleep: async () => { await tick(); }, requestId });
     const run = randomUUID();
-    const plan = agentPlan((await op(run, "inspect")).plan); report.before = plan;
+    let plan = agentPlan((await op(run, "inspect")).plan); report.before = plan;
+    const themesBefore = await shell(`wp --path=${root} theme list --fields=name,version --format=json`);
+    assert.equal(plan.themes.find(theme => theme.slug === "custom-child")?.current, "");
+    assert.equal(plan.themes.find(theme => theme.slug === "integer-theme")?.current, "27");
+    if (process.env.VIGIE_TEST_WORDPRESS_FREE_API === "1") {
+      const scan = freeWordPressScanner(fetch, { persistentCache: false });
+      plan = await scan.prepare(plan);
+      const before = await scan(plan, false);
+      requireSecurityPass(securityCheck("WPVulnerability", "candidate", "Isolated copy", await scan(plan, true), before));
+      check("real free vulnerability API validated without a token");
+    }
     assert.equal(plan.wordpress.current, "6.8.3"); check("copy inspected without SSH");
     const forged = { id: randomUUID(), runId: run, root, operation: "backup", issuedAt: Math.floor(Date.now()/1000), webPhp: php };
     await files.write(`jobs/${forged.id}.json`, JSON.stringify(signAgentPayload(forged, randomBytes(32).toString("hex")))); await tick();
@@ -76,6 +92,9 @@ wp --path=${root} option update siteurl ${url}
     const updated = agentPlan((await op(run, "update", { plan, webPhp: php })).plan); report.after = updated;
     assert.equal(updated.wordpress.current, plan.wordpress.target); assert.notEqual(updated.wordpress.current, "6.8.3");
     assert.equal(updated.plugins.find(p=>p.slug==='akismet')?.current, plan.plugins.find(p=>p.slug==='akismet')?.target); check("core and extensions updated to exact plan");
+    assert.equal(updated.php, php);
+    assert.equal(await shell(`wp --path=${root} theme list --fields=name,version --format=json`), themesBefore);
+    check("PHP and all themes, including versionless and integer-version themes, unchanged");
     const beforeReplay = await exec(["stat", "-c", "%Y", `${directory}/backups/${run}/manifest.json`]);
     await op(run, "backup", { webPhp: php }); await tick();
     assert.equal(await exec(["stat", "-c", "%Y", `${directory}/backups/${run}/manifest.json`]), beforeReplay); check("duplicate backup was not executed twice");

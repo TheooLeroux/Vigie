@@ -4,9 +4,12 @@ import { severity } from "./security";
 import { shellQuote } from "./wordpress";
 import type { SecurityFinding } from "./types";
 
-const version = z.string().regex(/^\d+(?:\.\d+){1,3}$/);
-const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: version, target: version, requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]) });
-export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default("") }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300) });
+const version = z.string().max(80).regex(/^\d+(?:\.\d+){0,7}$/);
+const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]) });
+export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default("") }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]) }).superRefine((plan, context) => {
+  for (const item of plan.plugins) if (item.current !== item.target && (!version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) < 0)) context.addIssue({ code: "custom", message: "Version d’extension non admissible.", path: ["plugins"] });
+  for (const item of plan.themes) if (item.current !== item.target) context.addIssue({ code: "custom", message: "Les thèmes sont conservés.", path: ["themes"] });
+});
 export type WordPressUpdatePlan = z.infer<typeof wordpressPlanSchema>;
 export function compareWordPressVersions(first: string, second: string) {
   const left = version.parse(first).split(".").map(Number), right = version.parse(second).split(".").map(Number);
@@ -15,7 +18,7 @@ export function compareWordPressVersions(first: string, second: string) {
 }
 export function checkWordPressRequirements(plan: WordPressUpdatePlan) {
   if (plan.wordpress.requiresPhp && compareWordPressVersions(plan.php, plan.wordpress.requiresPhp) < 0) throw new ApiError("La nouvelle version WordPress exige un PHP plus récent. Aucun fichier n’a été modifié.");
-  for (const item of [...plan.plugins, ...plan.themes]) {
+  for (const item of plan.plugins.filter(item => item.current !== item.target)) {
     if (item.requiresPhp && compareWordPressVersions(plan.php, item.requiresPhp) < 0) throw new ApiError(`${item.slug} exige un PHP plus récent. WordPress n’a pas été modifié.`);
     if (item.requiresWordPress && compareWordPressVersions(plan.wordpress.target, item.requiresWordPress) < 0) throw new ApiError(`${item.slug} exige un WordPress plus récent. Mise à jour annulée.`);
     if (item.requiresPlugins.some(slug => !plan.plugins.some(plugin => plugin.slug === slug))) throw new ApiError(`${item.slug} dépend d’une extension absente. Mise à jour annulée.`);
@@ -24,21 +27,21 @@ export function checkWordPressRequirements(plan: WordPressUpdatePlan) {
 export function wordpressPlanPhp() {
   const php = `require_once ABSPATH . 'wp-admin/includes/update.php';
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
-wp_version_check(); wp_update_plugins(); wp_update_themes();
+wp_version_check(); wp_update_plugins();
 $core = get_site_transient('update_core'); $target = get_bloginfo('version'); $requiresPhp = '';
 foreach (($core->updates ?? array()) as $update) { if ($update->response === 'upgrade') { $target = $update->version; $requiresPhp = $update->php_version ?? ''; break; } }
-$data = array('wordpress' => array('current' => get_bloginfo('version'), 'target' => $target, 'requiresPhp' => $requiresPhp), 'php' => PHP_VERSION, 'plugins' => array(), 'themes' => array());
+$data = array('wordpress' => array('current' => get_bloginfo('version'), 'target' => $target, 'requiresPhp' => $requiresPhp), 'php' => PHP_VERSION, 'plugins' => array(), 'themes' => array(), 'warnings' => array());
 $updates = get_site_transient('update_plugins');
 foreach (get_plugins() as $file => $headers) {
   $update = $updates->response[$file] ?? null; $slug = $update->slug ?? (dirname($file) === '.' ? basename($file, '.php') : dirname($file));
   $dependencies = $update->requires_plugins ?? ($headers['RequiresPlugins'] ?? '');
   if (is_string($dependencies)) { $dependencies = array_values(array_filter(array_map('trim', explode(',', $dependencies)))); }
-  $data['plugins'][] = array('slug' => $slug, 'current' => $headers['Version'], 'target' => $update->new_version ?? $headers['Version'], 'requiresPhp' => $update->requires_php ?? ($headers['RequiresPHP'] ?? ''), 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies);
+  $current = (string)$headers['Version']; $next = $update->new_version ?? $current;
+  if (!preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) || !preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $next)) { $next = $current; $data['warnings'][] = $slug . ' : version absente ou non standard, extension conservée.'; }
+  $data['plugins'][] = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $update->requires_php ?? ($headers['RequiresPHP'] ?? ''), 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies);
 }
-$updates = get_site_transient('update_themes');
 foreach (wp_get_themes() as $slug => $theme) {
-  $update = $updates->response[$slug] ?? array();
-  $data['themes'][] = array('slug' => $slug, 'current' => $theme->get('Version'), 'target' => $update['new_version'] ?? $theme->get('Version'), 'requiresPhp' => $update['requires_php'] ?? $theme->get('RequiresPHP'), 'requiresWordPress' => $update['requires'] ?? $theme->get('RequiresWP'), 'requiresPlugins' => array());
+  $data['themes'][] = array('slug' => $slug, 'current' => (string)$theme->get('Version'), 'target' => (string)$theme->get('Version'), 'requiresPhp' => '', 'requiresWordPress' => '', 'requiresPlugins' => array());
 }
 echo 'VIGIE_PLAN=' . base64_encode(wp_json_encode($data)) . "\\n";`;
   return php;

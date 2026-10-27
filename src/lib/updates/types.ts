@@ -26,7 +26,7 @@ export type SecurityFinding = {
   fixedVersions?: string[];
 };
 export type UpdateCheck = {
-  tool: "OSV" | "Trivy" | "WPScan" | "Validation" | "Node";
+  tool: "OSV" | "Trivy" | "WPScan" | "WPVulnerability" | "Validation" | "Node";
   phase: "before" | "candidate" | "after";
   checkedAt: string;
   scope: string;

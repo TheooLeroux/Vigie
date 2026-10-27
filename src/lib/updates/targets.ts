@@ -6,6 +6,7 @@ import { ApiError } from "../http";
 import { githubUpdateToken, repositoryAllowed } from "./github";
 import { readUpdateSource, updateStorage } from "./storage";
 import type { UpdateTarget } from "./types";
+import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
 
 export function sourceRoot(value: string | null) {
   const root = (value || "").replace(/^\/+|\/+$/g, "");
@@ -33,7 +34,7 @@ export async function updateTargets(projectId: string): Promise<UpdateTarget[]> 
     const source = await readUpdateSource(`wordpress:${item.id}`);
     const agent = source?.settings.localAgent;
     const setup = source?.settings.agentInstallation;
-    const setupMessage = setup?.state === "queued" ? setup.error || "L’installation automatique de l’agent est en attente." : setup?.state === "installing" ? "L’agent local s’installe automatiquement. Son démarrage est en cours de vérification." : setup?.state === "failed" ? setup.error || "L’installation automatique de l’agent sera réessayée." : null;
+    const setupMessage = setup?.state === "queued" ? setup.error || "L’installation automatique de l’agent est en attente." : setup?.state === "installing" ? "L’agent local s’installe automatiquement. Son démarrage est en cours de vérification." : setup?.state === "failed" ? setup.error || "L’installation automatique de l’agent sera réessayée." : agent && agent.bundleVersion !== wordpressAgentPackageVersion ? "L’agent passe automatiquement au parcours gratuit WordPress et extensions." : null;
     let url = item.domains[0] ? `https://${item.domains[0]}/` : null;
     try {
       const home = new URL(item.inventory?.site?.home || "");

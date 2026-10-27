@@ -3,7 +3,8 @@ import { ApiError } from "../http";
 import type { SiteInventory } from "../types";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage } from "./types";
 import { agentPlan, withLocalWordPressAgent } from "./wordpress-agent";
-import { checkWordPressRequirements, wordPressScanner } from "./wordpress-security";
+import { checkWordPressRequirements } from "./wordpress-security";
+import { freeWordPressScanner } from "./wordpress-free-security";
 import { requireSecurityPass, securityCheck } from "./security";
 import { checkPublicSite } from "./providers";
 import { collectHostingInventories } from "../hosting-inventory";
@@ -15,21 +16,27 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     const inspection = await operation(run.id, "inspect");
     const eligibility = z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).parse(inspection.eligibility);
     if (eligibility.multisite || eligibility.fileModsDisabled || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url!).hostname.replace(/^www\./, "")) throw new ApiError("Le site ou sa configuration ne correspond pas au parcours de maintenance.");
-    const plan = agentPlan(inspection.plan);
-    if (plan.php !== inventory.php?.version) throw new ApiError("Le PHP de l’agent local diffère du PHP web. Aucun site n’a été modifié.");
+    const proposed = agentPlan(inspection.plan);
+    if (proposed.php !== inventory.php?.version) throw new ApiError("Le PHP de l’agent local diffère du PHP web. Aucun site n’a été modifié.");
+    const scan = freeWordPressScanner();
+    const plan = await scan.prepare(proposed);
     checkWordPressRequirements(plan);
-    const scan = wordPressScanner();
     const baseline = await scan(plan, false);
-    result.checks = [securityCheck("WPScan", "before", "WordPress, extensions et thèmes installés", baseline)];
-    const candidate = securityCheck("WPScan", "candidate", "Versions WordPress prévues par l’agent local", await scan(plan, true), baseline);
+    result.checks = [securityCheck("WPVulnerability", "before", "WordPress et extensions couvertes par la base gratuite", baseline)];
+    const candidate = securityCheck("WPVulnerability", "candidate", "Versions proposées de WordPress et des extensions", await scan(plan, true), baseline);
     result.checks.push(candidate); requireSecurityPass(candidate);
+    result.warnings.push(...scan.warnings, "PHP est affiché et conservé ; sa gestion reste chez l’hébergeur. Les thèmes sont conservés.");
+    if (scan.warnings.length && candidate.status === "passed") { candidate.status = "warning"; candidate.message += " Certains composants sont conservés et hors couverture ; détails dans le suivi."; }
+    if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) {
+      result.stage = "completed"; result.message = "Aucune mise à jour applicable à WordPress ou aux extensions. Consultez les éventuelles réserves."; return;
+    }
     await progress("checking", "Sauvegarde privée des fichiers et de la base par l’agent local.");
     const saved = await operation(run.id, "backup", { webPhp: inventory.php!.version });
     const expectedBackup = `${settings.directory}/backups/${run.id}`;
     if (saved.backup !== expectedBackup) throw new ApiError("La sauvegarde locale n’a pas pu être confirmée.");
     result.backup = expectedBackup;
     result.stage = "publishing";
-    await progress("publishing", "L’agent local applique les versions vérifiées de WordPress, des extensions et des thèmes.");
+    await progress("publishing", "L’agent local met à jour WordPress et les extensions compatibles. PHP et thèmes sont conservés.");
     const installed = agentPlan((await operation(run.id, "update", { plan, webPhp: inventory.php!.version })).plan);
     result.stage = "verifying";
     await progress("verifying", "Contrôle du site et des versions installées par l’agent local.");
@@ -42,11 +49,11 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     const checkedAt = Date.now();
     await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
     const web = (await hostingInstallation(target.remoteId)).inventory;
-    if (!web || web.source !== "wordpress-observer" || web.collectionMode === "early" || web.error || !web.observedAt || Date.parse(web.observedAt) < checkedAt - 5000 || web.wordpress?.version !== installed.wordpress.current || web.php?.version !== installed.php || installed.plugins.some(item => web.plugins.find(plugin => !plugin.mustUse && plugin.slug === item.slug)?.version !== item.current) || installed.themes.some(item => web.themes.find(theme => theme.slug === item.slug)?.version !== item.current)) throw new ApiError("Le WordPress chargé côté web ne confirme pas les versions installées. Les sauvegardes sont conservées.");
-    const final = securityCheck("WPScan", "after", "Versions réellement installées par l’agent local", await scan(installed, false), baseline);
+    if (!web || web.source !== "wordpress-observer" || web.collectionMode === "early" || web.error || !web.observedAt || Date.parse(web.observedAt) < checkedAt - 5000 || web.wordpress?.version !== installed.wordpress.current || web.php?.version !== installed.php || installed.plugins.some(item => (web.plugins.find(plugin => !plugin.mustUse && plugin.slug === item.slug)?.version || "") !== item.current) || installed.themes.some(item => (web.themes.find(theme => theme.slug === item.slug)?.version || "") !== item.current)) throw new ApiError("Le WordPress chargé côté web ne confirme pas les versions installées. Les sauvegardes sont conservées.");
+    const final = securityCheck("WPVulnerability", "after", "WordPress et extensions réellement installés", await scan(installed, false), baseline);
     result.checks.push(final); requireSecurityPass(final);
     result.stage = "completed";
-    result.message = "WordPress, extensions et thèmes mis à jour par l’agent local ; contrôle HTTPS réussi.";
+    result.message = "WordPress et extensions mis à jour ; contrôle HTTPS réussi. PHP et thèmes conservés.";
     result.warnings.push("La sauvegarde reste privée sur l’hébergement. Une restauration de base nécessite une décision explicite sur les données nouvelles ; les flux premium et les tests métier restent à qualifier.");
   });
 }

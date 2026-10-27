@@ -10,6 +10,7 @@ import { githubRequest, updateRunner } from "./github";
 import { readUpdateSource, updateStorage, writeUpdateSource } from "./storage";
 import type { SourceSettings, UpdateTarget } from "./types";
 import type { HostingInstallationView } from "../types";
+import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
 
 type Installation = NonNullable<SourceSettings["agentInstallation"]>;
 async function lockSource(targetId: string, projectId: string) {
@@ -40,7 +41,7 @@ export async function requestAgentInstallation(id: string, dispatch = dispatchAg
     await lockSource(targetId, site.project!.id);
     if (await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE scope=?").get(`o2switch:${site.connectionId}:${site.id}:`)) return null;
     const current = await readUpdateSource(targetId), setup = current?.settings.agentInstallation;
-    if (!retry && current?.settings.localAgent?.ready && (!setup || setup.state === "ready")) return null;
+    if (!retry && current?.settings.localAgent?.ready && current.settings.localAgent.bundleVersion === wordpressAgentPackageVersion && (!setup || setup.state === "ready")) return null;
     if (activeLease(setup)) return null;
     if (!retry && setup?.nextAttemptAt && Date.parse(setup.nextAttemptAt) > Date.now()) return null;
     if (!retry && setup?.state === "queued" && setup.dispatchedAt && Date.now() - Date.parse(setup.dispatchedAt) < 5 * 60_000) return null;
@@ -115,7 +116,7 @@ export async function processAgentInstallation(id: string, requestId?: string, d
       await lockSource(targetId, site.project!.id);
       const current = await readUpdateSource(targetId);
       if (current?.settings.agentInstallation?.requestId !== claimed.requestId || current.settings.localAgent?.secret !== bundle.settings.secret) throw new ApiError("La configuration de l’agent vient de changer.", 409);
-      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, localAgent: { ...bundle.settings, ready: true }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
+      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, localAgent: { ...bundle.settings, ready: true, previousFileHashes: undefined, previousPhpBinary: undefined }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
       await log("live", "hosting.agent_installed", `Agent local installé et vérifié sur ${site.domains[0]}, sans mise à jour du site.`, site.project!.id);
     });
     return true;
@@ -155,7 +156,7 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
       try {
         const previous = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
         if (previous?.localAgent?.ready && (!previous.agentInstallation || previous.agentInstallation.state === "ready")) {
-          if (await (dependencies.healthy || agentHeartbeatHealthy)(site, previous.localAgent)) { ready++; continue; }
+          if (previous.localAgent.bundleVersion === wordpressAgentPackageVersion && await (dependencies.healthy || agentHeartbeatHealthy)(site, previous.localAgent)) { ready++; continue; }
           await requestAgentInstallation(site.id, async () => {}, true);
         }
         await requestAgentInstallation(site.id, async () => {});

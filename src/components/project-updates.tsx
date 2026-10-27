@@ -67,7 +67,7 @@ export function ProjectUpdates({ projectId, request, onComplete }: { projectId: 
   const available = state?.targets.filter(target => !target.unavailable) || [];
   const unresolved = latest?.stage === "attention";
   return <section className="panel project-updates" aria-label="Mises à jour du projet">
-    <div className="updates-heading"><div><h2>Mises à jour</h2><p>Node LTS et dépendances stables, ou WordPress, extensions et thèmes.</p></div>
+    <div className="updates-heading"><div><h2>Mises à jour</h2><p>Node LTS et dépendances stables, ou WordPress et extensions.</p></div>
       <button className="button primary" disabled={busy || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
         setBusy(true); setError("");
         try { await request("updates", "POST", { projectId }); await refresh(); }
@@ -78,7 +78,7 @@ export function ProjectUpdates({ projectId, request, onComplete }: { projectId: 
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
     {state && !state.enabled && <p className="updates-note">Le service de mise à jour doit être activé une première fois par un administrateur.</p>}
-    {state && <p className="updates-note">{available.length} service(s) prêt(s) sur {state.targets.length}. Les versions majeures sont incluses si leur validation réussit. {state.targets.some(target => target.mode === "wordpress") && "Une sauvegarde fichiers et base est réalisée avant toute mise à jour WordPress."}</p>}
+    {state && <p className="updates-note">{available.length} service(s) prêt(s) sur {state.targets.length}. Les versions majeures sont incluses si leur validation réussit. {state.targets.some(target => target.mode === "wordpress") && "Sauvegarde fichiers et base avant modification, contrôle gratuit WPVulnerability. PHP est affiché et reste géré par l’hébergeur ; les thèmes sont conservés."}</p>}
     {state?.targets.filter(target => target.mode === "wordpress" && target.unavailable).map(target => <p key={target.id} className="updates-note" role="status"><strong>{target.name} : </strong>{target.unavailable}</p>)}
     {latest && <UpdateProgress run={latest} />}
     <details className="updates-details"><summary>Services, configuration et détails</summary>

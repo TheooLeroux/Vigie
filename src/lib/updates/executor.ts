@@ -22,7 +22,8 @@ import { executeLocalWordPress } from "./wordpress-agent-execution";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
 import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
 import { requireSecurityPass, scanDockerImage, createNodeScanCache, securityCheck } from "./security";
-import { checkWordPressRequirements, parseWordPressPlan, wordPressScanner, wordpressPlanScript } from "./wordpress-security";
+import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
+import { freeWordPressScanner } from "./wordpress-free-security";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -236,7 +237,6 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress) {
-  if (!process.env.VIGIE_UPDATES_WPSCAN_TOKEN) throw new ApiError("Configurez le jeton WPScan sur l’exécuteur avant la mise à jour WordPress. Aucun site n’a été modifié.", 503);
   await checkPublicSite(target.url!);
   await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
   const fresh = (await hostingInstallation(target.remoteId)).inventory;
@@ -245,26 +245,28 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
   if (fresh.plugins.some(plugin => plugin.mustUse)) result.warnings.push("Extensions MU présentes : elles ne sont ni mises à jour ni qualifiées automatiquement ; une recette spécifique reste nécessaire.");
   if ((await readUpdateSource(target.id))?.settings.localAgent) return executeLocalWordPress(run, target, result, fresh, progress);
   await withWordPressUpdater(target, async (execute, username) => {
-    const plan = parseWordPressPlan(await execute(wordpressPlanScript(target.root)));
+    const scan = freeWordPressScanner();
+    const plan = await scan.prepare(parseWordPressPlan(await execute(wordpressPlanScript(target.root))));
     checkWordPressRequirements(plan);
-    const scan = wordPressScanner();
     const baseline = await scan(plan, false);
-    result.checks = [securityCheck("WPScan", "before", "WordPress, extensions et thèmes installés", baseline)];
+    result.checks = [securityCheck("WPVulnerability", "before", "WordPress et extensions couvertes", baseline)];
     await progress("checking", "Vérification de sécurité des versions WordPress candidates.");
-    const candidate = securityCheck("WPScan", "candidate", "Versions WordPress prévues et exigences PHP/WordPress", await scan(plan, true), baseline);
+    const candidate = securityCheck("WPVulnerability", "candidate", "Versions proposées de WordPress et des extensions", await scan(plan, true), baseline);
     result.checks.push(candidate);
     await progress("checking", "Sécurité WordPress et prérequis vérifiés.");
     requireSecurityPass(candidate);
+    result.warnings.push(...scan.warnings);
+    if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) { result.stage = "completed"; result.message = "Aucune mise à jour applicable à WordPress ou aux extensions."; return; }
     await progress("checking", "Vérification de WordPress et sauvegarde des fichiers et de la base.");
     const backupOutput = await execute(wordpressBackupScript(target.root, username, run.id, target.url!, fresh.php!.version));
     const backup = backupOutput.match(/^VIGIE_BACKUP=(\/home\/[\w-]+\/\.vigie-backups\/[a-f0-9-]{36}\/[a-f0-9]{12})$/m)?.[1];
     if (!backup) throw new ApiError("La sauvegarde WordPress n’a pas pu être confirmée. Mise à jour annulée.");
     result.backup = backup;
     result.stage = "publishing";
-    await progress("publishing", "Sauvegarde vérifiée. Mise à jour de WordPress, des extensions et des thèmes.");
+    await progress("publishing", "Sauvegarde vérifiée. Mise à jour de WordPress et des extensions ; PHP et thèmes conservés.");
     const output = await execute(wordpressUpdateScript(target.root, backup, plan));
     const plugins = output.match(/^VIGIE_PLUGINS=(\d+)$/m), themes = output.match(/^VIGIE_THEMES=(\d+)$/m);
-    if (!plugins || !themes || Number(plugins[1]) || Number(themes[1])) throw new ApiError("Certains composants WordPress n’ont pas pu être mis à jour. La sauvegarde est conservée.");
+    if (!plugins || !themes) throw new ApiError("Les composants WordPress n’ont pas pu être vérifiés. La sauvegarde est conservée.");
     result.stage = "verifying";
     await progress("verifying", "Contrôle du site après mise à jour WordPress.");
     await checkPublicSite(target.url!);
@@ -273,12 +275,12 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
       const key = kind as "plugins" | "themes";
       return installed[key].length !== plan[key].length || plan[key].some(item => installed[key].find(next => next.slug === item.slug)?.current !== item.target);
     })) throw new ApiError("Les versions WordPress installées ne correspondent pas au plan vérifié. Sauvegarde conservée.");
-    const finalCheck = securityCheck("WPScan", "after", "Versions réellement installées après mise à jour", await scan(installed, false), baseline);
+    const finalCheck = securityCheck("WPVulnerability", "after", "Versions réellement installées après mise à jour", await scan(installed, false), baseline);
     result.checks.push(finalCheck);
     await progress("verifying", "Contrôle de sécurité WordPress après installation.");
     requireSecurityPass(finalCheck);
     result.stage = "completed";
-    result.message = "WordPress, extensions et thèmes mis à jour ; contrôle HTTPS réussi.";
+    result.message = "WordPress et extensions mis à jour ; contrôle HTTPS réussi. PHP et thèmes conservés.";
     result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
   });
 }

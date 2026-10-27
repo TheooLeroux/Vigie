@@ -84,7 +84,7 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     if (url.pathname === "/json-api/cpanel") {
       const params = init!.body as URLSearchParams, module = params.get("cpanel_jsonapi_module"), fn = params.get("cpanel_jsonapi_func");
       if (module === "Fileman" && fn === "mkdir") { dirs.add(`${params.get("path")}/${params.get("name")}`); return ok([]); }
-      if (module === "Cron" && fn === "listcron") return ok(crons.map((cron, i) => ({ ...cron, count: i + 1 })));
+      if (module === "Cron" && fn === "listcron") return ok([...crons.map((cron, i) => ({ ...cron, count: i + 1 })), { count: crons.length + 1 }]);
       if (module === "Cron" && fn === "remove_line") { crons.splice(Number(params.get("line")) - 1, 1); return ok([]); }
       if (module === "Cron" && fn === "add_line") {
         crons.push({ command: params.get("command")! });

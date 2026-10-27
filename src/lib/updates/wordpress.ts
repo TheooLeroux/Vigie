@@ -53,8 +53,7 @@ export function wordpressUpdateScript(root: string, backup: string, plan?: WordP
     ...(plan.wordpress.target !== plan.wordpress.current ? [`wp --path="$root" core update --version=${shellQuote(plan.wordpress.target)}`] : []),
     `wp --path="$root" core update-db`,
     ...plan.plugins.filter(item => item.target !== item.current).map(item => `wp --path="$root" plugin update ${shellQuote(item.slug)} --version=${shellQuote(item.target)}`),
-    ...plan.themes.filter(item => item.target !== item.current).map(item => `wp --path="$root" theme update ${shellQuote(item.slug)} --version=${shellQuote(item.target)}`),
-  ].join("\n") : `wp --path="$root" core update\nwp --path="$root" core update-db\nwp --path="$root" plugin update --all\nwp --path="$root" theme update --all`;
+  ].join("\n") : `wp --path="$root" core update\nwp --path="$root" core update-db\nwp --path="$root" plugin update --all`;
   return `set -eu
 root=${shellQuote(root)}
 backup=${shellQuote(backup)}

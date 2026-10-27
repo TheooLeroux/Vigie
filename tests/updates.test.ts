@@ -279,7 +279,8 @@ test("WordPress : sauvegarde vérifiée avant les mutations, emplacements distin
   assert.ok(wordpressBackupScript("/home/test/site-a", "test", id, "https://example.test", "8.3.1").includes("PHP_VERSION"));
   const script = wordpressUpdateScript("/home/test/site-a", `/home/test/.vigie-backups/${id}/abcd`);
   assert.ok(script.indexOf("sha256sum -c") < script.indexOf("core update"));
-  assert.ok(script.includes("trap '") && script.includes("plugin update --all") && script.includes("theme update --all"));
+  assert.ok(script.includes("trap '") && script.includes("plugin update --all"));
+  assert.equal(script.includes("theme update"), false);
   assert.ok(script.includes('if test -f "$root/.maintenance"; then'));
   assert.ok(!script.includes("db import"));
   assert.throws(() => wordpressBackupScript("/var/www/site", "test", id), /non autorisé/);

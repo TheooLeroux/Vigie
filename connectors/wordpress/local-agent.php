@@ -27,7 +27,7 @@ function va_open(array $envelope, string $key): array {
     return json_decode($decoded, true, 32, JSON_THROW_ON_ERROR);
 }
 function va_uuid($value): bool { return is_string($value) && (bool)preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/D', $value); }
-function va_version($value): bool { return is_string($value) && (bool)preg_match('/^\d+(?:\.\d+){1,3}$/D', $value); }
+function va_version($value): bool { return is_string($value) && strlen($value) <= 80 && (bool)preg_match('/^\d+(?:\.\d+){0,7}$/D', $value); }
 function va_run(array $args, int $timeout = 180): string {
     $pipes = [];
     $process = proc_open($args, [['pipe','r'],['pipe','w'],['pipe','w']], $pipes, null, null, ['bypass_shell' => true]);
@@ -71,7 +71,9 @@ function va_validate_plan(array $plan): void {
     foreach (['plugins', 'themes'] as $kind) {
         $seen = [];
         foreach ($plan[$kind] as $item) {
-            if (!is_array($item) || !is_string($item['slug'] ?? null) || !preg_match('/^[a-z0-9_-]{1,200}$/iD', $item['slug']) || isset($seen[$item['slug']]) || !va_version($item['current'] ?? null) || !va_version($item['target'] ?? null) || version_compare($item['target'], $item['current'], '<')) { throw new RuntimeException('invalid_component'); }
+            if (!is_array($item) || !is_string($item['slug'] ?? null) || !preg_match('/^[a-z0-9_-]{1,150}$/iD', $item['slug']) || isset($seen[$item['slug']]) || !is_string($item['current'] ?? null) || !is_string($item['target'] ?? null) || strlen($item['current']) > 80 || strlen($item['target']) > 80 || preg_match('/[\x00-\x1f]/', $item['current'].$item['target'])) { throw new RuntimeException('invalid_component'); }
+            if ($kind === 'themes' && $item['target'] !== $item['current']) { throw new RuntimeException('theme_update_refused'); }
+            if ($item['target'] !== $item['current'] && (!va_version($item['current']) || !va_version($item['target']) || version_compare($item['target'], $item['current'], '<'))) { throw new RuntimeException('invalid_component'); }
             $seen[$item['slug']] = true;
         }
     }
@@ -132,10 +134,8 @@ function va_update(array $config, array $job): array {
     try {
         if ($plan['wordpress']['current'] !== $plan['wordpress']['target']) { va_wp($config, ['core','update','--version='.$plan['wordpress']['target']], 300); }
         va_wp($config, ['core','update-db']);
-        foreach (['plugins' => 'plugin', 'themes' => 'theme'] as $kind => $command) {
-            foreach ($plan[$kind] as $item) {
-                if ($item['current'] !== $item['target']) { va_wp($config, [$command,'update',$item['slug'],'--version='.$item['target']], 300); }
-            }
+        foreach ($plan['plugins'] as $item) {
+            if ($item['current'] !== $item['target']) { va_wp($config, ['plugin','update',$item['slug'],'--version='.$item['target']], 300); }
         }
         va_wp($config, ['core','verify-checksums']);
         va_wp($config, ['cache','flush']);
