@@ -120,7 +120,7 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
   const versions = Object.fromEntries([...chosen].map(([name, item]) => [name, item.version]));
   for (const [name, item] of chosen) if (item.version !== latest.get(name)!.version) warnings.push(`${name} : ${item.version} retenue pour la compatibilité de l’ensemble (dernière publiée : ${latest.get(name)!.version}).`);
   for (const section of sections) for (const name of Object.keys(next[section] || {})) if (versions[name]) next[section][name] = versions[name];
-  next.engines = { ...next.engines, node: `${nodeVersion.split(".")[0]}.x` };
+  next.engines = { ...next.engines, node: nodeVersion };
   if (next.devEngines?.runtime) {
     if (Array.isArray(next.devEngines.runtime) || next.devEngines.runtime.name !== "node") throw new ApiError("La configuration des moteurs exige une adaptation manuelle.");
     next.devEngines.runtime.version = next.engines.node;

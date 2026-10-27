@@ -31,7 +31,7 @@ for (const manager of ["npm@11.9.0", "pnpm@10.11.0", "yarn@1.22.22", "yarn@4.9.2
       const before = await snapshotSources(folder, names);
       const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
       const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
-      assert.equal(manifest.engines.node, "24.x");
+      assert.equal(manifest.engines.node, nodeVersion);
       assert.notEqual(manifest.dependencies["is-number"], "6.0.0");
       assert.match(manifest.dependencies["is-number"], /^\d+\.\d+\.\d+$/);
       const changes = await changedSources(folder, before, prepared.allowed);

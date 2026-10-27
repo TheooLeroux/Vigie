@@ -44,25 +44,25 @@ export async function currentSourceDeployment(target: UpdateTarget): Promise<str
   if (instance.source?.repo || instance.source?.image || sourceRoot(instance.rootDirectory) !== target.root) throw new ApiError("La source du service Railway a changé. Synchronisez sa fiche.");
   return instance.activeDeployments?.[0]?.id || null;
 }
-export async function providerPreflight(target: UpdateTarget, nodeVersion: string) {
+export async function providerPreflight(target: UpdateTarget, nodeVersion: string, readers = { instance: readRailwayInstance, railway: railwayUpdateRequest, vercel: vercelUpdateRequest }) {
   if (target.provider === "vercel") {
-    const remote = await vercelUpdateRequest(target, `/v9/projects/${target.remoteId}`);
+    const remote = await readers.vercel(target, `/v9/projects/${target.remoteId}`);
     if (remote.latestDeployments?.some((deployment: any) => deployment.target === "production" && ["QUEUED", "INITIALIZING", "BUILDING"].includes(deployment.readyState || deployment.state))) throw new ApiError("Vercel déploie déjà ce projet. Attendez la fin de son déploiement.");
     const repository = remote.link?.type === "github" ? `${remote.link.org}/${remote.link.repo}` : null;
     if (repository !== target.repository || sourceRoot(remote.rootDirectory) !== target.root || (target.repository && remote.link?.productionBranch && remote.link.productionBranch !== target.branch)) throw new ApiError("La source Vercel a changé. Synchronisez le projet avant de recommencer.");
     if (remote.commandForIgnoringBuildStep || remote.installCommand || remote.buildCommand) throw new ApiError("Les commandes de construction personnalisées demandent une validation dédiée.");
     return remote.targets?.production?.id as string | undefined;
   }
-  const data = await readRailwayInstance(target), instance = data.serviceInstance;
+  const data = await readers.instance(target), instance = data.serviceInstance;
   if (target.builder && target.builder !== instance.builder) throw new ApiError("Le mode de construction Railway a changé. Synchronisez sa fiche.");
   if (instance.latestDeployment && ["INITIALIZING", "QUEUED", "BUILDING", "DEPLOYING", "WAITING"].includes(instance.latestDeployment.status)) throw new ApiError("Railway déploie déjà ce service. Attendez la fin de son déploiement.");
   if (githubRepository(instance.source?.repo) !== target.repository || instance.source?.image || sourceRoot(instance.rootDirectory) !== target.root || !["RAILPACK", "DOCKERFILE"].includes(instance.builder)) throw new ApiError("La source Railway a changé. Synchronisez le projet avant de recommencer.");
   const evidence = deploymentEvidence(instance.activeDeployments?.[0]?.meta);
   if (target.mode === "git" && evidence?.branch !== target.branch) throw new ApiError("La branche Railway n’est pas confirmée. Synchronisez le projet avant de recommencer.");
-  const variables = await railwayUpdateRequest(target, `query UpdateVariables($projectId:String!,$serviceId:String!,$environmentId:String!){variables(projectId:$projectId,serviceId:$serviceId,environmentId:$environmentId)}`, { projectId: data.service.projectId, serviceId: target.remoteId, environmentId: target.environmentId });
+  const variables = await readers.railway(target, `query UpdateVariables($projectId:String!,$serviceId:String!,$environmentId:String!){variables(projectId:$projectId,serviceId:$serviceId,environmentId:$environmentId)}`, { projectId: data.service.projectId, serviceId: target.remoteId, environmentId: target.environmentId });
   if (Object.keys(variables.variables).some(name => /^(RAILPACK_.*COMMAND|NIXPACKS_|RAILPACK_PACKAGES)/.test(name))) throw new ApiError("Railway utilise une construction personnalisée qui doit être vérifiée.");
   if (variables.variables.RAILWAY_DOCKERFILE_PATH && variables.variables.RAILWAY_DOCKERFILE_PATH !== "Dockerfile") throw new ApiError("Le chemin Dockerfile personnalisé de Railway nécessite une validation dédiée.");
-  if (variables.variables.RAILPACK_NODE_VERSION && ![nodeVersion, `${nodeVersion.split(".")[0]}.x`, nodeVersion.split(".")[0]].includes(variables.variables.RAILPACK_NODE_VERSION)) throw new ApiError("Une variable Railway impose une autre version de Node. Retirez ce forçage pour utiliser la version des sources.");
+  if (variables.variables.RAILPACK_NODE_VERSION && variables.variables.RAILPACK_NODE_VERSION !== nodeVersion) throw new ApiError(`Une variable Railway impose une autre version ou une plage Node imprécise. Elle doit imposer exactement ${nodeVersion}, ou être retirée pour utiliser la version exacte des sources.`);
   return instance.activeDeployments?.[0]?.id as string | undefined;
 }
 export async function deployVercelArchive(target: UpdateTarget, folder: string, names: string[], nodeVersion: string, runId: string) {

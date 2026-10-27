@@ -12,6 +12,7 @@ import { hostingInstallation } from "../hosting-discovery";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { changedSources, latestNode, prepareNodeSources, snapshotSources } from "./node";
 import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, waitForDeployment } from "./providers";
+import { confirmDeployedNode } from "./node-deployment";
 import { runCommand } from "./process";
 import { readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
@@ -126,8 +127,19 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     for (const result of results) result.warnings = [...new Set([...result.warnings, ...prepared.warnings])];
     for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
+    async function verifyNode(index: number, deploymentId: string) {
+      const result = results[index];
+      await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
+    }
     if (!changes.length) {
-      for (const result of results) { result.stage = "completed"; result.message = "Node et les dépendances sont déjà à jour."; }
+      for (const [index, result] of results.entries()) {
+        result.stage = "verifying";
+        if (!result.previousDeploymentId) throw new ApiError("Aucun déploiement actif ne permet de vérifier la version Node exacte.");
+        await verifyNode(index, result.previousDeploymentId);
+        await checkPublicSite(targets[index].url!);
+        result.stage = "completed";
+        result.message = "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
+      }
       return;
     }
     const currentTargets = await updateTargets(run.projectId);
@@ -169,6 +181,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         result.deploymentId = id;
         await progress("verifying", "Contrôle du déploiement en cours.");
       });
+      if (!result.deploymentId) throw new ApiError("Déploiement introuvable pour vérifier la version Node exacte.");
+      await verifyNode(index, result.deploymentId);
       await checkPublicSite(target.url!);
       result.stage = "completed";
       result.message = "Mise à jour déployée et contrôle HTTPS réussi.";

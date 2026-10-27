@@ -20,6 +20,7 @@ import { runCommand, DependencyValidationError } from "../src/lib/updates/proces
 import { wordpressBackupScript, wordpressUpdateScript, shellQuote } from "../src/lib/updates/wordpress";
 import { githubUpdateToken, repositoryAllowed } from "../src/lib/updates/github";
 import { waitForDeployment, checkPublicSite } from "../src/lib/updates/providers";
+import { confirmDeployedNode } from "../src/lib/updates/node-deployment";
 import { UpdateProgress } from "../src/components/project-updates";
 import { ApiError } from "../src/lib/http";
 import type { VercelProject } from "../src/lib/vercel-types";
@@ -130,6 +131,28 @@ test("Mises à jour : un conflit avant changement de référence ne laisse pas u
   assert.equal((await readUpdateRun(run.id))?.stage, "failed");
   assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
 });
+
+test("Mises à jour : Node non attesté reste à vérifier, après publication ou sans aucun fichier à modifier", async () => {
+  for (const published of [true, false]) {
+    const { project, target } = await fixture();
+    const run = await startProjectUpdate({ projectId: project.id }, async () => {});
+    let refreshed = false;
+    await executeUpdate(run.id, async (_run, _targets, results, progress) => {
+      const result = results[0];
+      if (published) result.commit = "a".repeat(40);
+      result.previousDeploymentId = "old";
+      await confirmDeployedNode(target, result, { deploymentId: "current", commit: result.commit }, "24.22.1", progress, async () => ({ tool: "Node", phase: "after", scope: "app", checkedAt: new Date().toISOString(), status: "blocked", message: "Node 24.22.1 attendu : correctif déployé non attesté.", findings: [] }));
+      result.stage = "completed";
+    }, undefined, async () => { refreshed = true; });
+    const stored = (await readUpdateRun(run.id))!;
+    assert.equal(stored.stage, "attention");
+    assert.equal(stored.results[0].stage, "attention");
+    assert.equal(stored.results[0].checks?.[0].status, "blocked");
+    assert.equal(stored.results[0].previousDeploymentId, "old");
+    assert.equal(refreshed, false);
+    assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 1);
+  }
+});
 test("Mises à jour : une réponse de lancement perdue ne remplace pas le résultat de l’exécuteur", async () => {
   const { project } = await fixture();
   const result = await startProjectUpdate({ projectId: project.id }, async id => {
@@ -202,7 +225,7 @@ test("Node : dernière LTS maintenue et dernières dépendances stables ; les pa
   assert.equal(next.manifest.dependencies.react, "19.2.1");
   assert.equal(next.manifest.dependencies.oldtypes, "1.0.0");
   assert.equal(next.manifest.dependencies.local, "workspace:*");
-  assert.equal(next.manifest.engines.node, "24.x");
+  assert.equal(next.manifest.engines.node, "24.10.1");
   assert.equal(source.engines.node, "20.x");
   assert.equal(next.warnings.length, 2);
 });
@@ -316,6 +339,6 @@ test("Docker : installation et validation réelles sans secrets du worker", { sk
     await writeFile(join(folder, "package-lock.json"), JSON.stringify({ name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true, packages: { "": { name: manifest.name, version: manifest.version } } }));
     const prepared = await prepareNodeSources(folder, [""], ["package.json", "package-lock.json"], "24.14.0");
     assert.ok(prepared.allowed.has("package-lock.json"));
-    assert.equal(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).engines.node, "24.x");
+    assert.equal(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).engines.node, "24.14.0");
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
