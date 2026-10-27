@@ -5,6 +5,7 @@ import { z } from "zod";
 import { valid } from "semver";
 import { ApiError } from "../http";
 import { runCommand } from "./process";
+import { createHash } from "node:crypto";
 import type { SecurityFinding, UpdateCheck } from "./types";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
@@ -86,11 +87,36 @@ export async function scanNodeSources(folder: string, roots: string[], names: st
     });
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
-export async function scanDockerImage(image: string, execute = runCommand, baseline = false) {
+// Job-local, short-lived results only. Each changed manifest/lock is rescanned;
+// callers force a complete fresh scan immediately before publication.
+export function createNodeScanCache(folder: string, roots: string[], scan = scanNodeSources, clock = Date.now) {
+  const cache = new Map<string, { key: string; findings: SecurityFinding[]; at: number }>();
+  return async (names: string[], fresh = false) => {
+    const selected = [...new Set(roots)], pending: { root: string; key: string }[] = [], reused: string[] = [];
+    for (const root of selected) {
+      const prefix = root ? root + "/" : "";
+      const lock = ["npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"].find(name => names.includes(prefix + name));
+      if (!lock || /[\\\x00-\x1f]/.test(prefix) || prefix.split("/").some(part => part === "." || part === "..") || prefix.startsWith("/")) throw new ApiError("Périmètre de cache de sécurité invalide.");
+      const key = createHash("sha256").update(prefix + lock).update(await readFile(join(folder, prefix + "package.json"))).update(await readFile(join(folder, prefix + lock))).digest("hex");
+      const previous = cache.get(root);
+      if (!fresh && previous?.key === key && clock() - previous.at >= 0 && clock() - previous.at < 300_000) reused.push(root);
+      else pending.push({ root, key });
+    }
+    if (pending.length) {
+      const findings = await scan(folder, pending.map(entry => entry.root), names);
+      if (findings.some(entry => !pending.some(item => item.root === entry.scope))) throw new ApiError("Alerte de sécurité hors du périmètre analysé.", 502);
+      const at = clock();
+      for (const entry of pending) cache.set(entry.root, { key: entry.key, at, findings: structuredClone(findings.filter(finding => finding.scope === entry.root)) });
+    }
+    return { findings: selected.flatMap(root => structuredClone(cache.get(root)!.findings)), checkedAt: new Date(Math.min(...selected.map(root => cache.get(root)!.at))).toISOString(), scanned: pending.map(entry => entry.root), reused };
+  };
+}
+
+export async function scanDockerImage(image: string, execute = runCommand, baseline = false, cacheDirectory?: string) {
   if (!/^(?:node:[a-z0-9.-]+|vigie-validation:[a-f0-9-]{36})$/.test(image)) throw new ApiError("Image non autorisée pour l’analyse de sécurité.");
   const temporary = await mkdtemp(join(tmpdir(), "vigie-trivy-"));
   try {
-    const output = await execute("trivy", ["image", "--scanners=vuln", "--format=json", "--quiet", "--exit-code=0", "--cache-dir", temporary, "--timeout=5m", image], { cwd: temporary, env: scannerEnvironment(temporary), timeout: 360_000 });
+    const output = await execute("trivy", ["image", "--scanners=vuln", "--format=json", "--quiet", "--exit-code=0", "--cache-dir", cacheDirectory || temporary, "--timeout=5m", image], { cwd: temporary, env: scannerEnvironment(temporary), timeout: 360_000 });
     try { return parseTrivy(output, baseline); } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError("Trivy n’a pas fourni un rapport d’image exploitable. Aucune publication autorisée.", 502);

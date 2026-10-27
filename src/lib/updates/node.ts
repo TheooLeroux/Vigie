@@ -99,21 +99,22 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
   if (npmVersion && !stableVersion(npmVersion)) throw new ApiError("Version de npm non stable ou non précisée.");
   const tool = npmVersion ? `npx --yes --package=npm@${npmVersion} -- npm` : "npm";
   const strict = "--strict-peer-deps --legacy-peer-deps=false --force=false --no-audit --no-fund";
-  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts ${strict}`, balance: `${tool} dedupe --package-lock-only --ignore-scripts --prefer-dedupe ${strict}`, verify: `${tool} ci --ignore-scripts ${strict} && ${tool} ls --all --json`, validate: `${tool} ci ${strict} && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
+  return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts ${strict}`, balance: `${tool} dedupe --package-lock-only --ignore-scripts --prefer-dedupe ${strict}`, verify: `${tool} ci --ignore-scripts ${strict} && ${tool} ls --all --json`, validate: `${tool} ci ${strict} && ${tool} ls --all --json && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
 }
 export type NodeUpdateChecks = {
   resolved: (names: string[]) => Promise<void>;
   image: (root: string, image: string) => Promise<void>;
   validated: (root: string, scripts: string[]) => Promise<void>;
   remediating?: (message: string) => Promise<void>;
+  reused?: (message: string) => Promise<void>;
 };
 type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
-type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number> };
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; priority?: string };
 export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: PreparationRetry = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
-  retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map() };
+  retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set() };
   const resolutionKey = (root: string) => JSON.stringify([root, Object.entries(remediation.constraints.get(root) || {}).sort(), Object.entries(retry.limits.get(root) || {}).sort()]);
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
@@ -196,6 +197,19 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
     try {
       await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, `node:${nodeVersion}-bookworm`, "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
     } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
+  }
+  async function validate(check: typeof checks[number], indirects: string[], locations?: Record<string, string>) {
+    const files = await snapshotSources(folder, [...new Set([...names, ...allowed])].sort());
+    // Include the WHOLE repository, not only this root: tests may import sibling
+    // services. Changing any source, lock, Node, script or test profile invalidates it.
+    const key = createHash("sha256").update(JSON.stringify([nodeVersion, check.root, check.validate, check.environment, files])).digest("hex");
+    if (retry.validations!.has(key)) {
+      await security?.reused?.(`${check.root || "racine"} : installation et tests déjà réussis pour ces sources, verrous et version Node exacts ; résultat de cette exécution réutilisé.`);
+      return;
+    }
+    await isolated(check.root, check.validate, check.packages, check.environment, false, indirects, locations);
+    await changedSources(folder, files, new Set());
+    retry.validations!.add(key);
   }
   for (const check of checks) {
     try {
@@ -289,14 +303,15 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
       return result;
     }
   }
-  for (const check of checks) {
+  for (const check of [...checks].sort((a, b) => Number(b.root === retry.priority) - Number(a.root === retry.priority))) {
     try {
       const originalLock = originalVersions.get(check.lock);
       const indirects = check.verify && originalLock ? npmChangedIndirectPackages(originalLock, await readFile(join(folder, check.lock), "utf8")) : [];
       const locations = check.verify ? Object.fromEntries([...npmGraph(await readFile(join(folder, check.lock), "utf8")).nodes].flatMap(([path, item]) => { const name = item.name || path.slice(path.lastIndexOf("node_modules/") + 13); return path && indirects.includes(name) ? [[path, name]] : []; })) : undefined;
-      await isolated(check.root, check.validate, check.packages, check.environment, false, indirects, locations);
+      await validate(check, indirects, locations);
     }
     catch (error) {
+      retry.priority = check.root;
       if (error instanceof IndirectValidationError && check.verify) {
         const originalLock = originalVersions.get(check.lock), failedLock = await readFile(join(folder, check.lock), "utf8");
         const used = retry.indirectAttempts!.get(check.root) || 0;
@@ -317,10 +332,9 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
               await changedSources(folder, initialSources, allowed);
               protectedFiles = await snapshotSources(folder, [...new Set([...names, ...allowed])]);
               await security?.resolved([...new Set([...names, ...allowed])]);
-              await isolated(check.root, check.verify!);
               projectValidation = true;
               const locations = Object.fromEntries([...graph.nodes].flatMap(([path, item]) => { const name = item.name || path.slice(path.lastIndexOf("node_modules/") + 13); return path && error.packages.includes(name) ? [[path, name]] : []; }));
-              await isolated(check.root, check.validate, check.packages, check.environment, false, error.packages, locations);
+              await validate(check, error.packages, locations);
               await changedSources(folder, protectedFiles, new Set());
               return { kind: "valid", lock: await readFile(join(folder, check.lock), "utf8") };
             } catch (candidateError) {

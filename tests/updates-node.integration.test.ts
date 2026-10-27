@@ -46,6 +46,31 @@ test("Docker réel : un test en échec arrête la mise à jour avant publication
   try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /a échoué/); }
   finally { await rm(folder, { recursive: true, force: true }); }
 });
+
+test("Docker réel : une validation exacte est réutilisée, toute autre source du dépôt l’invalide", docker, async t => {
+  const { folder, names } = await fixture(undefined, "node -e \"if (!require('is-number')(42)) process.exit(1); require('node:fs').appendFileSync('executions.log','run\\n')\"");
+  names.push("shared-source.js");
+  await writeFile(join(folder, "shared-source.js"), "export const value = 1;\n");
+  const retry = { limits: new Map<string, Record<string, string>>(), attempt: 0, validations: new Set<string>() };
+  let reused = 0;
+  const checks = { resolved: async () => {}, image: async () => {}, validated: async () => {}, reused: async () => { reused++; } };
+  try {
+    const firstStart = performance.now();
+    await prepareNodeSources(folder, [""], names, nodeVersion, fetch, [], retry, checks);
+    const firstMs = performance.now() - firstStart;
+    assert.equal(await readFile(join(folder, "executions.log"), "utf8"), "run\n");
+    const cachedStart = performance.now();
+    await prepareNodeSources(folder, [""], names, nodeVersion, fetch, [], retry, checks);
+    const cachedMs = performance.now() - cachedStart;
+    t.diagnostic(`Même proposition : première préparation ${Math.round(firstMs)} ms ; réutilisation ${Math.round(cachedMs)} ms. Mesure isolée, hors scans et déploiement.`);
+    assert.equal(reused, 1);
+    assert.equal(await readFile(join(folder, "executions.log"), "utf8"), "run\n");
+    await writeFile(join(folder, "shared-source.js"), "export const value = 2;\n");
+    await prepareNodeSources(folder, [""], names, nodeVersion, fetch, [], retry, checks);
+    assert.equal(reused, 1);
+    assert.equal(await readFile(join(folder, "executions.log"), "utf8"), "run\nrun\n");
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 test("Docker réel : une alerte de sécurité arrête le parcours avant les scripts du projet", docker, async () => {
   const { folder, names } = await fixture(undefined, "node -e \"require('node:fs').writeFileSync('executed.txt','unexpected')\"");
   let validated = false;
@@ -402,8 +427,8 @@ test("Docker réel : un script qui altère du code ne peut pas le publier", dock
   names.push("source.js");
   await writeFile(join(folder, "source.js"), "original");
   try {
-    const before = await snapshotSources(folder, names);
-    const prepared = await prepareNodeSources(folder, [""], names, nodeVersion);
-    await assert.rejects(changedSources(folder, before, prepared.allowed), /hors du périmètre/);
+    const validations = new Set<string>();
+    await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion, fetch, [], { limits: new Map(), attempt: 0, validations }), /hors du périmètre/);
+    assert.equal(validations.size, 0, "une altération détectée ne doit jamais remplir le cache de validation");
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

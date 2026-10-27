@@ -83,7 +83,7 @@ test("Node déployé : le lecteur vérifie l’instance active, pas simplement l
   assert.equal(check.status, "blocked");
   const root = { ...target, root: "" }, deployment = active();
   deployment.meta.rootDirectory = "";
-  const verified = await verifyDeployedNode(root, reference, expected, { railway: async () => ({ serviceInstance: { rootDirectory: null, activeDeployments: [deployment] } }), vercel: async () => { throw Error("wrong provider"); } });
+  const verified = await verifyDeployedNode(root, reference, expected, { railway: async () => ({ serviceInstance: { rootDirectory: null, activeDeployments: [deployment] } }), vercel: async () => { throw Error("wrong provider"); }, runtime: async () => ({ deploymentId: id, imageDigest: deployment.meta.imageDigest, instances: [{ id: "replica", node: expected, running: [expected] }] }) });
   assert.equal(verified.status, "passed");
 });
 

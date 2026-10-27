@@ -20,7 +20,7 @@ import { runCommand, DependencyValidationError } from "../src/lib/updates/proces
 import { wordpressBackupScript, wordpressUpdateScript, shellQuote } from "../src/lib/updates/wordpress";
 import { githubUpdateToken, repositoryAllowed } from "../src/lib/updates/github";
 import { waitForDeployment, checkPublicSite } from "../src/lib/updates/providers";
-import { confirmDeployedNode } from "../src/lib/updates/node-deployment";
+import { confirmDeployedNode, verifyNodeServices } from "../src/lib/updates/node-deployment";
 import { UpdateProgress } from "../src/components/project-updates";
 import { ApiError } from "../src/lib/http";
 import type { VercelProject } from "../src/lib/vercel-types";
@@ -141,7 +141,7 @@ test("Mises à jour : Node non attesté reste à vérifier, après publication o
       const result = results[0];
       if (published) result.commit = "a".repeat(40);
       result.previousDeploymentId = "old";
-      await confirmDeployedNode(target, result, { deploymentId: "current", commit: result.commit }, "24.22.1", progress, async () => ({ tool: "Node", phase: "after", scope: "app", checkedAt: new Date().toISOString(), status: "blocked", message: "Node 24.22.1 attendu : correctif déployé non attesté.", findings: [] }));
+      await verifyNodeServices(results, async () => { await confirmDeployedNode(target, result, { deploymentId: "current", commit: result.commit }, "24.22.1", progress, async () => ({ tool: "Node", phase: "after", scope: "app", checkedAt: new Date().toISOString(), status: "blocked", message: "Node 24.22.1 attendu : correctif déployé non attesté.", findings: [] })); });
       result.stage = "completed";
     }, undefined, async () => { refreshed = true; });
     const stored = (await readUpdateRun(run.id))!;

@@ -33,6 +33,7 @@ export type UpdateCheck = {
   status: "passed" | "warning" | "blocked";
   message: string;
   findings: SecurityFinding[];
+  nodeEvidence?: { version: string; deploymentId: string; imageDigest: string; source: "container" | "railpack"; usage: "runtime" | "build"; instances?: string[] };
   blockers?: SecurityFinding[];
 };
 export type UpdateResult = {

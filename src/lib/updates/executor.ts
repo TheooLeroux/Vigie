@@ -12,14 +12,14 @@ import { hostingInstallation } from "../hosting-discovery";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { changedSources, latestNode, prepareNodeSources, snapshotSources } from "./node";
 import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, waitForDeployment } from "./providers";
-import { confirmDeployedNode } from "./node-deployment";
+import { confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
 import { readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
 import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
-import { requireSecurityPass, scanDockerImage, scanNodeSources, securityCheck } from "./security";
+import { requireSecurityPass, scanDockerImage, createNodeScanCache, securityCheck } from "./security";
 import { checkWordPressRequirements, parseWordPressPlan, wordPressScanner, wordpressPlanScript } from "./wordpress-security";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
@@ -94,27 +94,42 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
+    const nodeScan = createNodeScanCache(sourceFolder, roots);
+    const trivyCache = join(temporary, "trivy-cache");
+    await mkdir(trivyCache, { mode: 0o700 });
     async function record(check: UpdateCheck, selected = results) {
       for (const result of selected) { result.checks ||= []; result.checks.push(check); }
       await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
       requireSecurityPass(check);
     }
+    for (const [index, target] of targets.entries()) {
+      if (!results[index].previousDeploymentId) continue;
+      await progress("checking", "Vérification préalable de l’accès au runtime déployé.");
+      const check = await preflightNodeRuntime(target, results[index].previousDeploymentId!, version);
+      if (check) await record(check, [results[index]]);
+    }
     await progress("checking", "Analyse de sécurité des dépendances actuelles.");
-    const baseline = await scanNodeSources(sourceFolder, roots, names);
-    await record(securityCheck("OSV", "before", "Dépendances verrouillées des services sélectionnés", baseline));
+    const baselineScan = await nodeScan(names);
+    const baseline = baselineScan.findings;
+    await record({ ...securityCheck("OSV", "before", "Dépendances verrouillées des services sélectionnés", baseline), checkedAt: baselineScan.checkedAt });
     const imageBaselines = new Map<string, SecurityFinding[]>();
     for (const root of [...new Set(roots)]) {
       const dockerfile = (root ? root + "/" : "") + "Dockerfile";
       if (!names.includes(dockerfile)) continue;
       const image = dockerRuntimeBase(await readFile(join(sourceFolder, dockerfile), "utf8"));
-      const findings = (await scanDockerImage(image, undefined, true)).map(entry => ({ ...entry, scope: root }));
+      const findings = (await scanDockerImage(image, undefined, true, trivyCache)).map(entry => ({ ...entry, scope: root }));
       imageBaselines.set(root, findings);
       await record(securityCheck("Trivy", "before", `Image de base actuelle ${image} (hors code applicatif)`, findings), results.filter((_, index) => targets[index].root === root));
     }
     await progress("updating", "Actualisation de Node et des dépendances, puis validation isolée.");
     const prepared = await prepareNodeSources(sourceFolder, roots, names, version, fetch, targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root), undefined, {
-      resolved: async resolvedNames => { await record(securityCheck("OSV", "candidate", "Dépendances directes et transitives verrouillées", await scanNodeSources(sourceFolder, roots, resolvedNames), baseline)); },
-      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanDockerImage(image)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
+      resolved: async resolvedNames => {
+        const scan = await nodeScan(resolvedNames);
+        const check = securityCheck("OSV", "candidate", "Dépendances directes et transitives verrouillées", scan.findings, baseline);
+        await record({ ...check, checkedAt: scan.checkedAt, message: check.message + (scan.reused.length ? ` ${scan.reused.length} verrou(s) inchangé(s) : analyse de cette exécution réutilisée (moins de cinq minutes).` : "") });
+      },
+      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanDockerImage(image, undefined, false, trivyCache)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
+      reused: message => progress("updating", message),
       validated: async (root, scripts) => {
         const browser = scripts.includes("test:e2e"), tests = scripts.some(name => name === "test" || name === "test:integration");
         await record({ tool: "Validation", phase: "candidate", scope: root || "racine", checkedAt: new Date().toISOString(), status: browser && tests ? "passed" : "warning", message: `Scripts réussis : ${scripts.join(", ")}. ${!browser ? "Aucun parcours navigateur test:e2e déclaré : les parcours métier ne sont pas certifiés." : "Le périmètre navigateur dépend des assertions du projet."} ${!tests ? "Aucun test unitaire ou d’intégration déclaré." : ""}`, findings: [] }, results.filter((_, index) => targets[index].root === root));
@@ -125,6 +140,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       },
     });
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
+    const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
+    await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de tous les verrous avant publication", finalScan.findings, baseline), checkedAt: finalScan.checkedAt });
     for (const result of results) result.warnings = [...new Set([...result.warnings, ...prepared.warnings])];
     for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     async function verifyNode(index: number, deploymentId: string) {
@@ -132,14 +149,15 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
     }
     if (!changes.length) {
-      for (const [index, result] of results.entries()) {
+      await verifyNodeServices(results, async index => {
+        const result = results[index];
         result.stage = "verifying";
         if (!result.previousDeploymentId) throw new ApiError("Aucun déploiement actif ne permet de vérifier la version Node exacte.");
         await verifyNode(index, result.previousDeploymentId);
         await checkPublicSite(targets[index].url!);
         result.stage = "completed";
         result.message = "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
-      }
+      });
       return;
     }
     const currentTargets = await updateTargets(run.projectId);
@@ -173,7 +191,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         await writeUpdateSource(representative.id, run.projectId, { ...original!.settings, archive: content.toString("base64"), deploymentId });
       });
     }
-    for (const [index, target] of targets.entries()) {
+    await verifyNodeServices(results, async index => {
+      const target = targets[index];
       const result = results[index];
       result.stage = "verifying";
       await progress("verifying", "Attente du déploiement et contrôle du site.");
@@ -186,7 +205,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await checkPublicSite(target.url!);
       result.stage = "completed";
       result.message = "Mise à jour déployée et contrôle HTTPS réussi.";
-    }
+    });
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress) {
@@ -279,10 +298,10 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       await log("live", "updates.completed", run.message, run.projectId);
     });
   } catch (error) {
-    const published = run.results.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && run.results.some(result => ["publishing", "verifying"].includes(result.stage)));
+    const published = run.results.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && run.results.some(result => ["publishing", "verifying", "attention"].includes(result.stage)));
     run.stage = published ? "attention" : "failed";
     run.message = error instanceof ApiError ? error.message : "Une étape de mise à jour a échoué. Les informations de récupération sont conservées.";
-    for (const result of run.results.filter(result => result.stage !== "completed")) { result.stage = run.stage; result.message = run.message; }
+    for (const result of run.results.filter(result => result.stage !== "completed" && result.stage !== "attention")) { result.stage = run.stage; result.message = run.message; }
     await withAuditActor(run.actor, () => log("live", "updates.failed", run.message, run.projectId));
   } finally {
     clearInterval(heartbeat);
