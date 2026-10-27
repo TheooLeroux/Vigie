@@ -50,10 +50,10 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
     return envelope.data;
   }
   function fileParts(file: string) {
-    if (!/^(?:(?:jobs|results)\/[a-f0-9-]{36}\.json|config\.json|heartbeat\.json|agent\.php|plan\.php)$/.test(file)) throw new ApiError("Fichier d’agent non autorisé.");
+    if (!/^(?:(?:jobs|results)\/[a-f0-9-]{36}\.json|php\.d\/10-phar\.ini|bootstrap\.php|config\.json|heartbeat\.json|readiness\.json|agent\.php|plan\.php)$/.test(file)) throw new ApiError("Fichier d’agent non autorisé.");
     return { dir: posix.dirname(directory + "/" + file), name: posix.basename(file) };
   }
-  const api2 = (module: "Fileman" | "Cron", func: "mkdir" | "listcron" | "add_line", params: Record<string, string> = {}) => call("/json-api/cpanel", new URLSearchParams({ cpanel_jsonapi_user: connection.username, cpanel_jsonapi_apiversion: "2", cpanel_jsonapi_module: module, cpanel_jsonapi_func: func, ...params }));
+  const api2 = (module: "Fileman" | "Cron", func: "mkdir" | "listcron" | "add_line" | "remove_line", params: Record<string, string> = {}) => call("/json-api/cpanel", new URLSearchParams({ cpanel_jsonapi_user: connection.username, cpanel_jsonapi_apiversion: "2", cpanel_jsonapi_module: module, cpanel_jsonapi_func: func, ...params }));
   return {
     async read(file: string) {
       const { dir, name } = fileParts(file);
@@ -74,7 +74,7 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
       // Upload errors can hide behind HTTP 200; callers verify bytes before relying on them.
     },
     async mkdir(path: string) {
-      if (![posix.dirname(directory), directory, directory + "/jobs", directory + "/results", directory + "/backups"].includes(path)) throw new ApiError("Dossier d’agent non autorisé.");
+      if (![posix.dirname(directory), directory, directory + "/jobs", directory + "/results", directory + "/backups", directory + "/php.d"].includes(path)) throw new ApiError("Dossier d’agent non autorisé.");
       const find = async () => {
         const listing = await call("/execute/Fileman/list_files?" + new URLSearchParams({ dir: posix.dirname(path), include_permissions: "1", show_hidden: "1" }));
         const entries = Array.isArray(listing) ? listing : listing?.files;
@@ -92,12 +92,22 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
       const privateMode = permissions !== undefined ? /^0?700$/.test(String(permissions)) : Number.isSafeInteger(current.mode) && (current.mode & 0o7777) === 0o700;
       if (!privateMode) throw new ApiError("Le dossier de l’agent doit être privé (0700).");
     },
-    async addCron(command: string) {
+    async addCron(command: string, previousCommand?: string) {
       const rows = await api2("Cron", "listcron");
       if (!Array.isArray(rows)) throw new ApiError("Les tâches cron n’ont pas pu être vérifiées.");
       if (!rows.some(row => row.command === command)) await api2("Cron", "add_line", { command, minute: "*", hour: "*", day: "*", month: "*", weekday: "*" });
+      if (previousCommand && previousCommand !== command) {
+        // Never edit unrelated account jobs or infer a line number from its array index.
+        const current = await api2("Cron", "listcron");
+        if (!Array.isArray(current)) throw new ApiError("Les tâches cron n’ont pas pu être vérifiées.");
+        const previous = current.find(row => row.command === previousCommand);
+        if (previous) {
+          if (!Number.isInteger(previous.count) || previous.count < 1) throw new ApiError("L’ancienne tâche de l’agent n’a pas pu être identifiée.");
+          await api2("Cron", "remove_line", { line: String(previous.count) });
+        }
+      }
       const saved = await api2("Cron", "listcron");
-      if (!Array.isArray(saved) || !saved.some(row => row.command === command)) throw new ApiError("La tâche cron de l’agent n’a pas été confirmée.");
+      if (!Array.isArray(saved) || !saved.some(row => row.command === command) || (previousCommand !== command && saved.some(row => row.command === previousCommand))) throw new ApiError("La tâche cron de l’agent n’a pas été confirmée.");
     },
     async assertPrivateLocation() {
       const rows = await call("/execute/DomainInfo/domains_data?format=list");
@@ -112,10 +122,11 @@ export async function agentBundle(root: string, username: string, webPhp: string
   const settings: LocalAgentSettings = previous ? { ...previous, ready: false } : { protocol: agentProtocol, directory: agentDirectory(root, username), secret: randomBytes(32).toString("hex"), phpBinary: `/opt/alt/php${match[1].replace(".", "")}/usr/bin/php`, wpBinary: "/usr/local/bin/wp", environment, ready: false };
   if (settings.directory !== agentDirectory(root, username) || settings.environment !== environment) throw new ApiError("Le rattachement de l’agent a changé.");
   const worker = await readFile(join(process.cwd(), "connectors/wordpress/local-agent.php"), "utf8");
+  const bootstrap = await readFile(join(process.cwd(), "connectors/wordpress/agent-bootstrap.php"), "utf8");
   const plan = "<?php\n" + wordpressPlanPhp() + "\n";
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
   const config = JSON.stringify({ protocol: agentProtocol, root, secret: settings.secret, phpBinary: settings.phpBinary, wpBinary: settings.wpBinary, environment, workerSha256: hash(worker), planSha256: hash(plan) });
-  return { settings, files: { "agent.php": worker, "plan.php": plan, "config.json": config }, cron: `${settings.phpBinary} '${settings.directory}/agent.php' '${settings.directory}/config.json' >/dev/null 2>&1` };
+  return { settings, files: { "agent.php": worker, "plan.php": plan, "config.json": config, "bootstrap.php": bootstrap, "php.d/10-phar.ini": "extension=phar.so\n" }, cron: `${settings.phpBinary} '${settings.directory}/bootstrap.php' '${settings.directory}/config.json' >/dev/null 2>&1`, previousCron: `${settings.phpBinary} '${settings.directory}/agent.php' '${settings.directory}/config.json' >/dev/null 2>&1` };
 }
 export async function provisionLocalAgent(target: UpdateTarget, settings: LocalAgentSettings, webPhp: string) {
   const installation = await hostingInstallation(target.remoteId);
@@ -128,23 +139,30 @@ export async function provisionLocalAgent(target: UpdateTarget, settings: LocalA
     // This is a new installation only. Never overwrite an agent/config from another owner.
     await files.mkdir(posix.dirname(settings.directory));
     await files.mkdir(settings.directory);
-    for (const name of ["config.json", "agent.php", "plan.php"] as const) {
+    await files.mkdir(settings.directory + "/php.d");
+    for (const name of Object.keys(bundle.files) as (keyof typeof bundle.files)[]) {
       const current = await files.read(name);
       if (current !== null && current !== bundle.files[name]) throw new ApiError("Un fichier d’agent différent existe déjà ; aucun écrasement.");
     }
     for (const dir of ["jobs", "results", "backups"]) await files.mkdir(settings.directory + "/" + dir);
+    const startedAt = Date.now() / 1000;
     for (const [name, source] of Object.entries(bundle.files)) { await files.write(name, source); if (await files.read(name) !== source) throw new ApiError("Le dépôt de l’agent n’a pas été vérifié."); }
-    await files.addCron(bundle.cron);
-    const deadline = Date.now() + 90_000;
+    await files.addCron(bundle.cron, bundle.previousCron);
+    const deadline = Date.now() + 8 * 60_000;
     while (Date.now() < deadline) {
       const heartbeat = await files.read("heartbeat.json");
       if (heartbeat) {
         const value = z.object({ protocol: z.literal(agentProtocol), root: z.string(), php: z.string(), time: z.number().int() }).parse(openAgentPayload(JSON.parse(heartbeat), settings.secret));
-        if (value.root !== target.root || value.php !== webPhp || Math.abs(Date.now() / 1000 - value.time) > 120) throw new ApiError("Le PHP ou le rattachement de l’agent ne correspond pas au site.");
-        const inspected = await localAgentOperation(files, settings, target.root, randomUUID(), "inspect", {}, { timeoutMs: 180_000 });
-        const plan = agentPlan(inspected.plan);
-        const eligibility = z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).parse(inspected.eligibility);
-        if (plan.php !== webPhp || eligibility.multisite || eligibility.fileModsDisabled || !target.url || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url).hostname.replace(/^www\./, "")) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
+        if (value.root !== target.root || value.php !== webPhp) throw new ApiError("Le PHP ou le rattachement de l’agent ne correspond pas au site.");
+        if (Math.abs(Date.now() / 1000 - value.time) > 120) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+        const raw = await files.read("readiness.json");
+        if (!raw) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+        const inspected = z.object({ protocol: z.literal(agentProtocol), root: z.string(), php: z.string(), ready: z.boolean(), time: z.number().int(), error: z.string().regex(/^[a-z_]{1,80}$/).optional(), eligibility: z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).optional() }).parse(openAgentPayload(JSON.parse(raw), settings.secret));
+        if (inspected.root !== target.root || inspected.php !== webPhp) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
+        if (inspected.time < startedAt - 2 || Math.abs(Date.now() / 1000 - inspected.time) > 300) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+        if (!inspected.ready) throw new ApiError(`L’agent est installé, mais WordPress/WP-CLI ne démarre pas correctement (${inspected.error || "wordpress_probe_failed"}).`);
+        const eligibility = inspected.eligibility;
+        if (!eligibility || eligibility.multisite || eligibility.fileModsDisabled || !target.url || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url).hostname.replace(/^www\./, "")) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
         return;
       }
       await new Promise(resolve => setTimeout(resolve, 3000));

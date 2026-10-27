@@ -55,7 +55,9 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
   const item = (await hostingDiscovery(host.id)).installations[0];
   await (await hostingStorage()).prepare("INSERT INTO hosting_site_inventories(installation_id,data) VALUES(?,?)").run(item.id, JSON.stringify({ source: "wordpress-observer", collectionMode: "normal", observedAt: new Date().toISOString(), lastAttemptAt: new Date().toISOString(), error: null, php: { version: php }, site: { home: `https://${domain}`, multisite: false }, configuration: { fileModsDisabled: false }, plugins: [], themes: [] }));
   const target = (await updateTargets(project.id))[0];
-  const directory = agentDirectory(root, "agentstage"), dirs = new Set(["/home/agentstage"]), files = new Map<string, string>(), crons: { command: string }[] = [];
+  const directory = agentDirectory(root, "agentstage"), dirs = new Set(["/home/agentstage"]), files = new Map<string, string>();
+  const oldCron = `/opt/alt/php83/usr/bin/php '${directory}/agent.php' '${directory}/config.json' >/dev/null 2>&1`;
+  const crons: { command: string }[] = [{ command: "unrelated-account-job" }, { command: oldCron }];
   let uploads = 0, inspections = 0;
   const ok = (data: unknown) => Response.json({ status: 1, data });
   const fetchBefore = globalThis.fetch;
@@ -82,11 +84,13 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     if (url.pathname === "/json-api/cpanel") {
       const params = init!.body as URLSearchParams, module = params.get("cpanel_jsonapi_module"), fn = params.get("cpanel_jsonapi_func");
       if (module === "Fileman" && fn === "mkdir") { dirs.add(`${params.get("path")}/${params.get("name")}`); return ok([]); }
-      if (module === "Cron" && fn === "listcron") return ok(crons);
+      if (module === "Cron" && fn === "listcron") return ok(crons.map((cron, i) => ({ ...cron, count: i + 1 })));
+      if (module === "Cron" && fn === "remove_line") { crons.splice(Number(params.get("line")) - 1, 1); return ok([]); }
       if (module === "Cron" && fn === "add_line") {
         crons.push({ command: params.get("command")! });
         const config = JSON.parse(files.get(`${directory}/config.json`)!);
         files.set(`${directory}/heartbeat.json`, JSON.stringify(signAgentPayload({ protocol: "vigie-local-v1", root, php, time: Math.floor(Date.now()/1000) }, config.secret)));
+        files.set(`${directory}/readiness.json`, JSON.stringify(signAgentPayload({ protocol: "vigie-local-v1", root, php, ready: true, time: Math.floor(Date.now()/1000), eligibility: { multisite: false, fileModsDisabled: false, home: `https://${domain}` } }, config.secret)));
         return ok([]);
       }
     }
@@ -96,10 +100,18 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     await requestAgentInstallation(item.id, async () => {});
     assert.equal((await updateTargets(project.id))[0].configured, false);
     assert.equal(await processAgentInstallation(item.id, undefined, { prepare: () => hostingInstallation(item.id) }), true);
-    assert.equal(inspections, 1); assert.equal(crons.length, 1);
+    assert.equal(inspections, 0); assert.equal(crons.length, 2);
+    assert.equal(crons[0].command, "unrelated-account-job");
+    assert.equal(crons.some(row => row.command === oldCron), false);
+    assert.ok(crons[1].command.includes("/bootstrap.php"));
     const source = await readUpdateSource(target.id); assert.equal(source?.settings.localAgent?.ready, true);
     const targets = await updateTargets(project.id); assert.equal(targets[0].configured, true);
     assert.equal(JSON.stringify(targets).includes(source!.settings.localAgent!.secret), false);
+    files.set(`${directory}/readiness.json`, JSON.stringify(signAgentPayload({ protocol: "vigie-local-v1", root, php, ready: true, time: Math.floor(Date.now()/1000), eligibility: { multisite: false, fileModsDisabled: false, home: "https://another-site.example.test" } }, source!.settings.localAgent!.secret)));
+    await writeUpdateSource(target.id, project.id, { ...source!.settings, localAgent: { ...source!.settings.localAgent!, ready: false }, agentInstallation: { ...source!.settings.agentInstallation!, state: "failed" } });
+    await requestAgentInstallation(item.id, async () => {}, true);
+    assert.equal(await processAgentInstallation(item.id, undefined, { prepare: () => hostingInstallation(item.id) }), false);
+    assert.match((await readUpdateSource(target.id))?.settings.agentInstallation?.error || "", /contrôle initial/);
     const uploadsBefore = uploads;
     files.set(`${directory}/agent.php`, files.get(`${directory}/agent.php`)! + "\n// Altered fixture\n");
     // A failed durable request retries without changing its key or overwriting remote code.
@@ -108,7 +120,7 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     await requestAgentInstallation(item.id, async () => {}, true);
     assert.equal(await processAgentInstallation(item.id, undefined, { prepare: () => hostingInstallation(item.id) }), false);
     assert.match((await readUpdateSource(target.id))?.settings.agentInstallation?.error || "", /aucun écrasement/);
-    assert.equal(uploads, uploadsBefore); assert.equal(crons.length, 1);
+    assert.equal(uploads, uploadsBefore); assert.equal(crons.length, 2);
     assert.equal((await readUpdateSource(target.id))?.settings.localAgent?.ready, false);
     assert.match(files.get(`${directory}/agent.php`)!, /Altered fixture/);
   } finally { globalThis.fetch = fetchBefore; }

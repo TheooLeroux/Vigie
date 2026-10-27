@@ -15,6 +15,9 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/vigie-wordpress-agents.yml'
+      - 'connectors/wordpress/**'
+      - 'src/lib/updates/wordpress-agent*.ts'
+      - 'scripts/wordpress-agent-worker.ts'
   schedule:
     - cron: '17 * * * *'
 permissions:

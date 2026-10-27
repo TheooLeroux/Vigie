@@ -51,9 +51,9 @@ wp --path=${root} option update siteurl ${url}
     const bundle = await agentBundle(root, "vigietest", php, "staging");
     const settings = { ...bundle.settings, phpBinary: "/usr/local/bin/php", wpBinary: "/usr/local/bin/wp", ready: true };
     const config = { ...JSON.parse(bundle.files["config.json"]), phpBinary: settings.phpBinary, wpBinary: settings.wpBinary };
-    await shell(`mkdir -p '${directory}/jobs' '${directory}/results' '${directory}/backups'; chmod 700 '${directory}'`);
+    await shell(`mkdir -p '${directory}/jobs' '${directory}/results' '${directory}/backups' '${directory}/php.d'; chmod 700 '${directory}'`);
     for (const [name, text] of Object.entries({ ...bundle.files, "config.json": JSON.stringify(config) })) await exec(["sh", "-c", 'cat > "$1"', "sh", `${directory}/${name}`], text);
-    const tick = () => exec(["php", `${directory}/agent.php`, `${directory}/config.json`]);
+    const tick = () => exec(["php", `${directory}/bootstrap.php`, `${directory}/config.json`]);
     const files: AgentFiles = {
       read: async file => { try { return await exec(["cat", `${directory}/${file}`]); } catch { return null; } },
       write: async (file, text) => { await exec(["sh", "-c", 'cat > "$1"', "sh", `${directory}/${file}`], text); },
