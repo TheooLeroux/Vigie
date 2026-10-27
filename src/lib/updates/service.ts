@@ -9,8 +9,8 @@ import { updateScope, updateTargets } from "./targets";
 import { activeUpdateStages, type UpdateRun, type UpdateState } from "./types";
 import { currentSourceDeployment } from "./providers";
 import { isPostgres } from "../storage";
-import { agentBundle, provisionLocalAgent, cpanelAgentFiles, assertAgentRunStopped } from "./wordpress-agent";
-import { hostingInstallation } from "../hosting-discovery";
+import { cpanelAgentFiles, assertAgentRunStopped } from "./wordpress-agent";
+import { requestAgentInstallation } from "./wordpress-agent-setup";
 import { withHostingCredentials } from "../hosting-connections";
 import type { SourceSettings } from "./types";
 
@@ -39,6 +39,10 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
   const { run, created } = await transaction(async () => {
     if (isPostgres()) await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(input.projectId);
     if ((await requireProject(input.projectId, "live")).lifecycle !== "active") throw new ApiError("Projet archivé.", 409);
+    for (const target of targets.filter(target => target.mode === "wordpress")) {
+      const setup = (await readUpdateSource(target.id))?.settings.agentInstallation;
+      if (setup && setup.state !== "ready") throw new ApiError("L’installation automatique de l’agent doit se terminer avant la mise à jour. Rechargez le suivi.", 409);
+    }
     const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=?").all(input.projectId) as { data: string }[];
     const existing = rows.map(row => JSON.parse(row.data) as UpdateRun).find(run => activeUpdateStages.includes(run.stage));
     if (existing) return { run: existing, created: false };
@@ -81,35 +85,23 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   const target = (await updateTargets(projectId)).find(target => target.id === input.targetId);
   if (!target) throw new ApiError("Service introuvable.", 404);
   if (target.mode === "git") throw new ApiError("Les sources de ce service sont gérées par GitHub.");
+  if (target.mode === "wordpress" && input.localAgent) return { configured: false, ...(await requestAgentInstallation(target.remoteId, undefined, true)) };
   if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
   const scope = updateScope(target), db = await updateStorage();
   const previous = await readUpdateSource(target.id);
-  let settings: SourceSettings;
-  let webPhp = "";
-  if (target.mode === "wordpress" && input.localAgent) {
-    const installation = await hostingInstallation(target.remoteId);
-    if (installation.suggestedEnvironment !== "staging" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1") throw new ApiError("L’agent local est limité aux copies de test tant que le pilote n’est pas validé.");
-    if (!installation.inventory?.php || installation.inventory.collectionMode === "early" || !installation.inventory.observedAt || Date.now() - Date.parse(installation.inventory.observedAt) > 24 * 3600_000) throw new ApiError("Un inventaire WordPress normal et récent est nécessaire pour installer l’agent.");
-    webPhp = installation.inventory.php.version;
-    settings = await withHostingCredentials(target.connectionId, async connection => ({ localAgent: (await agentBundle(target.root, connection.username, webPhp, installation.suggestedEnvironment, previous?.settings.localAgent)).settings }));
-  } else settings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
+  const settings: SourceSettings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
+  if (previous?.settings.agentInstallation?.state === "installing") throw new ApiError("L’installation automatique de l’agent est en cours.", 409);
   if (target.mode === "wordpress" && !settings.localAgent && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
   await transaction(async () => {
+    if (isPostgres()) {
+      await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(projectId);
+      await db.prepare("SELECT target_id FROM update_sources WHERE target_id=? FOR UPDATE").get(target.id);
+    }
     if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) throw new ApiError("Attendez la fin de la mise à jour avant de modifier ses accès ou ses sources.", 409);
     if ((await readUpdateSource(target.id))?.revision !== previous?.revision) throw new ApiError("La configuration vient de changer. Rechargez avant de réessayer.", 409);
     await writeUpdateSource(target.id, projectId, settings);
     await log("live", "updates.source_configured", `Accès de mise à jour configuré pour ${target.name}.`, projectId);
   });
-  if (settings.localAgent) {
-    await provisionLocalAgent(target, settings.localAgent, webPhp);
-    settings.localAgent.ready = true;
-    await transaction(async () => {
-      if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) throw new ApiError("Une maintenance a commencé pendant la configuration de l’agent.", 409);
-      const current = await readUpdateSource(target.id);
-      if (current?.settings.localAgent?.secret !== settings.localAgent!.secret) throw new ApiError("La configuration de l’agent a changé.", 409);
-      await writeUpdateSource(target.id, projectId, settings);
-    });
-  }
   return { configured: true };
 }
 export async function closeInterruptedUpdate(id: string, raw: unknown) {

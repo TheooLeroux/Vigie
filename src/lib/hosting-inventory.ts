@@ -17,6 +17,13 @@ import { collectObserver } from "./connectors/wordpress-observer";
 import { enrichPhpRelease } from "./connectors/php-releases";
 import type { HostingInstallationView, SiteInventory, Project } from "./types";
 const running = new Set<string>();
+async function enqueueLocalAgent(id: string) {
+  try { await (await import("./updates/wordpress-agent-setup")).requestAgentInstallation(id); }
+  catch {
+    const site = await hostingInstallation(id);
+    await log("live", "hosting.agent_queue_failed", "La préparation automatique de l’agent sera réessayée au prochain contrôle.", site.project?.id || null);
+  }
+}
 type ObserverRow = { secret_cipher: string; data: string };
 async function observerRow(id: string) {
   return (await (await hostingStorage())
@@ -140,6 +147,7 @@ export async function collectHostingInventories(
                 item.project?.id || null,
               ));
             }));
+            if (item.project) await enqueueLocalAgent(item.id);
             success++;
           } catch (e) {
             const message =
@@ -255,6 +263,7 @@ export async function provisionLinkedObservers(
       });
     }
   }
+  for (const site of (await hostingDiscovery(connectionId)).installations.filter(i => i.kind === "wordpress" && i.project && !i.ignored && !i.missingSince)) await enqueueLocalAgent(site.id);
   return { discovery: (await hostingDiscovery(connectionId)), issues };
 }
 export async function provisionLinkedObserver(
@@ -266,15 +275,16 @@ export async function provisionLinkedObserver(
   if (
     item.kind !== "wordpress" ||
     !item.project ||
-    item.observerConfigured ||
     item.missingSince
   )
     return;
+  if (item.observerConfigured) { await enqueueLocalAgent(id); return; }
   try {
     await installObserver(id, true, transport, resolveDns);
   } catch (error) {
     (await recordObserverFailure(id, error));
   }
+  await enqueueLocalAgent(id);
 }
 export async function observerPlan(id: string) {
   const item = (await hostingInstallation(id));
@@ -469,7 +479,7 @@ export async function installObserver(
         (await log(
           "live",
           "hosting.observer_installed",
-          `Connecteur d’inventaire WordPress 1.0.3 installé et vérifié sur ${item.domains[0]}.`,
+          `Connecteur d’inventaire WordPress 1.0.4 installé et vérifié sur ${item.domains[0]}.`,
           item.project!.id,
         ));
       }));

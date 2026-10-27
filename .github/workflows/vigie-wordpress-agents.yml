@@ -1,0 +1,46 @@
+name: WordPress agent installation
+run-name: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
+on:
+  workflow_dispatch:
+    inputs:
+      installation_id:
+        description: Installation WordPress à préparer (vide pour le parc)
+        required: false
+        type: string
+      request_id:
+        description: Identifiant de la demande durable Vigie
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/vigie-wordpress-agents.yml'
+  schedule:
+    - cron: '17 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
+  cancel-in-progress: false
+jobs:
+  install:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Installer et vérifier les agents sans mettre à jour les sites
+        run: node --import tsx scripts/wordpress-agent-worker.ts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_AGENT_INSTALLATION_ID: ${{ inputs.installation_id }}
+          VIGIE_AGENT_REQUEST_ID: ${{ inputs.request_id }}

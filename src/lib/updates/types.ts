@@ -67,6 +67,18 @@ export type UpdateState = {
   runs: UpdateRun[];
 };
 export type SourceSettings = {
+  agentInstallation?: {
+    requestId: string;
+    root: string;
+    connectionId: string;
+    state: "queued" | "installing" | "failed" | "ready";
+    attempts: number;
+    requestedAt: string;
+    dispatchedAt?: string;
+    leaseUntil?: string;
+    nextAttemptAt?: string;
+    error?: string;
+  };
   localAgent?: import("./wordpress-agent").LocalAgentSettings;
   archive?: string;
   filename?: string;

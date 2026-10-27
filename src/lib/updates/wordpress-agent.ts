@@ -75,17 +75,22 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
     },
     async mkdir(path: string) {
       if (![posix.dirname(directory), directory, directory + "/jobs", directory + "/results", directory + "/backups"].includes(path)) throw new ApiError("Dossier d’agent non autorisé.");
-      const listing = await call("/execute/Fileman/list_files?" + new URLSearchParams({ dir: posix.dirname(path), show_hidden: "1" }));
-      const entries = Array.isArray(listing) ? listing : listing?.files;
-      if (!Array.isArray(entries)) throw new ApiError("Le dossier privé n’a pas pu être vérifié.");
-      const current = entries.find(item => item.file === posix.basename(path));
-      if (current) {
-        if (current.type !== "dir") throw new ApiError("Un lien ou fichier occupe le dossier privé de l’agent.");
-        const permissions = String(current.octal_perms ?? current.permissions ?? "");
-        if (!/^0?700$/.test(permissions)) throw new ApiError("Le dossier de l’agent doit être privé (0700).");
-        return;
+      const find = async () => {
+        const listing = await call("/execute/Fileman/list_files?" + new URLSearchParams({ dir: posix.dirname(path), include_permissions: "1", show_hidden: "1" }));
+        const entries = Array.isArray(listing) ? listing : listing?.files;
+        if (!Array.isArray(entries)) throw new ApiError("Le dossier privé n’a pas pu être vérifié.");
+        return entries.find(item => item.file === posix.basename(path));
+      };
+      let current = await find();
+      if (!current) {
+        await api2("Fileman", "mkdir", { path: posix.dirname(path), name: posix.basename(path), permissions: "0700" });
+        current = await find();
       }
-      await api2("Fileman", "mkdir", { path: posix.dirname(path), name: posix.basename(path), permissions: "0700" });
+      if (!current || current.type !== "dir") throw new ApiError("Un lien ou fichier occupe le dossier privé de l’agent.");
+      // Real cPanel UAPI returns stat mode as a decimal integer (16832 = 040700).
+      const permissions = current.octal_perms ?? current.permissions;
+      const privateMode = permissions !== undefined ? /^0?700$/.test(String(permissions)) : Number.isSafeInteger(current.mode) && (current.mode & 0o7777) === 0o700;
+      if (!privateMode) throw new ApiError("Le dossier de l’agent doit être privé (0700).");
     },
     async addCron(command: string) {
       const rows = await api2("Cron", "listcron");
@@ -116,7 +121,6 @@ export async function provisionLocalAgent(target: UpdateTarget, settings: LocalA
   const installation = await hostingInstallation(target.remoteId);
   if (installation.documentRoot !== target.root || installation.project?.id !== target.projectId || installation.missingSince || installation.kind !== "wordpress") throw new ApiError("Le rattachement WordPress a changé.");
   const environment = installation.suggestedEnvironment;
-  if (environment !== "staging" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1") throw new ApiError("L’agent local est limité aux copies de test tant que le pilote n’est pas validé.");
   await withHostingCredentials(target.connectionId, async connection => {
     const bundle = await agentBundle(target.root, connection.username, webPhp, environment, settings);
     const files = cpanelAgentFiles(connection, settings.directory);
@@ -137,7 +141,7 @@ export async function provisionLocalAgent(target: UpdateTarget, settings: LocalA
       if (heartbeat) {
         const value = z.object({ protocol: z.literal(agentProtocol), root: z.string(), php: z.string(), time: z.number().int() }).parse(openAgentPayload(JSON.parse(heartbeat), settings.secret));
         if (value.root !== target.root || value.php !== webPhp || Math.abs(Date.now() / 1000 - value.time) > 120) throw new ApiError("Le PHP ou le rattachement de l’agent ne correspond pas au site.");
-        const inspected = await localAgentOperation(files, settings, target.root, randomUUID(), "inspect", {}, { timeoutMs: 90_000 });
+        const inspected = await localAgentOperation(files, settings, target.root, randomUUID(), "inspect", {}, { timeoutMs: 180_000 });
         const plan = agentPlan(inspected.plan);
         const eligibility = z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).parse(inspected.eligibility);
         if (plan.php !== webPhp || eligibility.multisite || eligibility.fileModsDisabled || !target.url || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url).hostname.replace(/^www\./, "")) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
@@ -186,7 +190,7 @@ export async function localAgentOperation(files: AgentFiles, settings: LocalAgen
     if (raw) {
       const value = resultSchema.parse(openAgentPayload(JSON.parse(raw), settings.secret));
       if (value.id !== id || value.runId !== runId || value.root !== root || value.operation !== operation) throw new ApiError("La réponse de l’agent ne correspond pas à cette opération.");
-      if (value.stage === "failed") throw new ApiError(`L’agent local a arrêté l’opération (${value.error || "agent_failed"}). Les sauvegardes sont conservées.`);
+      if (value.stage === "failed") throw new ApiError(operation === "inspect" ? `L’agent répond, mais le contrôle WordPress/WP-CLI échoue (${value.error || "agent_failed"}).` : `L’agent local a arrêté l’opération (${value.error || "agent_failed"}). Les sauvegardes sont conservées.`);
       if (value.stage === "completed") return value.result || {};
     }
     await sleep(options.pollMs ?? 5000);

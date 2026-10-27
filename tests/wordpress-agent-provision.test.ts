@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
-import { applyDiscoverySnapshot, hostingDiscovery } from "../src/lib/hosting-discovery";
+import { applyDiscoverySnapshot, hostingDiscovery, hostingInstallation } from "../src/lib/hosting-discovery";
 import { createProject, transaction } from "../src/lib/db";
 import { createProjectSchema } from "../src/lib/validation";
 import { configureUpdateSource } from "../src/lib/updates/service";
@@ -11,9 +11,10 @@ import { updateTargets } from "../src/lib/updates/targets";
 import { readUpdateSource, writeUpdateSource } from "../src/lib/updates/storage";
 import { agentDirectory, openAgentPayload, signAgentPayload, withLocalWordPressAgent } from "../src/lib/updates/wordpress-agent";
 import { hostingStorage } from "../src/lib/hosting-storage";
+import { processAgentInstallation, requestAgentInstallation } from "../src/lib/updates/wordpress-agent-setup";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
-test("Agent local : production refusée avant toute écriture réseau et installation partielle non admissible", async () => {
+test("Agent local : installation de production mise en attente automatiquement sans autoriser les mises à jour", async () => {
   const domain = `${randomUUID()}.example.test`, root = `/home/agenttest/${domain}`;
   const host = await saveHostingConnection({ name: "Agent fixture", endpoint: "https://gaz.o2switch.net:2083", username: "agenttest", authMode: "token", secret: "fixture-no-real-secret" });
   const project = await transaction(async () => {
@@ -27,11 +28,16 @@ test("Agent local : production refusée avant toute écriture réseau et install
   const fetchBefore = globalThis.fetch; let networkCalls = 0;
   globalThis.fetch = (async () => { networkCalls++; throw new Error("No network expected"); }) as typeof fetch;
   try {
-    await assert.rejects(configureUpdateSource(project.id, { targetId: target.id, localAgent: true }), /limité aux copies/);
-    assert.equal(networkCalls, 0); assert.equal(await readUpdateSource(target.id), null);
+    const requested = await configureUpdateSource(project.id, { targetId: target.id, localAgent: true });
+    assert.equal(requested.configured, false);
+    assert.equal((await readUpdateSource(target.id))?.settings.agentInstallation?.state, "queued");
+    assert.equal(networkCalls, 0);
     await writeUpdateSource(target.id, project.id, { localAgent: { protocol: "vigie-local-v1", directory: agentDirectory(root, "agenttest"), secret: randomBytes(32).toString("hex"), phpBinary: "/opt/alt/php83/usr/bin/php", wpBinary: "/usr/local/bin/wp", environment: "production", ready: false } });
     assert.equal((await updateTargets(project.id))[0].configured, false);
     await assert.rejects(withLocalWordPressAgent(target, async () => { throw new Error("Must not execute"); }), /n’est pas configuré/);
+    const pending = (await readUpdateSource(target.id))!.settings;
+    await writeUpdateSource(target.id, project.id, { ...pending, localAgent: { ...pending.localAgent!, ready: true } });
+    await assert.rejects(withLocalWordPressAgent(target, async () => { throw new Error("Must not execute"); }), /production.*pas encore activées/);
     assert.equal(networkCalls, 0);
   } finally {
     globalThis.fetch = fetchBefore;
@@ -58,7 +64,7 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     if (url.pathname === "/execute/DomainInfo/domains_data") return ok([{ documentroot: root }]);
     if (url.pathname === "/execute/Fileman/list_files") {
       const dir = url.searchParams.get("dir")!;
-      const rows = [...dirs].filter(path => path !== dir && path.slice(0, path.lastIndexOf("/")) === dir).map(path => ({ file: path.split("/").at(-1), type: "dir", octal_perms: "0700" }));
+      const rows = [...dirs].filter(path => path !== dir && path.slice(0, path.lastIndexOf("/")) === dir).map(path => ({ file: path.split("/").at(-1), type: "dir", mode: 16832 }));
       return ok([...rows, ...[...files.keys()].filter(path => path.slice(0, path.lastIndexOf("/")) === dir).map(path => ({ file: path.split("/").at(-1), type: "file" }))]);
     }
     if (url.pathname === "/execute/Fileman/get_file_content") return ok({ content: files.get(`${url.searchParams.get("dir")}/${url.searchParams.get("file")}`) });
@@ -87,14 +93,21 @@ test("Agent local : provisionnement cPanel, battement et inspection obligatoires
     throw new Error(`Unexpected fixture operation ${url.pathname}`);
   }) as typeof fetch;
   try {
-    await configureUpdateSource(project.id, { targetId: target.id, localAgent: true });
+    await requestAgentInstallation(item.id, async () => {});
+    assert.equal((await updateTargets(project.id))[0].configured, false);
+    assert.equal(await processAgentInstallation(item.id, undefined, { prepare: () => hostingInstallation(item.id) }), true);
     assert.equal(inspections, 1); assert.equal(crons.length, 1);
     const source = await readUpdateSource(target.id); assert.equal(source?.settings.localAgent?.ready, true);
     const targets = await updateTargets(project.id); assert.equal(targets[0].configured, true);
     assert.equal(JSON.stringify(targets).includes(source!.settings.localAgent!.secret), false);
     const uploadsBefore = uploads;
     files.set(`${directory}/agent.php`, files.get(`${directory}/agent.php`)! + "\n// Altered fixture\n");
-    await assert.rejects(configureUpdateSource(project.id, { targetId: target.id, localAgent: true }), /aucun écrasement/);
+    // A failed durable request retries without changing its key or overwriting remote code.
+    const readySource = (await readUpdateSource(target.id))!.settings;
+    await writeUpdateSource(target.id, project.id, { ...readySource, localAgent: { ...readySource.localAgent!, ready: false }, agentInstallation: { ...readySource.agentInstallation!, state: "failed", nextAttemptAt: undefined } });
+    await requestAgentInstallation(item.id, async () => {}, true);
+    assert.equal(await processAgentInstallation(item.id, undefined, { prepare: () => hostingInstallation(item.id) }), false);
+    assert.match((await readUpdateSource(target.id))?.settings.agentInstallation?.error || "", /aucun écrasement/);
     assert.equal(uploads, uploadsBefore); assert.equal(crons.length, 1);
     assert.equal((await readUpdateSource(target.id))?.settings.localAgent?.ready, false);
     assert.match(files.get(`${directory}/agent.php`)!, /Altered fixture/);
