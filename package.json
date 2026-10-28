@@ -12,7 +12,7 @@
     "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts"
   },
   "engines": {
-    "node": "24.22.1"
+    "node": "24.21.0"
   },
   "dependencies": {
     "better-auth": "1.7.14",
