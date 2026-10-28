@@ -75,7 +75,7 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
         try { await request("updates", "POST", { projectId }); await refresh(); }
         catch (error) { setError(error instanceof Error ? error.message : "La mise à jour n’a pas démarré."); }
         finally { setBusy(false); }
-      }}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Tout mettre à jour"}</button>
+      }}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
     </div>
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
