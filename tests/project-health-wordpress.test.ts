@@ -6,6 +6,7 @@ import { projectHealth } from "../src/lib/project-health";
 import { ProjectHealthSummary } from "../src/components/project-health-summary";
 import { healthFixture, healthUpdates, healthCheck, healthAt } from "./project-health-fixture";
 import type { SiteInventory, WordPressComponent } from "../src/lib/types";
+import { wordpressSecurityVersions } from "../src/lib/updates/wordpress-security-key";
 
 function component(slug: string, version: string, latestVersion = version): WordPressComponent {
   return { file: slug + "/main.php", slug, name: slug, version, latestVersion, updateState: version === latestVersion ? "current" : "available", updateCheckedAt: healthAt, updateSource: "wordpress", active: true, mustUse: false, autoUpdate: false, requiresPhp: null, requiresWordPress: null, template: null };
@@ -27,7 +28,9 @@ test("WordPress : succès avec extension privée et deux thèmes restants expliq
   assert.equal(health.manualUpdates.length, 3);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /Mises à jour à traiter séparément/);
-  assert.match(html, /Catalogue non pris en charge/);
+  assert.match(html, /Vigie ne peut pas télécharger cette extension/);
+  assert.match(html, /Vigie ne met pas les thèmes à jour actuellement/);
+  assert.match(html, /Apparence → Thèmes/);
   assert.match(html, /hello-elementor/);
   assert.match(html, /twentytwentyfive/);
   assert.doesNotMatch(html, /Mises à jour disponibles|webtoffee/);
@@ -73,4 +76,27 @@ test("WordPress : un ancien inventaire ne réannonce pas une extension déjà co
   state.runs[0].results[0].checks = [healthCheck({ tool: "WPVulnerability", phase: "after", checkedAt: "2026-10-27T15:01:00.000Z", findings: [] })];
   assert.equal(projectHealth(detail, state).updates.length, 0);
   assert.equal(projectHealth(detail, state).incomplete, true);
+});
+
+test("WordPress : contrôle actuel remplace le faux positif historique, y compris sans exécution préalable", () => {
+  const { detail, inventory, state } = wordpressFixture();
+  state.targets = state.runs[0].targets;
+  state.runs[0].results[0].checks = [healthCheck({ tool: "WPVulnerability", phase: "after", findings: [{ ...healthCheck().findings[0], package: "plugins/private-pro", version: "3.0.103", scope: undefined }] })];
+  state.currentSecurity = [{ targetId: "target", versions: wordpressSecurityVersions(inventory), warnings: [], check: healthCheck({ tool: "WPVulnerability", phase: "before", findings: [] }) }];
+  assert.equal(projectHealth(detail, state).security.length, 0);
+  state.runs = [];
+  state.currentSecurity[0].check!.findings = [{ ...healthCheck().findings[0], package: "plugins/private-pro", version: "3.0.103", scope: undefined }];
+  assert.equal(projectHealth(detail, state).security.length, 1, "la détection ne nécessite aucune mise à jour");
+  inventory.plugins[0].version = "3.0.124";
+  assert.equal(projectHealth(detail, state).security.length, 0, "un contrôle portant sur d’autres versions n’est pas réutilisé");
+  assert.doesNotMatch(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state })), /Aucune alerte connue/);
+});
+
+test("WordPress : contrôle indisponible ne présente pas de confirmation de sécurité", () => {
+  const { detail, inventory, state } = wordpressFixture();
+  state.targets = state.runs[0].targets;
+  state.currentSecurity = [{ targetId: "target", versions: wordpressSecurityVersions(inventory), warnings: [], error: "Fournisseur indisponible" }];
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(html, /Contrôle de sécurité indisponible/);
+  assert.doesNotMatch(html, /Aucune alerte connue/);
 });

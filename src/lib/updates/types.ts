@@ -24,6 +24,10 @@ export type SecurityFinding = {
   severity: "critical" | "high" | "moderate" | "low" | "unknown";
   scope?: string;
   fixedVersions?: string[];
+  title?: string;
+  url?: string;
+  explanation?: string;
+  kind?: "vulnerability" | "supply-chain" | "unconfirmed";
 };
 export type UpdateCheck = {
   tool: "OSV" | "Trivy" | "WPScan" | "WPVulnerability" | "Validation" | "Node";
@@ -63,6 +67,7 @@ export type UpdateRun = {
   workflowRunId?: string;
 };
 export type UpdateState = {
+  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; error?: string }[];
   enabled: boolean;
   targets: UpdateTarget[];
   runs: UpdateRun[];

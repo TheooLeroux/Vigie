@@ -8,9 +8,28 @@ import type { SecurityFinding } from "./types";
 const numeric = /^\d+(?:\.\d+){0,7}$/;
 const operators = z.enum(["lt", "le", "eq", "ne", "gt", "ge"]);
 const range = z.object({ min_version: z.string().max(80).nullable().optional(), min_operator: operators.nullable().optional(), max_version: z.string().max(80).nullable().optional(), max_operator: operators.nullable().optional() });
-const vulnerability = z.object({ uuid: z.string().regex(/^[a-z0-9-]{1,128}$/i), operator: range.optional(), impact: z.unknown().optional(), source: z.array(z.object({ id: z.string().max(160).nullable().optional() })).max(1000).optional() });
+const vulnerability = z.object({ uuid: z.string().regex(/^[a-z0-9-]{1,128}$/i), name: z.string().max(2000).nullable().optional(), operator: range.extend({ unfixed: z.string().optional() }).optional(), impact: z.unknown().optional(), source: z.array(z.object({ id: z.string().max(160).nullable().optional(), name: z.string().max(2000).nullable().optional(), link: z.string().max(3000).nullable().optional() })).max(1000).optional() });
 const advisory = z.object({ error: z.literal(0), updated: z.union([z.string().regex(/^\d+$/), z.number().int().positive()]), data: z.object({ core: z.string().optional(), plugin: z.string().optional(), name: z.string().nullable().optional(), link: z.string().nullable().optional(), closed: z.number().int().nullable().optional(), vulnerability: z.array(vulnerability).max(20000).nullable(), supplychain: z.array(z.object({ verdict: z.enum(["malicious", "suspicious", "cleaned"]), audit_id: z.number().int(), affected_versions: range.optional() })).max(1000).optional() }) });
 type Advisory = z.infer<typeof advisory>;
+
+// Advisory bounds may contain PHP-style prereleases, unlike installable stable plans.
+export function compareAdvisoryVersions(first: string, second: string) {
+  const parse = (value: string) => {
+    const match = /^(\d+(?:\.\d+){0,7})(?:[._+-]?(dev|alpha|a|beta|b|rc|pl|p)[._-]?(\d*))?$/i.exec(value);
+    if (!match || value.length > 80) throw new Error("Unsupported advisory version");
+    const ranks: Record<string, number> = { dev: -4, alpha: -3, a: -3, beta: -2, b: -2, rc: -1, pl: 1, p: 1 };
+    return { parts: match[1].split(".").map(BigInt), rank: match[2] ? ranks[match[2].toLowerCase()] : 0, number: BigInt(match[3] || "0") };
+  };
+  const a = parse(first), b = parse(second);
+  for (let i = 0; i < Math.max(a.parts.length, b.parts.length); i++) {
+    const x = a.parts[i] || 0n, y = b.parts[i] || 0n;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.rank !== b.rank ? Math.sign(a.rank - b.rank) : a.number === b.number ? 0 : a.number < b.number ? -1 : 1;
+}
+function sourceUrl(value?: string | null) {
+  try { const url = new URL(value || ""); if (url.protocol === "https:" && !url.username && !url.password && ["www.wordfence.com", "wordfence.com", "patchstack.com", "www.cve.org", "wpscan.com", "wpbeacon.io"].includes(url.hostname)) return url.href; } catch {}
+}
 
 function affected(version: string, bounds?: z.infer<typeof range>) {
   if (!bounds) return true;
@@ -18,7 +37,7 @@ function affected(version: string, bounds?: z.infer<typeof range>) {
     const test = (bound?: string | null, op?: z.infer<typeof operators> | null) => {
       if (!bound) return true;
       if (!op) throw new Error("Incomplete version range");
-      const compared = compareWordPressVersions(version, bound);
+      const compared = compareAdvisoryVersions(version, bound);
       return ({ lt: compared < 0, le: compared <= 0, eq: compared === 0, ne: compared !== 0, gt: compared > 0, ge: compared >= 0 })[op];
     };
     return test(bounds.min_version, bounds.min_operator) && test(bounds.max_version, bounds.max_operator);
@@ -31,11 +50,16 @@ export function freeWordPressFindings(raw: unknown, kind: "core" | "plugin", ide
     const impact = item.impact && !Array.isArray(item.impact) && typeof item.impact === "object" ? item.impact as Record<string, { score?: unknown; severity?: unknown }> : {};
     const scores = [impact.cvss, impact.cvss3].flatMap(value => value ? [severity(value.score ?? value.severity)] : []);
     const levels = ["critical", "high", "moderate", "low", "unknown"] as const;
-    return { id: `WPV-${item.uuid}`, aliases: [...new Set((item.source || []).map(source => source.id || "").filter(id => /^CVE-\d{4}-\d+$/i.test(id)))], package: kind === "core" ? "wordpress/wordpress" : `plugins/${identity}`, version, severity: levels.find(level => scores.includes(level)) || "unknown" };
+    const source = item.source?.find(source => sourceUrl(source.link)?.includes("wordfence.com/")) || item.source?.find(source => sourceUrl(source.link));
+    let confirmed = true;
+    try { if (item.operator?.min_version) compareAdvisoryVersions(version, item.operator.min_version); if (item.operator?.max_version) compareAdvisoryVersions(version, item.operator.max_version); } catch { confirmed = false; }
+    if (kind === "plugin" && (!item.operator || (item.operator.min_version && !item.operator.min_operator) || (item.operator.max_version && !item.operator.max_operator))) confirmed = false;
+    const fixed = item.operator?.max_operator === "lt" && item.operator.unfixed !== "1" && item.operator.max_version;
+    return { id: `WPV-${item.uuid}`, aliases: [...new Set((item.source || []).map(source => source.id || "").filter(id => /^CVE-\d{4}-\d+$/i.test(id)))], package: kind === "core" ? "wordpress/wordpress" : `plugins/${identity}`, version, severity: levels.find(level => scores.includes(level)) || "unknown", title: source?.name || item.name || "Vulnérabilité connue", url: sourceUrl(source?.link), kind: confirmed ? "vulnerability" : "unconfirmed", ...(!confirmed ? { explanation: "La plage de versions publiée n’a pas pu être interprétée ; applicabilité à vérifier." } : {}), ...(fixed && confirmed ? { fixedVersions: [fixed] } : {}) };
   });
   for (const entry of data.supplychain || []) {
     if (!affected(version, entry.affected_versions)) continue;
-    findings.push({ id: `${entry.verdict === "suspicious" ? "WPV-SUPPLY" : "MAL-WPV"}-${entry.audit_id}`, aliases: [], package: `plugins/${identity}`, version, severity: entry.verdict === "suspicious" ? "unknown" : "critical" });
+    findings.push({ id: `${entry.verdict === "suspicious" ? "WPV-SUPPLY" : "MAL-WPV"}-${entry.audit_id}`, aliases: [], package: `plugins/${identity}`, version, severity: entry.verdict === "suspicious" ? "unknown" : "critical", kind: "supply-chain", title: entry.verdict === "suspicious" ? "Signal suspect sur la distribution de l’extension" : "Versions signalées comme malveillantes", explanation: entry.verdict === "suspicious" ? "Signal à vérifier : aucune compromission du site n’est confirmée par ce contrôle. Une mise à jour seule ne lève pas nécessairement ce signal." : "L’audit signale des versions malveillantes ; une vérification de l’installation est nécessaire.", url: `https://wpbeacon.io/audits/${entry.audit_id}/` });
   }
   return findings;
 }
@@ -68,7 +92,7 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
   const warn = (message: string) => { if (!warnings.includes(message)) warnings.push(message); };
   async function load(kind: "core" | "plugin", identity: string) {
     if (!(kind === "core" ? numeric : /^[a-z0-9_-]{1,150}$/i).test(identity)) throw new ApiError("Identifiant de contrôle WordPress invalide.");
-    const key = `security:wpv:2:${kind}:${identity}`;
+    const key = `security:wpv:3:${kind}:${identity}`;
     if (cache.has(key)) return cache.get(key)!;
     const persistent = options.persistentCache ?? transport === fetch;
     if (persistent) {

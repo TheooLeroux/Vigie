@@ -149,6 +149,12 @@ Un échec avant publication libère les verrous. Après une publication commenc�
 
 Un rollback d’hébergement ne remet pas automatiquement le dépôt à son ancien commit et ne restaure pas une base. Pour Git, rétablir explicitement les fichiers concernés dans un nouveau commit si nécessaire. Pour une source ZIP, récupérer l’archive précédente chiffrée avec un outil administratif autorisé, puis la réimporter. Pour WordPress, vérifier les sauvegardes et coordonner la restauration avec les éventuelles nouvelles écritures. En cas de doute, conserver le verrou et intervenir manuellement.
 
+## Contrôle WordPress en lecture seule
+
+L’ouverture du suivi de mises à jour lance aussi un contrôle gratuit WPVulnerability des versions WordPress et des extensions actuellement inventoriées. Il ne dépose aucun ordre sur l’agent et ne modifie pas le site. Le résultat est conservé au plus une heure, lié au site, à sa racine et aux versions exactes ; une version modifiée invalide cette référence. Un inventaire absent, incomplet ou de plus de 24 heures exige une actualisation. Une erreur fournisseur reste explicite et n’est pas interprétée comme une absence de faille. Les rapports historiques ne sont pas réécrits.
+
+Les bornes de vulnérabilité reconnaissent les préversions PHP (`alpha`, `beta`, `RC`), indépendamment du plan de mise à jour qui reste limité aux versions stables. Les versions correctrices et les liens des sources sont conservés. Un signal de distribution « suspicious » reste une réserve à vérifier ; il ne constitue pas une confirmation de compromission du site. Les thèmes ne sont ni mis à jour ni analysés par ce parcours ; l’interface indique de les mettre à jour depuis WordPress, Apparence, Thèmes. Les extensions privées non téléchargeables sont signalées avec leur action manuelle.
+
 ## Périmètre initial et qualification
 
 - Applications Node standard npm, pnpm et Yarn ; plusieurs sous-répertoires indépendants d’un dépôt sont regroupés. Un Dockerfile situé dans un service indépendant ne bloque pas les autres. Les Dockerfiles Node standard sont admissibles après construction et contrôle du serveur ; les bases privées/non-Node, images à digest, frontends personnalisés, montages de build, chemins Dockerfile Railway personnalisés et instructions nécessitant une configuration spéciale restent refusés. Les workspaces, configurations Mise/Railpack personnalisées, commandes de construction Vercel personnalisées et versions Node forcées par une variable Railway différente demandent également une adaptation dédiée.

@@ -58,7 +58,7 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
   for (const result of results) {
     const latest = new Map<UpdateCheck["tool"], UpdateCheck>();
     for (const check of result.checks || []) {
-      if (!["OSV", "Trivy", "WPScan"].includes(check.tool)) continue;
+      if (!["OSV", "Trivy", "WPScan", "WPVulnerability"].includes(check.tool)) continue;
       const previous = latest.get(check.tool);
       if (!previous || check.phase !== "before" || previous.phase === "before") latest.set(check.tool, check);
     }
