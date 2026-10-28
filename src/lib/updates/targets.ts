@@ -8,6 +8,8 @@ import { githubUpdateToken, repositoryAllowed } from "./github";
 import { readUpdateSource, updateStorage } from "./storage";
 import type { UpdateTarget } from "./types";
 import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
+import { maintenanceCapability } from "./capabilities";
+import { readAutomaticControl } from "../automatic-control-storage";
 
 export function sourceRoot(value: string | null) {
   const root = (value || "").replace(/^\/+|\/+$/g, "");
@@ -31,7 +33,11 @@ export async function updateTargets(projectId: string): Promise<UpdateTarget[]> 
       targets.push({ id: `railway:${item.connectionId}:${service.id}:${service.environmentId}`, projectId, name: service.name, provider: "railway", builder: service.builder, connectionId: item.connectionId, remoteId: service.id, environmentId: service.environmentId, repository: service.repository, branch: evidence?.branch || null, root: sourceRoot(service.rootDirectory), url: service.domains[0] ? `https://${service.domains[0]}${service.healthcheckPath || "/"}` : null, mode: service.repository ? "git" : "archive", configured: item.configured, unavailable: hostingControlIssue("Railway", item) || (item.missingSince ? "Projet non retrouvé chez Railway." : service.image ? "Image externe : hors du périmètre Node et dépendances." : !["RAILPACK", "DOCKERFILE"].includes(service.builder) ? "Construction personnalisée : une adaptation est nécessaire." : null) });
     }
   }
-  for (const item of hosting.filter(item => item.kind === "wordpress")) {
+  for (const item of hosting) {
+    if (item.kind !== "wordpress") {
+      targets.push({ id: `hosting:${item.id}`, projectId, name: item.domains[0] || project.name, provider: "o2switch", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: null, branch: null, root: item.documentRoot, url: item.domains[0] ? `https://${item.domains[0]}/` : null, mode: "archive", configured: true, unavailable: "Maintenance spécifique à qualifier.", capability: maintenanceCapability({ provider: "o2switch", repository: null, root: item.documentRoot, url: null, mode: "archive" }, { installation: item.kind }) });
+      continue;
+    }
     const source = await readUpdateSource(`wordpress:${item.id}`);
     const agent = source?.settings.localAgent;
     const setup = source?.settings.agentInstallation;
@@ -44,6 +50,15 @@ export async function updateTargets(projectId: string): Promise<UpdateTarget[]> 
       if (home.protocol === "https:" && !home.username && !home.password && [...item.domains, ...item.aliases].includes(home.hostname)) url = home.href;
     } catch {}
     targets.push({ id: `wordpress:${item.id}`, projectId, name: item.domains[0] || project.name, provider: "o2switch", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: null, branch: null, root: item.documentRoot, url, mode: "wordpress", configured: setup ? setup.state === "ready" && !!agent?.ready : agent ? agent.ready : configured.has(`wordpress:${item.id}`), unavailable: item.missingSince ? "Installation non retrouvée." : setupMessage || (agent?.environment === "production" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1" ? "Agent installé. Les mises à jour de production attendent la validation du pilote." : item.inventory?.site?.multisite ? "WordPress multisite : intervention spécifique nécessaire." : item.inventory?.configuration?.fileModsDisabled ? "Les mises à jour sont désactivées dans WordPress." : !source ? "L’agent local sera installé automatiquement à la prochaine synchronisation." : null) });
+    if (item.ignored) targets[targets.length - 1].unavailable = "Installation exclue du suivi.";
+    else if (item.inventory?.collectionMode === "early") targets[targets.length - 1].unavailable = "Inventaire partiel : le chargement complet de WordPress n’est pas confirmé. Les autres services admissibles restent indépendants.";
   }
-  return targets.map(target => ({ ...target, unavailable: project.lifecycle !== "active" ? "Projet archivé." : target.unavailable || (!target.url ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) }));
+  return Promise.all(targets.map(async target => {
+    const cached = await readAutomaticControl(target.id);
+    const v = vercel.projects.find(item => item.connectionId === target.connectionId && item.id === target.remoteId);
+    const r = railway.projects.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
+    const evidence = r?.activeDeployments[0]?.evidence;
+    const capability = target.capability || maintenanceCapability(target, target.mode === "wordpress" ? { installation: "wordpress" } : v ? { framework: v.production?.framework || v.framework, runtimes: v.production?.analysis?.status === "observed" ? v.production.analysis.runtimes.map(item => item.name) : undefined, commit: v.production?.commit, source: cached?.sourceQualification } : { framework: evidence?.framework, staticSite: evidence?.staticSite, image: r?.image, cron: r?.cronSchedule, commit: evidence?.commit, source: cached?.sourceQualification });
+    return { ...target, capability, unavailable: project.lifecycle !== "active" ? "Projet archivé." : capability.status !== "automatic" ? capability.reason : target.unavailable || (!target.url && capability.adapter !== "node-worker" ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) };
+  }));
 }

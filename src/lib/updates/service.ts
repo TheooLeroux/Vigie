@@ -15,6 +15,7 @@ import { withHostingCredentials } from "../hosting-connections";
 import type { SourceSettings } from "./types";
 import { currentWordPressSecurity } from "./wordpress-current-security";
 import { readAutomaticControl } from "../automatic-control-storage";
+import { allowsAutomaticMaintenance } from "./capabilities";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -41,10 +42,10 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
     const target = all.find(target => target.id === id);
     if (!target) throw new ApiError("Ce service ne fait pas partie de ce projet.", 404);
     return target;
-  }) : all.filter(target => !target.unavailable);
+  }) : all.filter(allowsAutomaticMaintenance);
   if (!targets.length || targets.length > 30 || new Set(targets.map(target => target.id)).size !== targets.length || targets.some(target => target.unavailable)) throw new ApiError(targets.find(target => target.unavailable)?.unavailable || "Choisissez entre 1 et 30 services distincts pouvant être mis à jour.");
   const now = new Date().toISOString();
-  const candidate: UpdateRun = { id: randomUUID(), projectId: input.projectId, stage: "queued", createdAt: now, updatedAt: now, actor: auditActor() || { name: "Équipe Vigie", email: "" }, targets, results: [], message: "La mise à jour va démarrer." };
+  const candidate: UpdateRun = { id: randomUUID(), projectId: input.projectId, stage: "queued", createdAt: now, updatedAt: now, actor: auditActor() || { name: "Équipe Vigie", email: "" }, targets, results: [], excludedTargets: all.filter(target => !targets.some(selected => selected.id === target.id)).map(target => ({ targetId: target.id, name: target.name, reason: target.unavailable || target.capability?.reason || "Service non sélectionné." })), message: "La mise à jour des services compatibles va démarrer." };
   const db = await updateStorage();
   const { run, created } = await transaction(async () => {
     if (isPostgres()) await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(input.projectId);
@@ -94,6 +95,7 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   const input = settingsSchema.parse(raw);
   const target = (await updateTargets(projectId)).find(target => target.id === input.targetId);
   if (!target) throw new ApiError("Service introuvable.", 404);
+  if (target.provider === "o2switch" && target.mode !== "wordpress") throw new ApiError("Cette application demande un parcours de maintenance dédié ; ses sources ne sont pas traitées comme une archive Node.", 422);
   if (target.mode === "git") throw new ApiError("Les sources de ce service sont gérées par GitHub.");
   if (target.mode === "wordpress" && input.localAgent) return { configured: false, ...(await requestAgentInstallation(target.remoteId, undefined, true)) };
   if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");

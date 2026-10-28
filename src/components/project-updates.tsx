@@ -11,6 +11,15 @@ function FindingDetails({ finding }: { finding: SecurityFinding }) {
   return <div><p><strong>{finding.title || finding.package}</strong></p><p><code>{finding.package}@{finding.version}</code> · {finding.aliases[0] || finding.id} · sévérité {level}</p>{finding.explanation && <p>{finding.explanation}</p>}{finding.fixedVersions?.length ? <p>Version(s) correctrice(s) référencée(s) : {finding.fixedVersions.join(", ")}. Leur compatibilité doit être vérifiée avant installation.</p> : null}{finding.url && <a href={finding.url} target="_blank" rel="noreferrer">Consulter la source du signalement</a>}</div>;
 }
 export const updateStageLabels: Record<UpdateStage, string> = { queued: "En attente", checking: "Vérification", updating: "Mise à jour", publishing: "Publication", verifying: "Contrôle du déploiement", completed: "Terminé", failed: "Non publiée", attention: "À vérifier" };
+export function MaintenanceScope({ targets }: { targets: UpdateTarget[] }) {
+  if (!targets.some(target => target.capability)) return null;
+  const deferred = targets.filter(target => target.capability?.status !== "automatic" || target.unavailable);
+  return <div className="updates-scope" aria-label="Périmètre de maintenance">
+    <p><strong>Maintenance selon le type de service</strong></p>
+    {targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.capability?.label || "Service à qualifier"} · {target.capability?.status === "manual" ? "Intervention séparée" : target.unavailable || target.capability?.status === "qualify" ? "Qualification nécessaire" : "Parcours automatique disponible"}</p><p>{target.unavailable || target.capability?.reason}</p></div>)}
+    {deferred.length > 0 && <p className="updates-note">{deferred.length} service(s) restent à qualifier ou à traiter séparément. Le bouton traite les autres services admissibles ; les sources partagées restent vérifiées ensemble.</p>}
+  </div>;
+}
 export function UpdateReadiness({ state }: { state: UpdateState }) {
   const ready = state.targets.filter(target => !target.unavailable);
   const wordpress = state.targets.some(target => target.mode === "wordpress");
@@ -106,11 +115,11 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
     return () => { alive.current = false; clearInterval(timer); };
   }, [refresh, onComplete]);
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
-  const available = state?.targets.filter(target => !target.unavailable) || [];
+  const available = state?.targets.filter(target => !target.unavailable && (!target.capability || target.capability.status === "automatic" && target.capability.adapter)) || [];
   const unresolved = latest?.stage === "attention";
   const newerObservation = latest?.stage === "failed" && state?.currentSecurity?.some(item => !item.error && item.check && Date.parse(item.check.checkedAt) > Date.parse(latest.updatedAt));
   return <section id="project-updates" className="panel project-updates" aria-label="Mises à jour du projet">
-    <div className="updates-heading"><div><h2>Mettre le projet à jour</h2><p>{state?.targets.some(target => target.mode === "wordpress") ? "WordPress et extensions. Les thèmes se mettent à jour depuis WordPress." : "Node LTS et dépendances stables."}</p></div>
+    <div className="updates-heading"><div><h2>Mettre le projet à jour</h2><p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
       <button className="button primary" disabled={busy || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
         setBusy(true); setError("");
         try { await request("updates", "POST", { projectId }); await refresh(); }
@@ -121,15 +130,17 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
     {state && <UpdateReadiness state={state} />}
+    {state && <MaintenanceScope targets={state.targets} />}
     {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
     <ManagedNodeNotice run={latest} />
+    {!!latest?.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}
     <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />
     {!!state?.currentSecurity?.length && <details className="updates-details"><summary>Rapports de sécurité</summary>
       {state.currentSecurity.map(observation => <details className="updates-security-report" key={observation.targetId}><summary>{state.targets.find(target => target.id === observation.targetId)?.name || "Service"}{observation.check ? ` · ${observation.check.findings.length} signalement(s)` : " · indisponible"}</summary>{observation.error && <p role="status">{observation.error}</p>}{observation.check && <><p>{formatDate(observation.check.checkedAt)} · Ce contrôle ne lance aucune mise à jour. Les rapports des exécutions précédentes restent dans l’historique.</p>{observation.check.findings.map(finding => <FindingDetails key={finding.id} finding={finding} />)}{!observation.check.findings.length && <p>Aucune vulnérabilité connue dans le périmètre contrôlé.</p>}</>}{observation.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>)}
     </details>}
     <details className="updates-details"><summary>Configuration et compte rendu</summary>
       <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "Sauvegarde fichiers et base avant modification, contrôle gratuit WPVulnerability. PHP reste géré par l’hébergeur ; pour les thèmes, utilisez WordPress → Apparence → Thèmes."}</p>
-      {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
+      {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
       {latest?.results.map(result => <div className="updates-target" key={result.targetId}><strong>{result.name} — {updateStageLabels[result.stage]}</strong><p>{result.message}</p>{result.commit && <p>Commit publié : <code>{result.commit.slice(0, 10)}</code></p>}{result.deploymentId && <p>Déploiement : <code>{result.deploymentId}</code></p>}{result.previousDeploymentId && <p>Déploiement précédent conservé : <code>{result.previousDeploymentId}</code></p>}{result.backup && <p>Sauvegarde privée sur o2switch : <code>{result.backup}</code>. Sa restauration reste manuelle pour ne pas écraser de nouvelles données.</p>}{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
         {result.checks?.map((check, index) => <details key={index}><summary>{check.tool} · {check.phase === "before" ? "Avant mise à jour" : check.phase === "candidate" ? "Version candidate" : "Après installation"} · {check.status === "blocked" ? "Bloqué" : check.status === "warning" ? "Avec réserves" : "Vérifié"}</summary><p>{check.scope} · {formatDate(check.checkedAt)}</p><p>{check.message}</p>{check.findings.slice(0, 20).map((finding, findingIndex) => <p key={findingIndex}><code>{finding.package}@{finding.version}</code> · {finding.id} · {finding.severity}</p>)}{check.findings.length > 20 && <p>{check.findings.length - 20} autre(s) alerte(s) conservée(s) dans le rapport.</p>}</details>)}
       </div>)}

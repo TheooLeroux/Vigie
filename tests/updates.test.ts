@@ -62,6 +62,47 @@ test("Mises à jour : un double clic ne crée qu’un traitement et un seul envo
   assert.equal(calls, 1);
   assert.equal((await projectUpdates(project.id)).runs.length, 1);
 });
+
+test("Moteur : échec d’un dépôt indépendant n’empêche pas le suivant ; seuls les périmètres incertains restent verrouillés", async () => {
+  for (const published of [false, true]) {
+    const first = await fixture(), second = await fixture();
+    await linkVercelProject(second.connection.id, second.remote.id, first.project.id);
+    const run = await startProjectUpdate({ projectId: first.project.id }, async () => {});
+    let calls = 0; const refreshed: string[] = [];
+    await executeUpdate(run.id, async (_run, _targets, results) => {
+      calls++;
+      if (calls === 1) { if (published) results[0].commit = "a".repeat(40); throw new ApiError("Erreur du premier groupe", 422); }
+      results[0].stage = "completed";
+    }, undefined, async targets => { refreshed.push(...targets.map(target => target.id)); });
+    const stored = (await readUpdateRun(run.id))!;
+    assert.equal(calls, 2);
+    assert.equal(stored.stage, published ? "attention" : "failed");
+    assert.equal(stored.results.filter(result => result.stage === "completed").length, 1);
+    assert.match(stored.message, /succès global n’est pas confirmé/);
+    assert.deepEqual(refreshed, [stored.results.find(result => result.stage === "completed")!.targetId]);
+    const locks = await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id) as { scope: string }[];
+    assert.equal(locks.length, published ? 1 : 0);
+    if (published) {
+      const pending = stored.targets.find(target => target.id === stored.results.find(result => result.stage === "attention")!.targetId)!;
+      assert.equal(locks[0].scope, `git:${pending.repository!.toLowerCase()}`);
+    }
+  }
+});
+
+test("Moteur : une technologie non qualifiée reste hors de la sélection automatique et visible dans le résultat", async () => {
+  const first = await fixture(), second = await fixture();
+  await applyVercelSnapshot(second.connection.id, [{ ...second.remote, framework: null }]);
+  await linkVercelProject(second.connection.id, second.remote.id, first.project.id);
+  await assert.rejects(startProjectUpdate({ projectId: first.project.id, targetIds: [second.target.id] }, async () => {}), /technologie/);
+  const run = await startProjectUpdate({ projectId: first.project.id }, async () => {});
+  assert.equal(run.targets.length, 1);
+  assert.equal(run.excludedTargets?.length, 1);
+  assert.equal(run.excludedTargets?.[0].targetId, second.target.id);
+  await executeUpdate(run.id, async (_run, targets, results) => { assert.equal(targets.length, 1); results[0].stage = "completed"; }, undefined, noRefresh);
+  const stored = (await readUpdateRun(run.id))!;
+  assert.equal(stored.stage, "completed");
+  assert.match(stored.message, /seuls les services sélectionnés sont couverts/);
+});
 test("Reprises Node : seuls les traitements terminés du bon projet sont éligibles, les références restent internes", async () => {
   const { project } = await fixture(), other = await fixture();
   const db = await updateStorage(), hashes = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];

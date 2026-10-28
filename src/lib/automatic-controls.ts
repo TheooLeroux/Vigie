@@ -9,6 +9,7 @@ import { automaticControlDue, controlSource } from "./automatic-control-state";
 import type { UpdateTarget } from "./updates/types";
 import { mapConcurrent } from "./updates/planning";
 import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
+import { SourceQualificationError } from "./updates/capabilities";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string) {
@@ -60,7 +61,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
               console.error(JSON.stringify({ targetId: target.id, kind, frames }));
             }
             const message = error instanceof ApiError ? error.message : "Le contrôle automatique n’a pas abouti. Nouvelle tentative au prochain passage ; consultez les accès et l’inventaire du projet.";
-            await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), targetId: target.id, identity, attemptedAt, error: message });
+            await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}), targetId: target.id, identity, attemptedAt, error: message });
             result.failed++;
           }
         } finally { await release(); }

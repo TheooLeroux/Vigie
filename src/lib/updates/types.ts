@@ -14,6 +14,7 @@ export type UpdateTarget = {
   configured: boolean;
   unavailable: string | null;
   builder?: string;
+  capability?: import("./capabilities").MaintenanceCapability;
 };
 export type UpdateStage = "queued" | "checking" | "updating" | "publishing" | "verifying" | "completed" | "failed" | "attention";
 export type SecurityFinding = {
@@ -70,6 +71,7 @@ export type UpdateRun = {
   results: UpdateResult[];
   message: string;
   workflowRunId?: string;
+  excludedTargets?: { targetId: string; name: string; reason: string }[];
 };
 export type UpdateState = {
   automaticControls?: import("../automatic-control-state").AutomaticControl[];

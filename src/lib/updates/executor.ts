@@ -29,6 +29,8 @@ import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { nodeValidationPlan, managedNodeMessage } from "./managed-node";
+import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
+import { assertSourceImpact } from "./source-impact";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -72,6 +74,20 @@ async function downloadGitArchive(repository: string, sha: string, destination: 
   }
   await writeFile(destination, Buffer.concat(chunks));
 }
+export async function checkNodeEndpoint(target: UpdateTarget, check = checkPublicSite) {
+  if (workerTarget(target)) return;
+  if (!target.url) throw new ApiError("Une URL publique est nécessaire pour ce parcours web.", 422);
+  await check(target.url);
+}
+export function nodeCompletionMessage(target: UpdateTarget, result: UpdateResult, unchanged = false) {
+  if (workerTarget(target)) return `${unchanged ? "Dépendances à jour et" : "Nouveau"} déploiement du traitement Node vérifié ; les résultats métier restent à contrôler.`;
+  if (result.managedNode?.updatePending) return unchanged ? "Dépendances validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Dépendances déployées et validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur.";
+  if (target.capability?.adapter === "node-static") return "Construction Node et publication du site statique vérifiées ; contrôle HTTPS réussi, sans runtime Node serveur revendiqué.";
+  return unchanged ? "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés." : "Mise à jour déployée et contrôle HTTPS réussi.";
+}
+function failureStage(results: UpdateResult[], error: unknown): "attention" | "failed" {
+  return results.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && results.some(result => ["publishing", "verifying", "attention"].includes(result.stage))) ? "attention" : "failed";
+}
 async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: UpdateResult[], progress: Progress) {
   const representative = targets[0];
   if (representative.mode === "git" && new Set(targets.map(target => target.branch)).size !== 1) throw new ApiError("Ce dépôt est déployé depuis plusieurs branches. Séparez leurs mises à jour.");
@@ -79,7 +95,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const runtimeChecks: (UpdateCheck | null)[] = [];
   for (const [index, target] of targets.entries()) {
     results[index].previousDeploymentId = await providerPreflight(target, latestLts);
-    await checkPublicSite(target.url!);
+    await checkNodeEndpoint(target);
+    if (workerTarget(target)) results[index].warnings.push("Traitement en arrière-plan : les tests isolés et le processus Node actif sont contrôlés. Aucun résultat de tâche, envoi externe ou parcours métier n’est certifié par la seule présence du processus.");
     const check = results[index].previousDeploymentId ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
     runtimeChecks.push(check);
     if (check) {
@@ -109,6 +126,14 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await writeFile(archive, Buffer.from(original.settings.archive, "base64"));
     }
     const names = await extractArchive(archive, sourceFolder, representative.mode === "git");
+    for (const target of targets) {
+      const prefix = target.root ? target.root + "/" : "";
+      const local = [...new Set(names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length).split("/")[0]))];
+      const manifest = local.includes("package.json") ? JSON.parse(await readFile(join(sourceFolder, prefix + "package.json"), "utf8")) : undefined;
+      const family = sourceFamily(local, manifest);
+      if (family !== "node") throw new ApiError(`Les sources sélectionnées correspondent à ${family}. Aucun paquet n’est installé ni publié par le parcours Node ; un adaptateur dédié est nécessaire.`, 422);
+      if (workerTarget(target) && typeof manifest?.scripts?.start !== "string") throw new ApiError("Le traitement en arrière-plan doit déclarer son script start pour qualifier son exécution.", 422);
+    }
     if (names.some(name => /(^|\/)\.railway\//.test(name))) throw new ApiError("Retirez les fichiers locaux .railway des sources fournies.");
     if (representative.mode === "archive" && representative.provider === "railway" && names.some(name => /(^|\/)\.railwayignore$/.test(name))) throw new ApiError("La source Railway utilise un filtrage personnalisé des fichiers qui doit être vérifié avant l’envoi direct.");
     for (const name of names.filter(name => /(^|\/)(\.npmrc|\.yarnrc|\.yarnrc\.yml|pnpm-workspace\.yaml)$/.test(name))) {
@@ -212,12 +237,12 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
           await confirmDeployedNode(target, result, { deploymentId: result.previousDeploymentId!, commit: expected || undefined }, version, progress);
           const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after")?.nodeEvidence;
           if (!sameNodeReceiptProof(reference, target.id, proof)) throw new ApiError("L’image active ou le type de preuve Node a changé pendant la vérification. Validation non réutilisable.", 422);
-          await checkPublicSite(target.url!);
+          await checkNodeEndpoint(target);
           const validation = receipt!.validations.find(item => item.targetId === target.id)!;
           result.checks!.push({ tool: "Validation", phase: "candidate", checkedAt: validation.checkedAt, scope: validation.scope, status: validation.status, findings: [], message: `Validation du ${validation.checkedAt} réutilisée pour les mêmes sources, catalogues et environnement ; scripts non réexécutés. ${validation.message}` });
           result.warnings = [...new Set([...result.warnings, ...(receipt!.warnings.find(item => item.targetId === target.id)?.messages || [])])];
           result.stage = "completed";
-          result.message = "Configuration déjà validée et toujours à jour ; sécurité, Node déployé et HTTPS revérifiés.";
+          result.message = nodeCompletionMessage(target, result, true);
         });
         run.nodeReceipts ||= [];
         run.nodeReceipts.push(receipt); // Keep the original heavy-validation age.
@@ -323,13 +348,14 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         result.stage = "verifying";
         if (!result.previousDeploymentId) throw new ApiError("Aucun déploiement actif ne permet de vérifier la version Node exacte.");
         await verifyNode(index, result.previousDeploymentId);
-        await checkPublicSite(targets[index].url!);
+        await checkNodeEndpoint(targets[index]);
         result.stage = "completed";
-        result.message = result.managedNode?.updatePending ? "Dépendances validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
+        result.message = nodeCompletionMessage(targets[index], result, true);
       });
       await rememberValidation();
       return;
     }
+    await assertSourceImpact(targets, changes.map(file => file.path));
     const currentTargets = await updateTargets(run.projectId);
     for (const [index, target] of targets.entries()) {
       const current = currentTargets.find(item => item.id === target.id);
@@ -369,16 +395,16 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const target = targets[index];
       const result = results[index];
       result.stage = "verifying";
-      await progress("verifying", "Attente du déploiement et contrôle du site.");
+      await progress("verifying", workerTarget(target) ? "Attente du déploiement et contrôle du processus Node." : "Attente du déploiement et contrôle du site.");
       await waitForDeployment(target, { commit: result.commit, deploymentId: result.deploymentId, runId: run.id, previousDeploymentId: result.previousDeploymentId }, async id => {
         result.deploymentId = id;
         await progress("verifying", "Contrôle du déploiement en cours.");
       });
       if (!result.deploymentId) throw new ApiError("Déploiement introuvable pour vérifier la version Node exacte.");
       await verifyNode(index, result.deploymentId);
-      await checkPublicSite(target.url!);
+      await checkNodeEndpoint(target);
       result.stage = "completed";
-      result.message = result.managedNode?.updatePending ? "Dépendances déployées et validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Mise à jour déployée et contrôle HTTPS réussi.";
+      result.message = nodeCompletionMessage(target, result);
     });
     await rememberValidation();
   } finally { await rm(temporary, { recursive: true, force: true }); }
@@ -453,23 +479,42 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
     await withAuditActor(run.actor, async () => {
       await progress("checking", "Vérification des accès et de la configuration du projet.");
       if (process.env.VIGIE_UPDATES_RUNNER_SETUP_OK !== undefined && process.env.VIGIE_UPDATES_RUNNER_SETUP_OK !== "true") throw new ApiError("L’installation vérifiée des outils de sécurité ou de déploiement a échoué. Aucun service n’a été modifié.", 503);
-      const current = await updateTargets(run.projectId);
-      for (const target of run.targets) {
-        const next = current.find(item => item.id === target.id);
-        if (!next || next.unavailable || JSON.stringify(next) !== JSON.stringify(target)) throw new ApiError("La configuration du projet a changé. Rechargez sa fiche avant de relancer.");
-        const lock = await db.prepare("SELECT run_id FROM update_locks WHERE scope=?").get(updateScope(target)) as { run_id: string } | undefined;
-        if (lock?.run_id !== id) throw new ApiError("Le verrou de mise à jour n’est plus détenu par ce traitement.");
-      }
       const groups = new Map<string, UpdateTarget[]>();
       for (const target of run.targets) {
-        const scope = updateScope(target);
+        const scope = executionGroup(target);
         groups.set(scope, [...groups.get(scope) || [], target]);
       }
+      const failures: string[] = [];
       for (const targets of groups.values()) {
-        const results = targets.map(target => ({ targetId: target.id, name: target.name, stage: "checking" as UpdateStage, message: "Vérification en cours.", warnings: [] as string[] }));
+        const results: UpdateResult[] = targets.map(target => ({ targetId: target.id, name: target.name, stage: "checking" as UpdateStage, message: "Vérification en cours.", warnings: [] as string[] }));
         run.results.push(...results);
-        if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
-        else await executeGroup(run, targets, results, progress);
+        try {
+          const current = await updateTargets(run.projectId);
+          for (const target of targets) {
+            const next = current.find(item => item.id === target.id);
+            if (!next || next.unavailable || JSON.stringify(next) !== JSON.stringify(target)) throw new ApiError("La configuration du service a changé. Rechargez sa fiche avant de relancer.", 409);
+            const lock = await db.prepare("SELECT run_id FROM update_locks WHERE scope=?").get(updateScope(target)) as { run_id: string } | undefined;
+            if (lock?.run_id !== id) throw new ApiError("Le verrou de mise à jour n’est plus détenu par ce traitement.", 409);
+          }
+          if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
+          else await executeGroup(run, targets, results, progress);
+          requireZeroFinalFindings(results);
+          if (results.some(result => result.stage !== "completed")) throw new ApiError("Le résultat final du service n’est pas confirmé.", 502);
+        } catch (error) {
+          const stage = failureStage(results, error);
+          const reason = error instanceof ApiError ? error.message : "Le traitement de ce groupe a échoué. Les informations de récupération sont conservées.";
+          for (const result of results.filter(result => result.stage !== "completed" || result.checks?.some(check => check.status === "blocked"))) { result.stage = stage; result.message = reason; }
+          // A rejected final security guard also revokes a provisional success.
+          if (results.every(result => result.stage === "completed")) for (const result of results) { result.stage = stage; result.message = reason; }
+          failures.push(`${targets.map(target => target.name).join(", ")} : ${reason}`);
+          await progress("checking", "Poursuite des autres groupes indépendants ; un résultat demande une intervention.");
+        }
+      }
+      if (failures.length) {
+        run.stage = run.results.some(result => result.stage === "attention") ? "attention" : "failed";
+        run.message = `${run.results.filter(result => result.stage === "completed").length} service(s) terminé(s), ${run.results.filter(result => result.stage !== "completed").length} service(s) non confirmé(s). ${failures.join(" ")} Les groupes indépendants ont été traités ; le succès global n’est pas confirmé.`;
+        await log("live", "updates.failed", run.message, run.projectId);
+        return;
       }
       requireZeroFinalFindings(run.results);
       run.stage = "completed";
@@ -477,6 +522,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       run.message = manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       const pendingNodes = run.results.filter(result => result.managedNode?.updatePending).length;
       if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
+      if (run.excludedTargets?.length) run.message += ` ${run.excludedTargets.length} service(s) non sélectionné(s) restent à traiter séparément ; seuls les services sélectionnés sont couverts par ce résultat.`;
       await log("live", "updates.completed", run.message, run.projectId);
     });
   } catch (error) {
@@ -491,10 +537,15 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
     await transaction(async () => {
       await writeUpdateRun(run);
       if (run.stage !== "attention") await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(id);
+      else for (const scope of new Set(run.targets.map(updateScope))) {
+        const affected = run.targets.filter(target => updateScope(target) === scope);
+        if (!affected.some(target => run.results.some(result => result.targetId === target.id && result.stage === "attention"))) await db.prepare("DELETE FROM update_locks WHERE scope=? AND run_id=?").run(scope, id);
+      }
     });
   }
-  if ((run.stage as UpdateStage) === "completed") {
-    await afterComplete(run.targets);
+  const completedTargets = run.targets.filter(target => run.results.some(result => result.targetId === target.id && result.stage === "completed"));
+  if (completedTargets.length) {
+    await afterComplete(completedTargets);
   }
   return true;
 }

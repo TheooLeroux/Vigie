@@ -5,6 +5,7 @@ import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 
 export const controlInterval = 60 * 60_000;
 export type AutomaticControl = {
+  sourceQualification?: import("./updates/capabilities").SourceQualification;
   targetId: string;
   identity: string;
   attemptedAt: string;
