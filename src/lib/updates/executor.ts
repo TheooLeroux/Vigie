@@ -250,6 +250,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       },
       };
     }
+    const preparationStarted = performance.now();
     const prepared = await prepareNodeServices(sourceFolder, roots, names, version, serviceChecks, {
       transport: catalogs.transport,
       runtime,
@@ -262,7 +263,15 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         }
         await progress("updating", `${root || "racine"} : ${message}.`);
       },
-    });
+    }).finally(() => runtime.dispose?.());
+    const preparationMs = Math.round(performance.now() - preparationStarted);
+    for (const [index, target] of targets.entries()) {
+      const timing = "services" in prepared ? prepared.services.find(service => service.root === target.root) : null;
+      const validation = results[index].checks?.findLast(check => check.tool === "Validation" && check.phase === "candidate");
+      if (validation) validation.message += timing
+        ? ` Durées du service : préparation ${Math.round(timing.prepareMs / 1000)} s ; validation assemblée ${Math.round(timing.validateMs / 1000)} s. Préparation et validation de tous les services : ${Math.round(preparationMs / 1000)} s écoulées (tâches parallèles).`
+        : ` Préparation et validation : ${Math.round(preparationMs / 1000)} s.`;
+    }
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
     await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de tous les verrous avant publication", finalScan.findings, baseline), checkedAt: finalScan.checkedAt });

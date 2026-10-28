@@ -8,6 +8,7 @@ import { ApiError } from "../http";
 import { runCommand } from "./process";
 import { packageCatalog, stableVersion, type PackageVersion } from "./versions";
 import type { SecurityFinding } from "./types";
+import { mapConcurrent } from "./planning";
 
 const dependencyMap = z.record(z.string(), z.string()).default({});
 const lockSchema = z.object({ lockfileVersion: z.union([z.literal(2), z.literal(3)]), packages: z.record(z.string(), z.object({ name: z.string().optional(), version: z.string().optional(), link: z.boolean().optional(), resolved: z.string().optional(), integrity: z.string().optional(), dependencies: dependencyMap, devDependencies: dependencyMap, optionalDependencies: dependencyMap, peerDependencies: dependencyMap }).passthrough()) }).passthrough();
@@ -288,14 +289,18 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
     for (const { root, manifest, originalManifest, graph, original, alerts } of contexts) {
       const affected = new Set(alerts.flatMap(alert => graph.paths(alert.package, alert.version).map(path => packageName(path[0]))));
       const requirements = new Map<string, { graph: ReturnType<typeof npmGraph>; path: string[]; fixed: PackageVersion[]; alert: SecurityFinding }[]>();
-      for (const { graph: source, path, alert } of history.get(root)!.values()) {
-        if (!affected.has(packageName(path[0]))) continue;
+      const routes = [...history.get(root)!.values()].filter(({ path }) => affected.has(packageName(path[0])));
+      const verifiedRoutes = await mapConcurrent(routes, 8, async ({ graph: source, path, alert }) => {
         const installedVersions = [...original.nodes].filter(([location, item]) => location && (item.name || packageName(location)) === alert.package && stableVersion(item.version)).map(([, item]) => item.version!).sort((first, second) => compare(second, first));
         const fixed = await safeVersions(alert.package, node, installedVersions[0] || "0.0.0");
+        return { graph: source, path, fixed, alert };
+      });
+      for (const { graph: source, path, fixed, alert } of verifiedRoutes) {
         const direct = packageName(path[0]);
         requirements.set(direct, [...requirements.get(direct) || [], { graph: source, path, fixed, alert }]);
       }
       if (!requirements.size) throw new ApiError(`${root || "racine"} : la chaîne vulnérable n’a pas pu être prouvée dans le verrou.`);
+      const supportCache = new Map<string, Promise<boolean>>();
       for (const related of requirements.values()) {
         const path = related[0].path;
         const direct = packageName(path[0]), current = graph.nodes.get(graph.resolve("", direct) || "")!;
@@ -306,18 +311,27 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
         if (!originalRange || !validRange(originalRange)) throw new ApiError(`Les contraintes initiales de ${direct} ne permettent pas une remédiation automatique.`);
         const floor = minVersion(originalRange)!.version;
         async function supports(source: ReturnType<typeof npmGraph>, path: string[], index: number, candidate: PackageVersion, fixed: PackageVersion[]): Promise<boolean> {
-          if (++visits > 5000) throw new ApiError("La recherche de parents corrigés atteint sa limite. Aucun contrôle n’a été contourné.");
-          if (index === path.length - 1) return fixed.some(item => item.version === candidate.version);
-          const child = source.nodes.get(path[index + 1])!, childName = child.name || packageName(path[index + 1]);
-          const edge = source.edges(path[index], true).find(edge => edge.target === path[index + 1])!;
-          const dependencies = { ...candidate.peerDependencies, ...candidate.dependencies, ...candidate.optionalDependencies };
-          const childRange = Object.hasOwn(dependencies, edge.name) ? dependencies[edge.name] : undefined;
-          if (!childRange) return true;
-          const declared = dependencyRange(childRange);
-          if (!declared) return false;
-          const candidates = index + 1 === path.length - 1 ? fixed : (await catalog(childName)).filter(item => usable(item, node)).slice(0, 40);
-          for (const next of candidates) if (satisfies(next.version, declared) && await supports(source, path, index + 1, next, fixed)) return true;
-          return false;
+          // Identical suffixes reached through several parents have the same
+          // answer. Include edge aliases and all verified leaf versions: a failed
+          // route must never rule out a different constraint or a new advisory.
+          const suffix = path.slice(index).map((location, offset) => [source.nodes.get(location)!.name || packageName(location), offset + index + 1 < path.length ? source.edges(location, true).find(edge => edge.target === path[offset + index + 1])!.name : null]);
+          const key = canonical([suffix, candidate, fixed.map(item => item.version)]);
+          if (!supportCache.has(key)) supportCache.set(key, evaluate());
+          return supportCache.get(key)!;
+          async function evaluate(): Promise<boolean> {
+            if (++visits > 5000) throw new ApiError("La recherche de parents corrigés atteint sa limite. Aucun contrôle n’a été contourné.");
+            if (index === path.length - 1) return fixed.some(item => item.version === candidate.version);
+            const child = source.nodes.get(path[index + 1])!, childName = child.name || packageName(path[index + 1]);
+            const edge = source.edges(path[index], true).find(edge => edge.target === path[index + 1])!;
+            const dependencies = { ...candidate.peerDependencies, ...candidate.dependencies, ...candidate.optionalDependencies };
+            const childRange = Object.hasOwn(dependencies, edge.name) ? dependencies[edge.name] : undefined;
+            if (!childRange) return true;
+            const declared = dependencyRange(childRange);
+            if (!declared) return false;
+            const candidates = index + 1 === path.length - 1 ? fixed : (await catalog(childName)).filter(item => usable(item, node)).slice(0, 40);
+            for (const next of candidates) if (satisfies(next.version, declared) && await supports(source, path, index + 1, next, fixed)) return true;
+            return false;
+          }
         }
         const candidates = (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, 40);
         const admissible: PackageVersion[] = [];

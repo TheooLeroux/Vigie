@@ -3,6 +3,7 @@ import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { ApiError } from "../http";
 import { changedSources, nodeValidationRuntime, prepareNodeSources, snapshotSources, validatePreparedNodeSources, type NodeUpdateChecks, type NodeValidationRuntime } from "./node";
+import { mapConcurrent as boundedMap, withPlanningSession } from "./planning";
 
 type CheckFactory = (folder: string, roots: string[], phase: "prepare" | "final") => NodeUpdateChecks;
 type Options = {
@@ -19,21 +20,6 @@ export function nodeServiceConcurrency(cpus = availableParallelism(), memory = t
   // Each validation container is limited to 3 GiB. Keep at least 1 GiB for the
   // worker, scanners and Docker, and never start more than two service pipelines.
   return Math.max(1, Math.min(2, cpus, Math.floor((memory - 1024 ** 3) / (3 * 1024 ** 3))));
-}
-
-async function boundedMap<T, R>(items: T[], limit: number, execute: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results: R[] = [];
-  let next = 0, failed = false, failure: unknown;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (!failed && next < items.length) {
-      const index = next++;
-      try { results[index] = await execute(items[index], index); }
-      catch (error) { if (!failed) failure = error; failed = true; }
-    }
-  }));
-  // All in-flight work must settle before its private directories are removed.
-  if (failed) throw failure;
-  return results;
 }
 
 function safeName(name: string) {
@@ -66,6 +52,14 @@ async function coordinatedLayout(folder: string, roots: string[], names: string[
 const versionFiles = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "Dockerfile", ".nvmrc", ".node-version"];
 
 export async function prepareNodeServices(folder: string, roots: string[], names: string[], nodeVersion: string, checks: CheckFactory, options: Options = {}) {
+  return withPlanningSession(async () => {
+    const runtime = options.runtime || nodeValidationRuntime(nodeVersion);
+    try { return await prepareServices(folder, roots, names, nodeVersion, checks, { ...options, runtime }); }
+    finally { if (!options.runtime) await runtime.dispose?.(); }
+  });
+}
+
+async function prepareServices(folder: string, roots: string[], names: string[], nodeVersion: string, checks: CheckFactory, options: Options) {
   const selected = [...new Set(roots)], prepare = options.prepare || prepareNodeSources, validate = options.validate || validatePreparedNodeSources;
   if (!selected.length) throw new ApiError("Aucun service à préparer.");
   for (const root of selected) if (root) safeName(root);
@@ -106,14 +100,16 @@ export async function prepareNodeServices(folder: string, roots: string[], names
     // Always validate the assembled proposal in fresh copies. A script can read
     // siblings even without a declared local dependency. No shared node_modules,
     // outputs or mutable lockfiles are exposed to concurrent validations.
-    await boundedMap(selected, limit, async root => {
+    const validationTimes = await boundedMap(selected, limit, async root => {
       const working = await mkdtemp(join(temporary, "final-"));
+      const started = performance.now();
       try {
         await options.progress?.(root, "validating");
         await copySources(combined, working, combinedNames);
         await validate(working, [root], combinedNames, nodeVersion, validations, checks(working, [root], "final"), runtime);
         await changedSources(working, await snapshotSources(combined, combinedNames), new Set());
         await options.progress?.(root, "ready");
+        return { root, elapsedMs: Math.round(performance.now() - started) };
       } catch (error) {
         if (error instanceof ApiError) throw new ApiError(`${root || "racine"} : validation de l’ensemble refusée. ${error.message}`, error.status);
         throw error;
@@ -125,6 +121,6 @@ export async function prepareNodeServices(folder: string, roots: string[], names
       await mkdir(dirname(join(folder, file.path)), { recursive: true });
       await writeFile(join(folder, file.path), file.content);
     }
-    return { allowed, warnings: [...new Set(prepared.flatMap(result => result.warnings))], services: prepared.map(result => ({ root: result.root, prepareMs: result.elapsedMs, warnings: result.warnings })), concurrency: limit };
+    return { allowed, warnings: [...new Set(prepared.flatMap(result => result.warnings))], services: prepared.map(result => ({ root: result.root, prepareMs: result.elapsedMs, validateMs: validationTimes.find(item => item.root === result.root)!.elapsedMs, warnings: result.warnings })), concurrency: limit };
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }

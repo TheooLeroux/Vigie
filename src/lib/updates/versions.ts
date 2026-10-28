@@ -1,6 +1,7 @@
 import { compare, minVersion, rcompare, satisfies, validRange } from "semver";
 import { ApiError } from "../http";
 import type { PeerConflict } from "./process";
+import { mapConcurrent, planningCatalog } from "./planning";
 
 export class CompatibilitySelectionError extends ApiError {}
 
@@ -9,6 +10,9 @@ export const stableVersion = (value: unknown): value is string => typeof value =
 const sections = ["dependencies", "devDependencies", "optionalDependencies"] as const;
 
 async function metadata(name: string, transport: typeof fetch, all = false) {
+  return planningCatalog(`${name}:${all ? "all" : "latest"}`, transport, () => loadMetadata(name, transport, all));
+}
+async function loadMetadata(name: string, transport: typeof fetch, all: boolean) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try { return await readMetadata(name, transport, all); }
     catch (error) {
@@ -30,7 +34,7 @@ async function readMetadata(name: string, transport: typeof fetch, all: boolean)
     if (size > 40_000_000) { await reader.cancel(); throw new ApiError(`Le catalogue de ${name} est trop volumineux.`, 502); }
     chunks.push(part.value);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return { value: JSON.parse(Buffer.concat(chunks).toString("utf8")), bytes: size };
 }
 export async function packageCatalog(name: string, transport: typeof fetch = fetch) {
   if (!/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name)) throw new ApiError("Nom de paquet invalide pour la remédiation.");
@@ -66,8 +70,10 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
   const domains = new Map<string, PackageVersion[]>(), latest = new Map<string, PackageVersion>(), expanded = new Set<string>();
   const floor = (name: string) => (ranges.get(name) || []).map(range => minVersion(range)?.version || "0.0.0").sort(rcompare)[0];
   const usable = (name: string, item: PackageVersion) => stableVersion(item.version) && !item.deprecated && compare(item.version, floor(name)) >= 0 && (name !== "@types/node" || item.version.split(".")[0] === nodeVersion.split(".")[0]) && (!Object.hasOwn(limits, name) || [limits[name]].flat().every(range => satisfies(item.version, range))) && (!item.engines?.node || !!validRange(item.engines.node) && satisfies(nodeVersion, item.engines.node));
-  for (const name of [...ranges.keys()].sort()) {
-    const item = await metadata(name, transport) as PackageVersion;
+  const packageNames = [...ranges.keys()].sort();
+  const heads = await mapConcurrent(packageNames, 8, name => metadata(name, transport) as Promise<PackageVersion>);
+  for (const [index, name] of packageNames.entries()) {
+    const item = heads[index];
     if (!stableVersion(item.version) || item.deprecated || compare(item.version, floor(name)) < 0) {
       warnings.push(`${name} : aucune version stable non dépréciée plus récente disponible ; version conservée.`);
       continue;
@@ -85,20 +91,40 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
     domains.set(name, candidates);
     return true;
   }
-  for (const [name, items] of domains) if (!items.length) await expand(name);
+  await mapConcurrent([...domains].filter(([, items]) => !items.length).map(([name]) => name), 8, expand);
   let chosen: Map<string, PackageVersion> | null = null;
+  const pairCompatibility = new Map<string, boolean>();
   for (let round = 0; round <= domains.size; round++) {
     const conflicts = new Set<string>(), selected = new Map<string, PackageVersion>();
-    const names = [...domains.keys()].sort((first, second) => domains.get(first)!.length - domains.get(second)!.length || first.localeCompare(second));
+    const neighbors = new Map([...domains.keys()].map(name => [name, new Set<string>()]));
+    for (const [name, candidates] of domains) for (const item of candidates) for (const peer of Object.keys(item.peerDependencies || {})) if (peer !== name && neighbors.has(peer)) {
+      neighbors.get(name)!.add(peer); neighbors.get(peer)!.add(name);
+    }
+    const components: string[][] = [], remaining = new Set(domains.keys());
+    while (remaining.size) {
+      const pending = [remaining.values().next().value!], component: string[] = [];
+      while (pending.length) {
+        const name = pending.pop()!;
+        if (!remaining.delete(name)) continue;
+        component.push(name);
+        pending.push(...neighbors.get(name)!);
+      }
+      components.push(component.sort((first, second) => domains.get(first)!.length - domains.get(second)!.length || first.localeCompare(second)));
+    }
     let attempts = 0;
     function matches(name: string, item: PackageVersion, other: string, version: PackageVersion) {
       const range = item.peerDependencies && Object.hasOwn(item.peerDependencies, other) ? item.peerDependencies[other] : undefined;
       if (!range) return true;
-      if (validRange(range) && satisfies(version.version, range)) return true;
+      const key = JSON.stringify([range, version.version]);
+      if (!pairCompatibility.has(key)) {
+        if (pairCompatibility.size >= 100_000) pairCompatibility.clear();
+        pairCompatibility.set(key, !!validRange(range) && satisfies(version.version, range));
+      }
+      if (pairCompatibility.get(key)) return true;
       conflicts.add(name); conflicts.add(other);
       return false;
     }
-    function search(index: number): boolean {
+    function search(names: string[], index: number): boolean {
       if (++attempts > 30_000) throw new ApiError("La recherche de versions compatibles dépasse sa limite. Aucun changement n’a été publié.");
       if (index === names.length) return true;
       const name = names[index];
@@ -106,14 +132,17 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
         if ([...selected].some(([other, version]) => !matches(name, item, other, version) || !matches(other, version, name, item))) continue;
         if (names.slice(index + 1).some(other => !domains.get(other)!.some(version => matches(name, item, other, version) && matches(other, version, name, item)))) continue;
         selected.set(name, item);
-        if (search(index + 1)) return true;
+        if (search(names, index + 1)) return true;
         selected.delete(name);
       }
       return false;
     }
-    if (search(0)) { chosen = selected; break; }
-    let changed = false;
-    for (const name of conflicts) if (await expand(name)) changed = true;
+    // Independent peer components cannot repair one another. Solving them
+    // separately avoids an exponential product of unrelated version choices.
+    let solved = true;
+    for (const component of components) if (!search(component, 0)) solved = false;
+    if (solved) { chosen = selected; break; }
+    const changed = (await mapConcurrent([...conflicts].sort(), 8, expand)).some(Boolean);
     if (!changed) break;
   }
   if (!chosen) throw new CompatibilitySelectionError("Aucun ensemble de versions stables compatible avec Node et les dépendances du projet n’a été trouvé. Rien n’a été publié.");

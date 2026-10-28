@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile, lstat, realpath, rm } from "node:fs/promises";
+import { readFile, writeFile, lstat, realpath, rm, mkdtemp, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { ApiError } from "../http";
 import { runCommand, DependencyValidationError, IndirectValidationError, PeerResolutionError } from "./process";
 import { minVersion, satisfies, validRange } from "semver";
@@ -12,6 +13,7 @@ import { createNodeRemediator, npmChangedIndirectPackages, npmGraph, npmIndirect
 import { searchIndirectCompatibility, type IndirectEvaluation } from "./indirect-compatibility";
 export { stableVersion } from "./versions";
 import { stableVersion } from "./versions";
+import { withPlanningSession } from "./planning";
 
 export type SourceFile = { path: string; hash: string };
 export async function latestNode(transport: typeof fetch = fetch) {
@@ -113,10 +115,28 @@ export type NodeUpdateChecks = {
 };
 type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
-export type NodeValidationRuntime = { image: () => Promise<string> };
+export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void> };
 export function nodeValidationRuntime(nodeVersion: string, execute = runCommand): NodeValidationRuntime {
   let pending: Promise<string> | undefined;
-  return { image: () => pending ||= (async () => {
+  let directory: Promise<string> | undefined, disposed = false;
+  const caches = new Map<string, Promise<string>>();
+  return {
+    downloads: root => {
+      if (disposed) throw new ApiError("Le cache de cette exécution est fermé.");
+      if (!caches.has(root)) caches.set(root, (async () => {
+        directory ||= mkdtemp(join(tmpdir(), "vigie-node-downloads-"));
+        const path = join(await directory, createHash("sha256").update(root).digest("hex"));
+        await mkdir(path, { mode: 0o700 });
+        return path;
+      })());
+      return caches.get(root)!;
+    },
+    dispose: async () => {
+      disposed = true;
+      await Promise.allSettled(caches.values());
+      if (directory) await rm(await directory, { recursive: true, force: true });
+    },
+    image: () => pending ||= (async () => {
     const tag = `node:${nodeVersion}-bookworm`;
     const inspect = () => execute("docker", ["image", "inspect", tag, "--format", "{{.Id}}"]);
     let value: string;
@@ -136,14 +156,25 @@ function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
   return async (root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) => {
     const name = `vigie-check-${crypto.randomUUID()}`;
     try {
-      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
+      const downloads = await runtime.downloads?.(root);
+      // Pacote retrieves tarballs by the lockfile's integrity digest. Share only
+      // that content store: HTTP indexes, package metadata and npx executables
+      // remain private to each container. Nothing crosses update executions.
+      const cacheMount = downloads ? ["--mount", `type=bind,source=${downloads},target=/vigie-npm-content`] : [];
+      const cacheSetup = downloads ? "mkdir -p /tmp/npm/_cacache; ln -s /vigie-npm-content /tmp/npm/_cacache/content-v2; " : "";
+      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), ...cacheMount, "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${cacheSetup}${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
     } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
   };
 }
 
 // Validate a frozen, assembled proposal without selecting versions again. This
 // is mandatory after independently prepared services have been joined.
-export async function validatePreparedNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, validations: Set<string>, security: NodeUpdateChecks, runtime = nodeValidationRuntime(nodeVersion)) {
+export async function validatePreparedNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, validations: Set<string>, security: NodeUpdateChecks, runtime?: NodeValidationRuntime) {
+  const selected = runtime || nodeValidationRuntime(nodeVersion);
+  try { return await validatePreparedSources(folder, roots, names, nodeVersion, validations, security, selected); }
+  finally { if (!runtime) await selected.dispose?.(); }
+}
+async function validatePreparedSources(folder: string, roots: string[], names: string[], nodeVersion: string, validations: Set<string>, security: NodeUpdateChecks, runtime: NodeValidationRuntime) {
   const protectedFiles = await snapshotSources(folder, names);
   await security.resolved(names);
   await changedSources(folder, protectedFiles, new Set());
@@ -168,6 +199,13 @@ export async function validatePreparedNodeSources(folder: string, roots: string[
   await changedSources(folder, protectedFiles, new Set());
 }
 export async function prepareNodeSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch = fetch, requiredDockerRoots: string[] = [], retry: PreparationRetry = { limits: new Map(), attempt: 0 }, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
+  return withPlanningSession(async () => {
+    const runtime = retry.runtime || nodeValidationRuntime(nodeVersion);
+    try { return await prepareSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, runtime }, security); }
+    finally { if (!retry.runtime) await runtime.dispose?.(); }
+  });
+}
+async function prepareSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch, requiredDockerRoots: string[], retry: PreparationRetry, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
   retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };

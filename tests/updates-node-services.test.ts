@@ -60,6 +60,21 @@ test("Services : l’image de validation est figée une seule fois pour toutes l
   await assert.rejects(invalid.image(), /identité exacte/);
 });
 
+test("Services : téléchargements privés par service et exécution, supprimés à la fermeture", async () => {
+  const first = nodeValidationRuntime("24.22.1"), second = nodeValidationRuntime("24.22.1");
+  let path = "";
+  try {
+    const [a, b] = await Promise.all([first.downloads!("app"), first.downloads!("app")]);
+    path = a;
+    assert.equal(a, b);
+    assert.notEqual(a, await first.downloads!("other"));
+    assert.notEqual(a, await second.downloads!("app"));
+    await writeFile(join(a, "content"), "cached bytes");
+  } finally { await first.dispose!(); await second.dispose!(); }
+  await assert.rejects(stat(path), { code: "ENOENT" });
+  assert.throws(() => first.downloads!("app"), /fermé/);
+});
+
 test("Services : préparations simultanées, reprises privées et validation de l’ensemble avant fusion", async () => {
   const { folder, names } = await fixture(), preparationBarrier = deferred(), validationBarrier = deferred();
   const retries: unknown[] = [], directories: string[] = [];

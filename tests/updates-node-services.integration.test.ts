@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNodeServices } from "../src/lib/updates/node-services";
 import { requireSecurityPass, securityCheck } from "../src/lib/updates/security";
+import { nodeValidationRuntime, prepareNodeSources } from "../src/lib/updates/node";
+import { runCommand } from "../src/lib/updates/process";
 
 const docker = { skip: process.env.VIGIE_TEST_DOCKER !== "1" }, nodeVersion = "24.14.0";
 const transport: typeof fetch = async input => Response.json(String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
@@ -21,6 +23,25 @@ async function fixture(programs: Record<string, string>) {
   return { folder, names };
 }
 const compatible = "if(!require('is-number')(42))process.exit(1)";
+
+test("Docker cache : réinstallation hors réseau depuis les contenus, corruption refusée", docker, async () => {
+  const { folder, names } = await fixture({ first: compatible });
+  const runtime = nodeValidationRuntime(nodeVersion);
+  try {
+    await prepareNodeSources(folder, ["first"], names, nodeVersion, transport, [], { limits: new Map(), attempt: 0, runtime }, {
+      resolved: async () => {}, image: async () => {}, validated: async () => {},
+    });
+    const content = await runtime.downloads!("first");
+    const cacheOnlyInstall = () => runCommand("docker", ["run", "--rm", "--network=none", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=npm_config_cache=/tmp/npm", "--mount", `type=bind,source=${content},target=/vigie-npm-content`, "--mount", `type=bind,source=${folder},target=/app`, "--workdir=/app/first", `node:${nodeVersion}-bookworm`, "sh", "-c", "set -eu; mkdir -p /tmp/npm/_cacache; ln -s /vigie-npm-content /tmp/npm/_cacache/content-v2; npm ci --offline --strict-peer-deps --ignore-scripts --no-audit --no-fund; npm ls --all --json"], { timeout: 30_000 });
+    assert.match(await cacheOnlyInstall(), /is-number/);
+    const lock = JSON.parse(await readFile(join(folder, "first/package-lock.json"), "utf8"));
+    const integrity: string = lock.packages["node_modules/is-number"].integrity;
+    const [algorithm, digest] = integrity.split("-");
+    const hex = Buffer.from(digest, "base64").toString("hex");
+    await writeFile(join(content, algorithm, hex.slice(0, 2), hex.slice(2, 4), hex.slice(4)), "corrupted cached tarball");
+    await assert.rejects(cacheOnlyInstall(), /échoué|commande|Command/i);
+  } finally { await runtime.dispose!(); await rm(folder, { recursive: true, force: true }); }
+});
 
 test("Docker parallèle : le repli d’un service ne relance pas la préparation de son voisin", docker, async t => {
   const rejectMajor = "if(require('is-number/package.json').version.startsWith('7.')){console.error('error TS2614: Module \"is-number\" has no exported member legacy');process.exit(1)}";

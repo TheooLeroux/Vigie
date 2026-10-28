@@ -71,6 +71,27 @@ async function fixture(parent = "2.0.0", range = "^1.0.0") {
   return { folder, manifest, content, originals };
 }
 const noPatch: typeof runCommand = async () => JSON.stringify({ patches: [] });
+test("Remédiation : les suffixes incompatibles communs sont prouvés une seule fois dans le budget", async () => {
+  const current = await fixture();
+  try {
+    const data = JSON.parse(current.content);
+    data.packages["node_modules/parent"].dependencies = { middle: "^1" };
+    data.packages["node_modules/middle"] = { version: "1.0.0", dependencies: { bridge: "^1" } };
+    data.packages["node_modules/bridge"] = { version: "1.0.0", dependencies: { indirect: "^1" } };
+    const raw = JSON.stringify(data);
+    await writeFile(join(current.folder, "package-lock.json"), raw);
+    const versions = (dependency: string, range: string) => Array.from({ length: 40 }, (_, i) => ({ version: `1.0.${39 - i}`, dependencies: { [dependency]: range } }));
+    const transport = registry(versions("middle", "^1"), ["2.2.0"], { middle: versions("bridge", "^1"), bridge: versions("indirect", "^1") });
+    const originals = new Map(current.originals).set("package-lock.json", raw);
+    await assert.rejects(createNodeRemediator(transport, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", originals, new Set()), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Aucun parent stable compatible/);
+      assert.doesNotMatch(error.message, /atteint sa limite/);
+      return true;
+    });
+    assert.equal(await readFile(join(current.folder, "package-lock.json"), "utf8"), raw);
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
 test("Graphe npm : dépendances de développement, portées imbriquées, alias et cycles", () => {
   const data = JSON.parse(lock());
   data.packages[""].devDependencies = { devtool: "1.0.0" };
