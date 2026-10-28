@@ -25,8 +25,8 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     const baseline = await scan(plan, false);
     result.checks = [securityCheck("WPVulnerability", "before", "WordPress et extensions couvertes par la base gratuite", baseline)];
     const candidate = securityCheck("WPVulnerability", "candidate", "Versions proposées de WordPress et des extensions", await scan(plan, true), baseline);
-    result.checks.push(candidate); requireSecurityPass(candidate);
     result.warnings.push(...scan.warnings, "PHP est affiché et conservé ; sa gestion reste chez l’hébergeur. Les thèmes sont conservés.");
+    result.checks.push(candidate); requireSecurityPass(candidate);
     if (scan.warnings.length && candidate.status === "passed") { candidate.status = "warning"; candidate.message += " Certains composants sont conservés et hors couverture ; détails dans le suivi."; }
     if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) {
       result.stage = "completed"; result.message = "Aucune mise à jour applicable à WordPress ou aux extensions. Consultez les éventuelles réserves."; return;

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Download, Loader2, RefreshCw } from "lucide-react";
 import { activeUpdateStages, type SecurityFinding, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
+import { wordpressBlockingMessage } from "@/lib/updates/wordpress-blocking";
 
 type Request = (path: string, method?: string, payload?: unknown) => Promise<any>;
 function FindingDetails({ finding }: { finding: SecurityFinding }) {
@@ -13,9 +14,11 @@ export const updateStageLabels: Record<UpdateStage, string> = { queued: "En atte
 export function UpdateProgress({ run }: { run: UpdateRun }) {
   const active = activeUpdateStages.includes(run.stage);
   const delayed = active && Date.now() - Date.parse(run.updatedAt) > 10 * 60_000;
+  const blocked = run.stage === "failed" ? run.results.flatMap(result => result.checks || []).findLast(check => wordpressBlockingMessage(check)) : undefined;
+  const blockedMessage = wordpressBlockingMessage(blocked);
   return <div className={`updates-progress ${run.stage}`} role="status" aria-live="polite">
     {active ? <Loader2 size={18} className="spin" /> : run.stage === "completed" ? <Check size={18} /> : <RefreshCw size={18} />}
-    <div><strong>{delayed ? "Le traitement met plus de temps que prévu" : updateStageLabels[run.stage]}</strong><p>{delayed ? "Vigie attend une confirmation de l’exécuteur. Ne relancez pas une deuxième mise à jour." : run.message}</p><small>{formatDate(run.updatedAt)}</small></div>
+    <div><strong>{delayed ? "Le traitement met plus de temps que prévu" : blockedMessage ? "Mise à jour bloquée" : updateStageLabels[run.stage]}</strong><p>{delayed ? "Vigie attend une confirmation de l’exécuteur. Ne relancez pas une deuxième mise à jour." : blockedMessage || run.message}</p><small>{formatDate(run.updatedAt)}</small></div>
   </div>;
 }
 function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTarget; projectId: string; request: Request; onSaved: () => Promise<void> }) {

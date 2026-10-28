@@ -7,6 +7,7 @@ import { ApiError } from "../http";
 import { runCommand } from "./process";
 import { createHash } from "node:crypto";
 import type { SecurityFinding, UpdateCheck, UpdateResult } from "./types";
+import { wordpressBlockingMessage } from "./wordpress-blocking";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().regex(/^\d+\.\d+\.\d+$/)).max(200).optional() });
@@ -45,7 +46,9 @@ export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["pha
   // Every reported vulnerability, including low/unknown and unpatched issues,
   // excludes a candidate. Neither old versions nor missing fixes waive this gate.
   const blockers = phase === "before" ? [] : findings;
-  return { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Recherche d’une autre combinaison sans faille signalée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
+  const check: UpdateCheck = { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Recherche d’une autre combinaison sans faille signalée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
+  check.message = wordpressBlockingMessage(check) || check.message;
+  return check;
 }
 export class SecurityPolicyError extends ApiError {
   constructor(readonly check: UpdateCheck) { super(`${check.tool} : ${check.message}`, 422); }

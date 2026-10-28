@@ -48,7 +48,7 @@ test("Contrôle gratuit : bornes réelles, correctifs, CVSS, alias et risques de
   const supply = { ...report(), data: { ...report().data, supplychain: [{ verdict: "cleaned", audit_id: 7, affected_versions: { min_version: "1", min_operator: "ge", max_version: "2", max_operator: "lt" } }] } };
   const malicious = freeWordPressFindings(supply, "plugin", "example", "1.5");
   assert.match(malicious[0].id, /^MAL-/);
-  assert.throws(() => requireSecurityPass(securityCheck("WPVulnerability", "candidate", "fixture", malicious)), /Publication arrêtée/);
+  assert.throws(() => requireSecurityPass(securityCheck("WPVulnerability", "candidate", "fixture", malicious)), /Mise à jour WordPress bloquée/);
   assert.deepEqual(freeWordPressFindings(supply, "plugin", "example", "2"), []);
   assert.throws(() => freeWordPressFindings(data, "plugin", "another", "1"), /correspond pas/);
 });
