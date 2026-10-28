@@ -7,6 +7,7 @@ import { currentWordPressSecurity } from "./updates/wordpress-current-security";
 import { scanCurrentNode } from "./updates/node-monitor";
 import { automaticControlDue, controlSource } from "./automatic-control-state";
 import type { UpdateTarget } from "./updates/types";
+import { mapConcurrent } from "./updates/planning";
 import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
@@ -29,7 +30,7 @@ async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof 
 
 export async function reconcileAutomaticControls(options: { force?: boolean; provider?: UpdateTarget["provider"] } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
   const result = { checked: 0, failed: 0, deferred: 0 };
-  for (const project of (await dependencies.projects()).filter(project => project.lifecycle === "active")) {
+  await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active"), 3, async project => {
     try {
       const detail = await dependencies.detail(project.id, "live");
       for (const target of (await dependencies.targets(project.id)).filter(target => !options.provider || target.provider === options.provider)) {
@@ -59,7 +60,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
         } finally { await release(); }
       }
     } catch { result.failed++; }
-  }
+  });
   if (result.checked || result.failed) await dependencies.log("live", "hosting.automatic_control", `Contrôle automatique : ${result.checked} service(s) vérifié(s), ${result.failed} échec(s), ${result.deferred} différé(s).`);
   return result;
 }

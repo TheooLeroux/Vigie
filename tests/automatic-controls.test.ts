@@ -147,3 +147,23 @@ test("Contrôle réel depuis la base : les observations hébergeur sont chargée
   assert.equal(result.failed, 0);
   assert.equal((await readAutomaticControl(target.id))?.error, undefined);
 });
+
+test("Parc : limiter à trois projets simultanés pour ne pas retarder tout le parc derrière un scan lent", async () => {
+  const { detail, target } = fixture();
+  const projects = Array.from({length: 7}, (_, index) => ({...detail.project, id: `parallel-${index}`}));
+  let active = 0, maximum = 0;
+  const result = await reconcileAutomaticControls({}, {
+    projects: async () => projects,
+    detail: async id => ({...detail, project: {...detail.project, id}}),
+    targets: async id => [{...target, id: `target-${id}`, projectId: id}],
+    scan: async () => {
+      maximum = Math.max(maximum, ++active);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      active--;
+      return {checks: [], updates: [], warnings: []};
+    },
+    read: async () => null, write: async () => {}, claim: async () => async () => {}, log: async () => {},
+  });
+  assert.equal(result.checked, 7);
+  assert.equal(maximum, 3);
+});
