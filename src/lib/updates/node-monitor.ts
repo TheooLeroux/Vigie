@@ -26,7 +26,11 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
   const entries = await dependencies.github(`${prefix}${path}?ref=${commit}`, token);
   if (!Array.isArray(entries)) throw new ApiError("Répertoire source non vérifiable.");
   const lock = locks.find(name => entries.some(entry => entry.name === name && entry.type === "file"));
-  if (!lock || !entries.some(entry => entry.name === "package.json" && entry.type === "file")) throw new ApiError("Manifest ou verrou absent : analyse incomplète.");
+  if (!lock || !entries.some(entry => entry.name === "package.json" && entry.type === "file")) {
+    const known = ["package.json", ...locks, "requirements.txt", "pyproject.toml", "uv.lock", "Pipfile.lock", "composer.json", "composer.lock", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock"];
+    const detected = entries.filter(entry => entry.type === "file" && known.includes(entry.name)).map(entry => entry.name);
+    throw new ApiError(`Manifest ou verrou absent : analyse incomplète. Répertoire : ${target.root || "racine"}. Fichiers de dépendances détectés : ${detected.join(", ") || "aucun"}.`);
+  }
   const folder = await mkdtemp(join(tmpdir(), "vigie-monitor-"));
   try {
     for (const name of ["package.json", lock]) {
