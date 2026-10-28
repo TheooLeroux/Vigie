@@ -50,6 +50,7 @@ export type UpdateResult = {
   checks?: UpdateCheck[];
 };
 export type UpdateRun = {
+  nodeReceipts?: import("./node-current").NodeValidationReceipt[];
   id: string;
   projectId: string;
   stage: UpdateStage;

@@ -42,6 +42,42 @@
   gap: 20px;
   min-width: 0;
 }
+.project-health-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.project-health-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  color: var(--text);
+}
+.project-health-title { display: flex; align-items: center; gap: 11px; }
+.project-health-title > svg { flex-shrink: 0; color: var(--muted); }
+.project-health-title span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.project-health-title h2 { font-size: 16px; line-height: 1.4; color: var(--ink); }
+.project-health-card p, .project-health-card li { font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.project-health-card ul { display: grid; gap: 6px; margin: 0; padding-left: 18px; }
+.project-health-card small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.project-health-card a { display: inline-flex; align-items: center; gap: 7px; margin-top: auto; padding-top: 4px; font-size: 12px; font-weight: 600; color: var(--ink); }
+.project-health-card a:hover { text-decoration: underline; }
+.project-health-card.danger { border-color: #bd5057; border-top-width: 3px; }
+.project-health-card.danger .project-health-title > svg { color: #b53f49; }
+.project-health-card.warning { border-color: var(--amber); border-top-width: 3px; }
+.project-health-card.warning .project-health-title > svg { color: var(--amber); }
+html[data-theme="dark"] .project-health-card.danger .project-health-title > svg { color: #ff9aa4; }
+#project-updates, #project-technical { scroll-margin-top: 88px; }
+@media (max-width: 760px) {
+  .project-health-summary { grid-template-columns: 1fr; gap: 12px; }
+  .project-health-card { padding: 17px; }
+}
 .project-intro {
   max-width: 850px;
   color: var(--text);

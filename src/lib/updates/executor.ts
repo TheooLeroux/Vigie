@@ -10,18 +10,20 @@ import { synchronizeRailway } from "../railway";
 import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
-import { changedSources, latestNode, snapshotSources, type NodeUpdateChecks } from "./node";
+import { changedSources, latestNode, nodeValidationRuntime, snapshotSources, type NodeUpdateChecks } from "./node";
 import { prepareNodeServices } from "./node-services";
-import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, waitForDeployment } from "./providers";
-import { confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
+import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, readRailwayInstance, waitForDeployment } from "./providers";
+import { activeNodeImage, confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
-import { readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { completedNodeRuns, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import { executeLocalWordPress } from "./wordpress-agent-execution";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
-import { dockerRuntimeBase, versionOnlyDockerfile } from "./dockerfile";
-import { requireSecurityPass, scanDockerImage, createNodeScanCache, securityCheck } from "./security";
+import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, versionOnlyDockerfile } from "./dockerfile";
+import { requireSecurityPass, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck } from "./security";
+import { nodeCatalogState } from "./node-catalog-state";
+import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
 import { freeWordPressScanner } from "./wordpress-free-security";
 import { refreshWordPressWeb } from "./wordpress-web-check";
@@ -98,7 +100,31 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
-    const nodeScan = createNodeScanCache(sourceFolder, roots);
+    const catalogs = nodeCatalogState(fetch, Date.parse(run.createdAt));
+    const policyHash = await nodePolicyHash();
+    const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
+    await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
+    const previous = await completedNodeRuns(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
+    let receipt: NodeValidationReceipt | null = previous.flatMap(run => run.nodeReceipts || []).map(raw => reusableNodeReceipt(raw, key)).find(Boolean) || null;
+    if (receipt) {
+      try {
+        for (const [index, target] of targets.entries()) {
+          const proof = receipt.deployments.find(item => item.targetId === target.id);
+          if (target.provider !== "railway" || !proof || proof.deploymentId !== results[index].previousDeploymentId) { receipt = null; break; }
+          const instance = (await readRailwayInstance(target)).serviceInstance;
+          const image = activeNodeImage(target, { deploymentId: proof.deploymentId, commit: expected || undefined }, version, instance.activeDeployments || []);
+          if (image.imageDigest !== proof.imageDigest) { receipt = null; break; }
+        }
+        if (receipt && !await unchangedNodeInputs(receipt)) receipt = null;
+      } catch { receipt = null; }
+    }
+    let collectCatalogs = !receipt;
+    const currentPackages = new Set<string>();
+    const scanWithInventory: typeof scanNodeSources = (folder, selected, files) => scanNodeSources(folder, selected, files, runCommand, async names => {
+      for (const name of names) currentPackages.add(name);
+      if (collectCatalogs) await catalogs.packages(names);
+    });
+    const nodeScan = createNodeScanCache(sourceFolder, roots, scanWithInventory);
     const trivyCache = join(temporary, "trivy-cache");
     await mkdir(trivyCache, { mode: 0o700 });
     let imageScans = Promise.resolve();
@@ -124,6 +150,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const baseline = baselineScan.findings;
     await record({ ...securityCheck("OSV", "before", "Dépendances verrouillées des services sélectionnés", baseline), checkedAt: baselineScan.checkedAt });
     const imageBaselines = new Map<string, SecurityFinding[]>();
+    const imageSecurity = new Map<string, string>();
+    const imageReferences = new Map<string, { image: string; digest: string }[] | null>();
     for (const root of [...new Set(roots)]) {
       const dockerfile = (root ? root + "/" : "") + "Dockerfile";
       if (!names.includes(dockerfile)) continue;
@@ -132,9 +160,70 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       imageBaselines.set(root, findings);
       await record(securityCheck("Trivy", "before", `Image de base actuelle ${image} (hors code applicatif)`, findings), results.filter((_, index) => targets[index].root === root));
     }
-    await progress("updating", "Actualisation de Node et des dépendances, puis validation isolée.");
+    // A receipt replaces only version research and the prior exact-input script
+    // validation. Security scans, image start/Node probes and production evidence
+    // are always fresh, and any drift returns to the full solver.
+    if (receipt && nodeSecurityHash(baseline) === receipt.securityHash) {
+      await progress("checking", "Configuration inchangée : contrôle frais de sécurité et des images avant réutilisation de la validation.");
+      const reference = receipt;
+      const current = await checkCurrentNodeConfiguration(receipt, {
+        baseline,
+        images: async () => {
+          let unchanged = true;
+          requireSecurityPass(securityCheck("OSV", "candidate", "Configuration déjà validée", baseline, baseline));
+          for (const root of [...new Set(roots)]) {
+            const file = (root ? root + "/" : "") + "Dockerfile";
+            if (!names.includes(file)) continue;
+            await validateDockerfileCandidate(sourceFolder, root, names, version, async image => {
+              const findings = (await scanImage(image)).map(entry => ({ ...entry, scope: root }));
+              await record(securityCheck("Trivy", "candidate", `Image Docker actuelle : ${root || "racine"}`, findings, [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root));
+              if (nodeSecurityHash(findings) !== reference.imageSecurity.find(item => item.root === root)?.hash) unchanged = false;
+            });
+          }
+          return unchanged;
+        },
+        finalScan: async () => {
+          const final = await nodeScan(names, true);
+          await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de la configuration actuelle", final.findings, baseline), checkedAt: final.checkedAt });
+          return final.findings;
+        },
+        sources: async () => { await changedSources(sourceFolder, before, new Set()); },
+        catalogs: () => unchangedNodeInputs(reference),
+      });
+      if (current) {
+        const currentTargets = await updateTargets(run.projectId);
+        if (targets.some(target => JSON.stringify(currentTargets.find(item => item.id === target.id)) !== JSON.stringify(target))) throw new ApiError("La configuration du projet a changé pendant la vérification. Validation annulée.");
+        if (representative.mode === "git") {
+          const head = await githubRequest(`/repos/${representative.repository}/git/ref/heads/${encodeURIComponent(representative.branch!)}`, githubUpdateToken(representative.repository!));
+          if (head.object.sha !== expected) throw new ApiError("Le dépôt a changé pendant la vérification. La validation précédente ne peut pas être réutilisée.", 409);
+        } else if ((await readUpdateSource(representative.id))?.revision !== original!.revision) throw new ApiError("Les sources ont changé pendant la vérification. Validation annulée.", 409);
+        await verifyNodeServices(results, async index => {
+          const target = targets[index], result = results[index];
+          await confirmDeployedNode(target, result, { deploymentId: result.previousDeploymentId!, commit: expected || undefined }, version, progress);
+          const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after")?.nodeEvidence;
+          if (!sameNodeReceiptProof(reference, target.id, proof)) throw new ApiError("L’image active ou le type de preuve Node a changé pendant la vérification. Validation non réutilisable.", 422);
+          await checkPublicSite(target.url!);
+          const validation = receipt!.validations.find(item => item.targetId === target.id)!;
+          result.checks!.push({ tool: "Validation", phase: "candidate", checkedAt: validation.checkedAt, scope: validation.scope, status: validation.status, findings: [], message: `Validation du ${validation.checkedAt} réutilisée pour les mêmes sources, catalogues et environnement ; scripts non réexécutés. ${validation.message}` });
+          result.warnings = [...new Set([...result.warnings, ...(receipt!.warnings.find(item => item.targetId === target.id)?.messages || [])])];
+          result.stage = "completed";
+          result.message = "Configuration déjà validée et toujours à jour ; sécurité, Node déployé et HTTPS revérifiés.";
+        });
+        run.nodeReceipts ||= [];
+        run.nodeReceipts.push(receipt); // Keep the original heavy-validation age.
+        return;
+      }
+    }
+    collectCatalogs = true;
+    await catalogs.packages([...currentPackages]);
+    await progress("updating", "Analyse complète nécessaire : actualisation de Node et des dépendances, puis validation isolée.");
+    let runtimeRefreshed = false;
+    const runtime = nodeValidationRuntime(version, async (command, args, options) => {
+      if (!runtimeRefreshed) { await runCommand("docker", ["pull", `node:${version}-bookworm`], { timeout: 5 * 60_000 }); runtimeRefreshed = true; }
+      return runCommand(command, args, options);
+    });
     function serviceChecks(workingFolder: string, selectedRoots: string[]): NodeUpdateChecks {
-      const scanSources = createNodeScanCache(workingFolder, selectedRoots);
+      const scanSources = createNodeScanCache(workingFolder, selectedRoots, scanWithInventory);
       const selectedResults = results.filter((_, index) => selectedRoots.includes(targets[index].root));
       return {
       resolved: async resolvedNames => {
@@ -142,7 +231,14 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const check = securityCheck("OSV", "candidate", `Dépendances verrouillées : ${selectedRoots.map(root => root || "racine").join(", ")}`, scan.findings, baseline);
         await record({ ...check, checkedAt: scan.checkedAt, message: check.message + (scan.reused.length ? ` ${scan.reused.length} verrou(s) inchangé(s) : analyse de cette exécution réutilisée (moins de cinq minutes).` : "") }, selectedResults);
       },
-      image: async (root, image) => { await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, (await scanImage(image)).map(entry => ({ ...entry, scope: root })), [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root)); },
+      image: async (root, image) => {
+        const findings = (await scanImage(image)).map(entry => ({ ...entry, scope: root }));
+        await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, findings, [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root));
+        imageSecurity.set(root, nodeSecurityHash(findings));
+        const file = (root ? root + "/" : "") + "Dockerfile";
+        const references = await Promise.all(dockerNodeBases(await readFile(join(workingFolder, file), "utf8")).map(image => nodeImageReceipt(image, image)));
+        imageReferences.set(root, references.every(Boolean) ? references as { image: string; digest: string }[] : null);
+      },
       reused: message => progress("updating", message),
       validated: async (root, scripts) => {
         const browser = scripts.includes("test:e2e"), tests = scripts.some(name => name === "test" || name === "test:integration");
@@ -155,6 +251,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       };
     }
     const prepared = await prepareNodeServices(sourceFolder, roots, names, version, serviceChecks, {
+      transport: catalogs.transport,
+      runtime,
       dockerRoots: targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root),
       progress: async (root, phase) => {
         const message = { preparing: "Préparation des versions", prepared: "Versions préparées ; attente du contrôle de l’ensemble", validating: "Validation des versions assemblées", ready: "Proposition validée ; attente de publication" }[phase];
@@ -177,6 +275,29 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const result = results[index];
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
     }
+    async function rememberValidation() {
+      try {
+        const catalogEntries = await catalogs.snapshot();
+        const validationImage = await runtime.image();
+        const validationBase = await nodeImageReceipt(`node:${version}-bookworm`, validationImage);
+        if (!catalogEntries || !validationBase || [...imageReferences.values()].some(value => !value)) return;
+        const images = [...new Map([validationBase, ...[...imageReferences.values()].flatMap(value => value || [])].map(image => [image.image, image])).values()];
+        const deployments = targets.flatMap((target, index) => {
+          const proof = results[index].checks?.findLast(check => check.tool === "Node" && check.phase === "after" && check.status === "passed")?.nodeEvidence;
+          return proof ? [{ targetId: target.id, deploymentId: proof.deploymentId, imageDigest: proof.imageDigest, source: proof.source, usage: proof.usage }] : [];
+        });
+        const validations = nodeReceiptValidations(targets, results.map(result => result.checks));
+        if (deployments.length !== targets.length || validations.length !== targets.length) return;
+        const saved = nodeReceiptDraft({ ...key, sourceHash: nodeSourceHash(await snapshotSources(sourceFolder, [...new Set([...names, ...changes.map(file => file.path)])])) }, catalogEntries, {
+          validatedAt: new Date(Math.min(...validations.map(item => Date.parse(item.checkedAt)))).toISOString(), images, validationImage, deployments, validations,
+          securityHash: nodeSecurityHash(finalScan.findings), imageSecurity: [...imageSecurity].map(([root, hash]) => ({ root, hash })),
+          warnings: results.map(result => ({ targetId: result.targetId, messages: result.warnings })),
+        });
+        if (!saved || !await unchangedNodeImages(saved)) return;
+        run.nodeReceipts ||= [];
+        run.nodeReceipts.push(saved);
+      } catch { /* Optional optimization: an unavailable catalog never blesses a receipt. */ }
+    }
     if (!changes.length) {
       await verifyNodeServices(results, async index => {
         const result = results[index];
@@ -187,6 +308,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         result.stage = "completed";
         result.message = "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
       });
+      await rememberValidation();
       return;
     }
     const currentTargets = await updateTargets(run.projectId);
@@ -235,6 +357,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       result.stage = "completed";
       result.message = "Mise à jour déployée et contrôle HTTPS réussi.";
     });
+    await rememberValidation();
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress) {

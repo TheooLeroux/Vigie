@@ -2,11 +2,12 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promi
 import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { ApiError } from "../http";
-import { changedSources, nodeValidationRuntime, prepareNodeSources, snapshotSources, validatePreparedNodeSources, type NodeUpdateChecks } from "./node";
+import { changedSources, nodeValidationRuntime, prepareNodeSources, snapshotSources, validatePreparedNodeSources, type NodeUpdateChecks, type NodeValidationRuntime } from "./node";
 
 type CheckFactory = (folder: string, roots: string[], phase: "prepare" | "final") => NodeUpdateChecks;
 type Options = {
   transport?: typeof fetch;
+  runtime?: NodeValidationRuntime;
   dockerRoots?: string[];
   concurrency?: number;
   prepare?: typeof prepareNodeSources;
@@ -71,12 +72,12 @@ export async function prepareNodeServices(folder: string, roots: string[], names
   const limit = options.concurrency ?? nodeServiceConcurrency();
   if (!Number.isInteger(limit) || limit < 1 || limit > 2) throw new ApiError("La concurrence des services doit être comprise entre un et deux.");
   if (selected.length === 1 || await coordinatedLayout(folder, selected, names)) {
-    return prepare(folder, selected, names, nodeVersion, options.transport || fetch, options.dockerRoots || [], undefined, checks(folder, selected, "prepare"));
+    return prepare(folder, selected, names, nodeVersion, options.transport || fetch, options.dockerRoots || [], options.runtime ? { limits: new Map(), attempt: 0, runtime: options.runtime } : undefined, checks(folder, selected, "prepare"));
   }
   const original = await snapshotSources(folder, names);
   const temporary = await mkdtemp(join(tmpdir(), "vigie-node-services-"));
   const validations = new Set<string>();
-  const runtime = nodeValidationRuntime(nodeVersion);
+  const runtime = options.runtime || nodeValidationRuntime(nodeVersion);
   try {
     const prepared = await boundedMap(selected, limit, async root => {
       const working = await mkdtemp(join(temporary, "prepare-"));

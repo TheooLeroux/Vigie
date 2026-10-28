@@ -20,7 +20,11 @@ export function updatesEnabled() {
 export async function projectUpdates(projectId: string): Promise<UpdateState> {
   const targets = await updateTargets(projectId);
   const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
-  return { enabled: updatesEnabled(), targets, runs: rows.map(row => JSON.parse(row.data)) };
+  return { enabled: updatesEnabled(), targets, runs: rows.map(row => {
+    const run = JSON.parse(row.data) as UpdateRun;
+    delete run.nodeReceipts;
+    return run;
+  }) };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
 export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate) {

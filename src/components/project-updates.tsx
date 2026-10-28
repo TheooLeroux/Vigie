@@ -44,14 +44,16 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
-export function ProjectUpdates({ projectId, request, onComplete }: { projectId: string; request: Request; onComplete: () => Promise<void> }) {
+export function ProjectUpdates({ projectId, request, onComplete, onState }: { projectId: string; request: Request; onComplete: () => Promise<void>; onState?: (projectId: string, state: UpdateState | null) => void }) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true), completed = useRef("");
   const refresh = useCallback(async () => {
-    const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`);
-    if (alive.current) { setState(next); setError(""); }
-    return next;
-  }, [projectId, request]);
+    try {
+      const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`);
+      if (alive.current) { setState(next); setError(""); onState?.(projectId, next); }
+      return next;
+    } catch (error) { if (alive.current) onState?.(projectId, null); throw error; }
+  }, [projectId, request, onState]);
   useEffect(() => {
     alive.current = true;
     void refresh().catch(error => { if (alive.current) setError(error.message); });
@@ -66,7 +68,7 @@ export function ProjectUpdates({ projectId, request, onComplete }: { projectId: 
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const available = state?.targets.filter(target => !target.unavailable) || [];
   const unresolved = latest?.stage === "attention";
-  return <section className="panel project-updates" aria-label="Mises à jour du projet">
+  return <section id="project-updates" className="panel project-updates" aria-label="Mises à jour du projet">
     <div className="updates-heading"><div><h2>Mises à jour</h2><p>Node LTS et dépendances stables, ou WordPress et extensions.</p></div>
       <button className="button primary" disabled={busy || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
         setBusy(true); setError("");

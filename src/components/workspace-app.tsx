@@ -62,6 +62,8 @@ import {
 import { VercelInventoryPanel } from "./vercel-panel";
 import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
 import { ProjectUpdates } from "./project-updates";
+import { ProjectHealthSummary } from "./project-health-summary";
+import type { UpdateState } from "@/lib/updates/types";
 
 type View = "sites" | "clients" | "connections" | "backup" | "activity";
 type Dialog =
@@ -195,6 +197,8 @@ export function WorkspaceApp({
     [actionBusy, setActionBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [projectUpdateState, setProjectUpdateState] = useState<{ projectId: string; state: UpdateState | null; unavailable: boolean } | null>(null);
+  const onProjectUpdateState = useCallback((projectId: string, state: UpdateState | null) => setProjectUpdateState(previous => ({ projectId, state: state || (previous?.projectId === projectId ? previous.state : null), unavailable: state === null })), []);
   function notify(message: string) {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -617,10 +621,12 @@ export function WorkspaceApp({
           ))}
         </div>
         <div className="project-content">
+          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
           {p.description && <p className="project-intro">{p.description}</p>}
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onComplete={refresh} />
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onComplete={refresh} onState={onProjectUpdateState} />
           <section
             className="project-monitoring"
+            id="project-technical"
             aria-label="Suivi technique du projet"
           >
             <div className="project-section-title">

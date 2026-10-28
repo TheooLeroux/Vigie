@@ -66,6 +66,9 @@ test("OSV : seuls les manifestes et verrous sont fournis, jamais les sources ou 
       return JSON.stringify({ results: [{ source: { path }, packages: [] }] });
     };
     assert.deepEqual(await scanNodeSources(folder, [""], ["package.json", "package-lock.json", "private.txt"], execute), []);
+    let inventory: string[] = [];
+    await scanNodeSources(folder, [""], ["package.json", "package-lock.json"], async (_command, args) => JSON.stringify({ results: [{ source: { path: args.find(arg => arg.startsWith("--lockfile="))!.slice(11) }, packages: ["direct", "indirect"].map(name => ({ package: { name, version: "1.0.0", ecosystem: "npm" } })) }] }), async names => { inventory = names; });
+    assert.deepEqual(inventory, ["direct", "indirect"], "le catalogue doit couvrir aussi les paquets sans alerte, pas seulement les vulnérabilités");
     await assert.rejects(scanNodeSources(folder, [""], ["package.json", "package-lock.json"], async () => '{"results":[]}'), /tous les fichiers/);
     await assert.rejects(scanNodeSources(folder, [""], ["package.json", "package-lock.json"], async () => '{}'), /rapport de sécurité/);
     await assert.rejects(scanNodeSources(folder, [""], ["package.json", "package-lock.json"], async (_command, args) => JSON.stringify({ results: [{ source: { path: args.find(arg => arg.startsWith("--lockfile="))!.slice(11) }, packages: [{ package: { name: "unknown", version: "git-commit", ecosystem: "Git" } }] }] })), /identifier précisément/);

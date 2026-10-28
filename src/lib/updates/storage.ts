@@ -19,6 +19,10 @@ export async function writeUpdateRun(run: UpdateRun) {
   run.updatedAt = new Date().toISOString();
   await (await updateStorage()).prepare("UPDATE update_runs SET stage=?,data=? WHERE id=?").run(run.stage, JSON.stringify(run), run.id);
 }
+export async function completedNodeRuns(projectId: string, hashes: string[]) {
+  const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? AND stage='completed' AND data LIKE ? AND data LIKE ? AND data LIKE ? ORDER BY json_extract(data,'$.updatedAt') DESC LIMIT 10").all(projectId, ...hashes.map(hash => `%${hash}%`)) as { data: string }[];
+  return rows.flatMap(row => { try { return [JSON.parse(row.data) as UpdateRun]; } catch { return []; } });
+}
 export async function readUpdateSource(targetId: string) {
   const row = await (await updateStorage()).prepare("SELECT secret_cipher,revision FROM update_sources WHERE target_id=?").get(targetId) as { secret_cipher: string; revision: number } | undefined;
   return row ? { settings: JSON.parse(openConnectorSecret(row.secret_cipher, `vigie:updates:source:${targetId}`)) as SourceSettings, revision: row.revision } : null;

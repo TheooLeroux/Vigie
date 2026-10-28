@@ -13,7 +13,7 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveVercelConnection, applyVercelSnapshot, linkVercelProject } from "../src/lib/vercel";
 import { projectUpdates, startProjectUpdate, configureUpdateSource } from "../src/lib/updates/service";
 import { updateTargets, sourceRoot } from "../src/lib/updates/targets";
-import { readUpdateRun, readUpdateSource, updateStorage } from "../src/lib/updates/storage";
+import { completedNodeRuns, readUpdateRun, readUpdateSource, updateStorage } from "../src/lib/updates/storage";
 import { executeUpdate, publishGitVersions } from "../src/lib/updates/executor";
 import { latestNode, upgradeManifest, managerCommands, snapshotSources, changedSources, prepareNodeSources } from "../src/lib/updates/node";
 import { runCommand, DependencyValidationError } from "../src/lib/updates/process";
@@ -60,6 +60,19 @@ test("Mises à jour : un double clic ne crée qu’un traitement et un seul envo
   assert.equal(first.id, second.id);
   assert.equal(calls, 1);
   assert.equal((await projectUpdates(project.id)).runs.length, 1);
+});
+test("Reprises Node : seuls les traitements terminés du bon projet sont éligibles, les références restent internes", async () => {
+  const { project } = await fixture(), other = await fixture();
+  const db = await updateStorage(), hashes = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+  for (const [projectId, stage] of [[project.id, "completed"], [project.id, "attention"], [project.id, "failed"], [other.project.id, "completed"]]) {
+    const id = randomUUID();
+    const data = { id, projectId, stage, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nodeReceipts: [{ sourceHash: hashes[0], targetsHash: hashes[1], policyHash: hashes[2] }] };
+    await db.prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(id, projectId, stage, JSON.stringify(data));
+  }
+  const runs = await completedNodeRuns(project.id, hashes);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].stage, "completed");
+  assert.equal((await projectUpdates(project.id)).runs.some(run => "nodeReceipts" in run), false);
 });
 test("Mises à jour : le verrou couvre le dépôt partagé et pas seulement le service", async () => {
   const repository = `qa/shared-${randomUUID()}`;

@@ -52,6 +52,9 @@ export function dockerRuntimeBase(source: string) {
   const last = bases.at(-1)!;
   return `node:${last.version}${last.suffix}`;
 }
+export function dockerNodeBases(source: string) {
+  return [...new Set(replacements(source).filter(item => item.image).map(item => source.slice(item.start, item.end)))];
+}
 export function rewriteDockerfile(source: string, nodeVersion: string, versions: Record<string, string>, release?: "trixie" | "bookworm" | "alpine") {
   if (!stableVersion(nodeVersion)) throw new ApiError("Version Node invalide pour le Dockerfile.");
   let result = source;
@@ -119,7 +122,7 @@ export async function validateDockerfile(folder: string, root: string, names: st
   }
   throw failure;
 }
-async function validateDockerfileCandidate(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
+export async function validateDockerfileCandidate(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
   const prefix = root ? root + "/" : "", source = await readFile(join(folder, prefix + "Dockerfile"), "utf8");
   replacements(source);
   const expose = [...source.matchAll(/^\s*EXPOSE\s+(\d+)(?:\/tcp)?\s*$/gim)].at(-1);

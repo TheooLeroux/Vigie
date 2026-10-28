@@ -8,7 +8,7 @@ import { readDockerNode, type DockerNodeProof } from "./docker-node";
 export type NodeDeploymentReference = { deploymentId: string; commit?: string };
 type ActiveDeployment = { id: string; status: string; meta?: unknown };
 
-function activeNodeImage(target: UpdateTarget, reference: NodeDeploymentReference, expected: string, active: ActiveDeployment[]) {
+export function activeNodeImage(target: UpdateTarget, reference: NodeDeploymentReference, expected: string, active: ActiveDeployment[]) {
   const fail = (message: string): never => { throw new ApiError(message, 422); };
   if (!stableVersion(expected)) return fail("Version Node cible invalide ; déploiement non validé.");
   const deployment = active.find(item => item.id === reference.deploymentId && item.status === "SUCCESS");
