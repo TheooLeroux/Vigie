@@ -50,7 +50,8 @@ test("Trivy : base partagée dans le job, rapports distincts et mise à jour de 
         assert.ok(!args.some(arg => /skip.*update|ignore.*unfixed/.test(arg)));
         working.push(options!.cwd!);
         assert.equal(options!.env!.DATABASE_URL, undefined);
-        return JSON.stringify({ SchemaVersion: 2, Metadata: { OS: { Family: "alpine" } }, Results: [{ Target: image }] });
+        await writeFile(args[args.indexOf("--output") + 1], JSON.stringify({ SchemaVersion: 2, Metadata: { OS: { Family: "alpine" } }, Results: [{ Target: image }] }));
+        return "";
       }, false, folder);
     }
     assert.notEqual(working[0], working[1]);

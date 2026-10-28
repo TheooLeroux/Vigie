@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -13,7 +13,7 @@ const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().regex(/^\d+\.\d+\.\d+$/)).max(200).optional() });
 const vulnerability = z.object({ id: identifier, aliases: z.array(identifier).max(100).optional(), database_specific: z.object({ severity: z.string().optional() }).passthrough().optional() }).passthrough();
 const osvSchema = z.object({ results: z.array(z.object({ source: z.object({ path: z.string() }), packages: z.array(z.object({ package: z.object({ name: identifier, version: z.string().max(200).optional(), ecosystem: z.string().optional() }), vulnerabilities: z.array(vulnerability).nullish(), groups: z.array(z.object({ ids: z.array(identifier), max_severity: z.string().optional() })).nullish() })) })) });
-const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
+const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), EOSL: z.boolean().optional(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
 
 export function severity(value: unknown): SecurityFinding["severity"] {
   const label = typeof value === "string" ? value.toLowerCase() : "";
@@ -36,9 +36,10 @@ export function parseOsv(raw: string) {
 export function parseTrivy(raw: string, baseline = false) {
   const report = trivySchema.parse(JSON.parse(raw));
   if (!report.Metadata.OS?.Family || !report.Results.length) throw new ApiError("Trivy n’a pas identifié le système de l’image. Analyse incomplète.", 502);
-  if (report.Metadata.OS.Eosl && !baseline) throw new ApiError("L’image utilise une distribution système en fin de support. Publication annulée.");
+  const endOfLife = report.Metadata.OS.EOSL || report.Metadata.OS.Eosl;
+  if (endOfLife && !baseline) throw new ApiError("L’image utilise une distribution système en fin de support. Publication annulée.");
   const findings: SecurityFinding[] = report.Results.flatMap(result => (result.Vulnerabilities || []).map(entry => findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity) })));
-  if (report.Metadata.OS.Eosl) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
+  if (endOfLife) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
   return findings;
 }
 export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["phase"], scope: string, findings: SecurityFinding[], _before: SecurityFinding[] = []): UpdateCheck {
@@ -65,8 +66,10 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
       const previous = latest.get(check.tool);
       if (!previous || check.phase !== "before" || previous.phase === "before") latest.set(check.tool, check);
     }
-    for (const check of latest.values()) if (check.findings.length || check.status === "blocked") {
-      const failure = check.findings.length ? securityCheck(check.tool, "after", check.scope, check.findings) : check;
+    for (const check of latest.values()) {
+      const findings = check.tool === "WPVulnerability" && check.phase !== "before" ? check.findings.filter(finding => !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version)) : check.findings;
+      if (!findings.length && check.status !== "blocked") continue;
+      const failure = findings.length ? securityCheck(check.tool, "after", check.scope, findings) : check;
       result.stage = result.commit || result.deploymentId || result.backup ? "attention" : "failed";
       result.message = failure.message;
       unresolved ||= failure;
@@ -140,8 +143,16 @@ export async function scanDockerImage(image: string, execute = runCommand, basel
   if (!/^(?:node:[a-z0-9.-]+|vigie-validation:[a-f0-9-]{36})$/.test(image)) throw new ApiError("Image non autorisée pour l’analyse de sécurité.");
   const temporary = await mkdtemp(join(tmpdir(), "vigie-trivy-"));
   try {
-    const output = await execute("trivy", ["image", "--scanners=vuln", "--format=json", "--quiet", "--exit-code=0", "--cache-dir", cacheDirectory || temporary, "--timeout=5m", image], { cwd: temporary, env: scannerEnvironment(temporary), timeout: 360_000 });
-    try { return parseTrivy(output, baseline); } catch (error) {
+    // JSON includes long advisory descriptions and image metadata. Keep the
+    // full report in a private bounded file instead of the subprocess log;
+    // never truncate advisories or drop OS/EOSL data to fit the stdout limit.
+    const reportPath = join(temporary, "report.json");
+    await execute("trivy", ["image", "--scanners=vuln", "--format=json", "--output", reportPath, "--quiet", "--exit-code=0", "--cache-dir", cacheDirectory || temporary, "--timeout=5m", image], { cwd: temporary, env: scannerEnvironment(temporary), timeout: 360_000 });
+    try {
+      const info = await lstat(reportPath);
+      if (!info.isFile() || info.size > 64 * 1024 * 1024) throw new ApiError("Le rapport Trivy dépasse le budget de lecture de 64 Mio. Analyse non validée.", 502);
+      return parseTrivy(await readFile(reportPath, "utf8"), baseline);
+    } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError("Trivy n’a pas fourni un rapport d’image exploitable. Aucune publication autorisée.", 502);
     }

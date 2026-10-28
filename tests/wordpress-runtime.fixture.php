@@ -11,7 +11,7 @@ function wp_version_check() {}
 function wp_update_plugins() {}
 function wp_update_themes() {}
 function get_site_transient($name) { return false; }
-function get_plugins() { return array('private/plugin.php' => array('Name' => 'Private', 'Version' => '1.0', 'RequiresPHP' => '7.4', 'RequiresWP' => '6.0')); }
+function get_plugins() { return array('private/plugin.php' => array('Name' => 'Private', 'Version' => '1.0', 'RequiresPHP' => '7.4', 'RequiresWP' => '6.0', 'UpdateURI' => 'https://private.invalid/update?token=never-return')); }
 function get_mu_plugins() { return array(); }
 function is_plugin_active($file) { return true; }
 function is_plugin_active_for_network($file) { return false; }

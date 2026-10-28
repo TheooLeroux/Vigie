@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { wordpressBackupScript, wordpressUpdateScript } from "../src/lib/updates/wordpress";
+import { parseWordPressPlan, wordpressPlanScript } from "../src/lib/updates/wordpress-security";
 
 function docker(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -27,7 +28,7 @@ test("WordPress réel : sauvegarde, mise à jour core/extensions/thèmes et rest
     await docker(["run", "-d", "--name", db, "--network", network, "--env", "MARIADB_ROOT_PASSWORD=fixture-root", "--env", "MARIADB_DATABASE=fixture_wp", "--env", "MARIADB_USER=fixture", "--env", "MARIADB_PASSWORD=fixture-only", "mariadb:11.4"]);
     let ready = false;
     for (let attempt = 0; attempt < 60; attempt++) {
-      try { await docker(["exec", db, "mariadb-admin", "ping", "-uroot", "-pfixture-root"]); ready = true; break; }
+      try { await docker(["exec", db, "mariadb", "--protocol=tcp", "-h127.0.0.1", "-ufixture", "-pfixture-only", "fixture_wp", "-e", "SELECT 1"]); ready = true; break; }
       catch { await new Promise(resolve => setTimeout(resolve, 1000)); }
     }
     assert.ok(ready, "La base de test doit être prête.");
@@ -52,13 +53,14 @@ wp --path=${root} post create --post_title='Vigie backup proof' --post_status=pu
     const backup = saved.match(/^VIGIE_BACKUP=(.+)$/m)?.[1];
     assert.ok(backup);
     assert.ok(backup.startsWith(`/home/vigietest/.vigie-backups/${runId}/`));
-    const updated = await execute(wordpressUpdateScript(root, backup));
+    const plan = parseWordPressPlan(await execute(wordpressPlanScript(root)));
+    const updated = await execute(wordpressUpdateScript(root, backup, plan));
     assert.match(updated, /^VIGIE_WORDPRESS=/m);
     assert.doesNotMatch(updated, /^VIGIE_WORDPRESS=6\.8\.3$/m);
     assert.match(updated, /^VIGIE_PLUGINS=0$/m);
     assert.match(updated, /^VIGIE_THEMES=\d+$/m);
     assert.equal((await execute(`wp --path=${root} theme get twentytwentyfour --field=version`)).trim(), "1.1");
-    const repeated = await execute(wordpressUpdateScript(root, backup));
+    const repeated = await execute(wordpressUpdateScript(root, backup, parseWordPressPlan(await execute(wordpressPlanScript(root)))));
     assert.match(repeated, /^VIGIE_PLUGINS=0$/m);
     assert.match(repeated, /^VIGIE_THEMES=\d+$/m);
     await execute(`test ! -f ${root}/.maintenance`);

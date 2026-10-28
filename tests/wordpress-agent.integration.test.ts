@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { agentBundle, agentDirectory, localAgentOperation, signAgentPayload, agentPlan, type AgentFiles, type AgentOperation } from "../src/lib/updates/wordpress-agent";
 import { freeWordPressScanner } from "../src/lib/updates/wordpress-free-security";
-import { securityCheck, requireSecurityPass } from "../src/lib/updates/security";
+import { requireSecurityPass } from "../src/lib/updates/security";
+import { wordpressMaintenanceCheck } from "../src/lib/updates/wordpress-maintenance";
 
 async function docker(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -27,7 +28,7 @@ test("Agent sans SSH : copie WordPress réelle, mises à jour, anti-rejeu et ré
     await docker(["volume", "create", volume]);
     await docker(["run", "-d", "--name", db, "--network", network, "--env", "MARIADB_ROOT_PASSWORD=fixture-root", "--env", "MARIADB_DATABASE=fixture_original", "--env", "MARIADB_USER=fixture", "--env", "MARIADB_PASSWORD=fixture-only", "mariadb:11.4"]);
     let ready = false;
-    for (let i = 0; i < 60; i++) { try { await docker(["exec", db, "mariadb", "-uroot", "-pfixture-root", "-e", "SELECT 1"]); ready = true; break; } catch { await new Promise(resolve => setTimeout(resolve, 1000)); } }
+    for (let i = 0; i < 60; i++) { try { await docker(["exec", db, "mariadb", "--protocol=tcp", "-h127.0.0.1", "-ufixture", "-pfixture-only", "fixture_original", "-e", "SELECT 1"]); ready = true; break; } catch { await new Promise(resolve => setTimeout(resolve, 1000)); } }
     assert.ok(ready);
     await docker(["exec", db, "mariadb", "-uroot", "-pfixture-root", "-e", "CREATE DATABASE fixture_copy; GRANT ALL ON fixture_copy.* TO 'fixture'@'%';"]);
     await docker(["run", "-d", "--name", cli, "--network", network, "--publish", "127.0.0.1::8080", "--env", "HOME=/home/vigietest", "--mount", `type=volume,source=${volume},target=/home/vigietest`, "--entrypoint", "sh", "wordpress:cli-php8.3", "-c", "sleep 1800"]);
@@ -40,6 +41,7 @@ wp --path=${original} config set DISABLE_WP_CRON true --raw
 wp --path=${original} config set AUTOMATIC_UPDATER_DISABLED true --raw
 wp --path=${original} core install --url=http://fixture.invalid --title='Original immutable' --admin_user=fixture --admin_password=fixture-only-password --admin_email=fixture@example.test --skip-email
 wp --path=${original} plugin install akismet --version=5.3 --force
+wp --path=${original} plugin install classic-editor --version=1.5 --force
 wp --path=${original} theme install twentytwentyfour --version=1.1 --force
 mkdir -p ${original}/wp-content/themes/custom-child ${original}/wp-content/themes/integer-theme
 printf '/* Theme Name: Custom child\nTemplate: twentytwentyfour\n*/\n' > ${original}/wp-content/themes/custom-child/style.css
@@ -66,16 +68,31 @@ wp --path=${root} option update siteurl ${url}
     };
     const op = (run: string, name: AgentOperation, extra = {}, requestId?: string) => localAgentOperation(files, settings, root, run, name, extra, { timeoutMs: 600_000, pollMs: 1, sleep: async () => { await tick(); }, requestId });
     const run = randomUUID();
+    await shell(`mkdir -p ${root}/wp-content/plugins/vigie-private
+printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https://private.invalid/update?token=never-return\n*/\n' > ${root}/wp-content/plugins/vigie-private/main.php
+`);
+    // Preserve a locally edited public plugin while a different public plugin updates.
+    await exec(["sh", "-c", 'printf "\\n// Vigie custom code must survive\\n" >> "$1"', "sh", `${root}/wp-content/plugins/akismet/akismet.php`]);
+    const customBefore = await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]);
     let plan = agentPlan((await op(run, "inspect")).plan); report.before = plan;
+    assert.equal(plan.plugins.find(item => item.slug === "akismet")?.target, "5.3");
+    assert.match(plan.plugins.find(item => item.slug === "akismet")?.manualReason || "", /personnalisés|intégrité/);
+    assert.notEqual(plan.plugins.find(item => item.slug === "classic-editor")?.target, "1.5");
+    assert.equal(plan.plugins.find(item => item.slug === "vigie-private")?.updateOrigin, "external");
+    assert.equal(JSON.stringify(plan).includes("never-return"), false);
     const themesBefore = await shell(`wp --path=${root} theme list --fields=name,version --format=json`);
     assert.equal(plan.themes.find(theme => theme.slug === "custom-child")?.current, "");
     assert.equal(plan.themes.find(theme => theme.slug === "integer-theme")?.current, "27");
     if (process.env.VIGIE_TEST_WORDPRESS_FREE_API === "1") {
-      const scan = freeWordPressScanner(fetch, { persistentCache: false });
+      // The custom component's provider is deliberately unavailable. The core
+      // and public plugin still use the real public service before installation.
+      const transport: typeof fetch = (input, options) => new URL(String(input)).pathname === "/plugin/akismet/" ? Promise.resolve(new Response("Fixture provider unavailable", { status: 503 })) : fetch(input, options);
+      const scan = freeWordPressScanner(transport, { persistentCache: false });
       plan = await scan.prepare(plan);
-      const before = await scan(plan, false);
-      requireSecurityPass(securityCheck("WPVulnerability", "candidate", "Isolated copy", await scan(plan, true), before));
-      check("real free vulnerability API validated without a token");
+      await scan(plan, false);
+      requireSecurityPass(wordpressMaintenanceCheck(plan, "candidate", "Isolated copy", await scan(plan, true)));
+      assert.ok(scan.warnings.some(warning => warning.startsWith("akismet : contrôle de sécurité indisponible")));
+      check("real core/public-plugin vulnerability API validated; unavailable custom-plugin provider does not block maintenance");
     }
     assert.equal(plan.wordpress.current, "6.8.3"); check("copy inspected without SSH");
     const forged = { id: randomUUID(), runId: run, root, operation: "backup", issuedAt: Math.floor(Date.now()/1000), webPhp: php };
@@ -96,6 +113,10 @@ wp --path=${root} option update siteurl ${url}
     const updated = agentPlan((await op(run, "update", { plan, webPhp: php })).plan); report.after = updated;
     assert.equal(updated.wordpress.current, plan.wordpress.target); assert.notEqual(updated.wordpress.current, "6.8.3");
     assert.equal(updated.plugins.find(p=>p.slug==='akismet')?.current, plan.plugins.find(p=>p.slug==='akismet')?.target); check("core and extensions updated to exact plan");
+    assert.equal(await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]), customBefore);
+    assert.equal(updated.plugins.find(item => item.slug === "classic-editor")?.current, plan.plugins.find(item => item.slug === "classic-editor")?.target);
+    assert.notEqual(updated.plugins.find(item => item.slug === "classic-editor")?.current, "1.5");
+    check("customized public plugin preserved byte for byte while another plugin updates");
     assert.equal(updated.php, php);
     assert.equal(await shell(`wp --path=${root} theme list --fields=name,version --format=json`), themesBefore);
     check("PHP and all themes, including versionless and integer-version themes, unchanged");
@@ -124,6 +145,19 @@ wp --path=${root} option update siteurl ${url}
     assert.match(await shell(`wp --path=${root} post list --format=json`), /Vigie copy proof/);
     await shell(`test ! -f ${root}/introduced-after-backup.php`);
     assert.equal(await httpStatus(), 200); check("independent agent restored code and database after WordPress failed");
+    await exec(["sh", "-c", 'printf "\\n// Customized core fixture\\n" >> "$1"', "sh", `${root}/wp-includes/version.php`]);
+    const customCore = agentPlan((await op(randomUUID(), "inspect")).plan);
+    assert.equal(customCore.wordpress.target, customCore.wordpress.current);
+    assert.match(customCore.wordpress.manualReason || "", /personnalisés|intégrité/);
+    assert.equal(customCore.wordpress.integrity, "unverified");
+    const coreHash = await exec(["sha256sum", `${root}/wp-includes/version.php`]);
+    const secondRun = randomUUID();
+    await op(secondRun, "backup", { webPhp: php });
+    const withCustomCore = agentPlan((await op(secondRun, "update", { plan: customCore, webPhp: php })).plan);
+    assert.equal(withCustomCore.wordpress.current, "6.8.3");
+    assert.equal(await exec(["sha256sum", `${root}/wp-includes/version.php`]), coreHash);
+    assert.notEqual(withCustomCore.plugins.find(item => item.slug === "classic-editor")?.current, "1.5");
+    check("customized core retained byte for byte without blocking other plugin updates");
     report.completedAt = new Date().toISOString(); report.status = "passed";
   } catch (error) { report.status = "failed"; report.failure = error instanceof Error ? error.message : "test failure"; throw error; }
   finally {

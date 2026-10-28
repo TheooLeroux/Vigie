@@ -22,6 +22,7 @@ const update = {
   updateSource: z.literal("wordpress"),
 };
 const component = z.object({
+  updateOrigin: z.enum(["wordpress.org", "external", "unknown"]).optional(),
   ...update,
   file: text,
   slug: text,

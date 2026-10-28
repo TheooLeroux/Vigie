@@ -56,6 +56,12 @@ test("Recherche indirecte : budget borné, aucune réussite inventée et validat
   let calls = 0;
   await assert.rejects(searchIndirectCompatibility(lock("1.10.0"), lock("1.12.0"), ["indirect"], "24.14.0", async candidate => ++calls === 1 ? { kind: "valid", lock: candidate.lock } : { kind: "incompatible" }, transport(), undefined, 1), /n’a pas reproduit/);
 });
+
+test("Recherche indirecte : le budget élargi atteint une version valide après les six premiers refus", async () => {
+  const result = await searchIndirectCompatibility(lock("1.0.0"), lock("1.12.0"), ["indirect"], "24.14.0", async candidate => candidate.version === "1.5.0" ? { kind: "valid", lock: candidate.lock } : { kind: "incompatible" }, transport());
+  assert.equal(result?.version, "1.5.0");
+  assert.equal(result?.attempts, 7);
+});
 test("Objectif récence : une compatibilité non monotone ne fait pas sauter une version supérieure valide", async () => {
   const evaluated: string[] = [];
   const result = await searchIndirectCompatibility(lock("1.0.0"), lock("1.12.0"), ["indirect"], "24.14.0", async candidate => {

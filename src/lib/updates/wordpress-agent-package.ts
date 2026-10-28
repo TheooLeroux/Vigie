@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { ApiError } from "../http";
 import { z } from "zod";
 
-export const wordpressAgentPackageVersion = "core-plugins-free-v4";
+export const wordpressAgentPackageVersion = "core-plugins-free-v5";
 // Exact hashes of the previously deployed, audited package. Never trust an unknown remote edit.
 export const legacyAgentHashes: Record<string, string> = {
   "agent.php": "d96a2e94ac4e5a78a5027fbe6efe340c627a824b16a0d492bcca8085d58841e4",

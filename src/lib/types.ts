@@ -47,6 +47,7 @@ export type UpdateInfo = {
   updateSource: "wordpress" | "wordpress.org" | null;
 };
 export type WordPressComponent = UpdateInfo & {
+  updateOrigin?: import("./wordpress-component-policy").WordPressUpdateOrigin;
   file: string;
   slug: string;
   name: string;

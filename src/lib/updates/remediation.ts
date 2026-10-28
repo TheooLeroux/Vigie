@@ -9,6 +9,9 @@ import { runCommand } from "./process";
 import { packageCatalog, stableVersion, type PackageVersion } from "./versions";
 import type { SecurityFinding } from "./types";
 import { mapConcurrent } from "./planning";
+import { safeVersions as verifiedSafeVersions } from "./advisories";
+
+export const remediationVersionLimit = 256;
 
 const dependencyMap = z.record(z.string(), z.string()).default({});
 const lockSchema = z.object({ lockfileVersion: z.union([z.literal(2), z.literal(3)]), packages: z.record(z.string(), z.object({ name: z.string().optional(), version: z.string().optional(), link: z.boolean().optional(), resolved: z.string().optional(), integrity: z.string().optional(), dependencies: dependencyMap, devDependencies: dependencyMap, optionalDependencies: dependencyMap, peerDependencies: dependencyMap }).passthrough()) }).passthrough();
@@ -201,21 +204,8 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
   function safeVersions(name: string, node: string, minimum: string) {
     const key = `${name}@${minimum}:${node}`;
     if (!safe.has(key)) safe.set(key, (async () => {
-      const candidates = (await catalog(name)).filter(item => compare(item.version, minimum) >= 0 && usable(item, node)).slice(0, 40);
-      if (!candidates.length) return [];
-      const query = () => transport("https://api.osv.dev/v1/querybatch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries: candidates.map(item => ({ package: { name, ecosystem: "npm" }, version: item.version })) }), redirect: "error", signal: AbortSignal.timeout(30000) });
-      let response: Response;
-      try { response = await query(); }
-      catch {
-        try { response = await query(); }
-        catch { throw new ApiError(`OSV est injoignable pour vérifier les correctifs de ${name} après deux tentatives. Aucun correctif non vérifié retenu.`, 502); }
-      }
-      if (!response.ok) throw new ApiError("OSV ne permet pas de vérifier les correctifs proposés. Remédiation arrêtée.", 502);
-      const content = await response.text();
-      if (content.length > 4000000) throw new ApiError("Réponse OSV de remédiation trop volumineuse.");
-      const report = z.object({ results: z.array(z.object({ vulns: z.array(z.object({ id: z.string() })).optional(), next_page_token: z.string().optional() }).passthrough()) }).parse(JSON.parse(content));
-      if (report.results.length !== candidates.length || report.results.some(entry => entry.next_page_token || "error" in entry)) throw new ApiError("La vérification OSV des correctifs est incomplète.", 502);
-      return candidates.filter((_, index) => !report.results[index].vulns?.length);
+      const candidates = (await catalog(name)).filter(item => compare(item.version, minimum) >= 0 && usable(item, node)).slice(0, remediationVersionLimit);
+      return verifiedSafeVersions(name, candidates, transport);
     })());
     return safe.get(key)!;
   }
@@ -328,19 +318,18 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
             if (!childRange) return true;
             const declared = dependencyRange(childRange);
             if (!declared) return false;
-            const candidates = index + 1 === path.length - 1 ? fixed : (await catalog(childName)).filter(item => usable(item, node)).slice(0, 40);
+            const candidates = index + 1 === path.length - 1 ? fixed : (await catalog(childName)).filter(item => usable(item, node)).slice(0, remediationVersionLimit);
             for (const next of candidates) if (satisfies(next.version, declared) && await supports(source, path, index + 1, next, fixed)) return true;
             return false;
           }
         }
-        const candidates = (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, 40);
+        const candidates = await verifiedSafeVersions(current.name || direct, (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, remediationVersionLimit), transport);
         const admissible: PackageVersion[] = [];
         for (const candidate of candidates) {
           if (tried.has(`${root}:${direct}@${candidate.version}`)) continue;
           let supported = true;
           for (const route of related) if (!await supports(route.graph, route.path, 0, candidate, route.fixed)) { supported = false; break; }
           if (supported) admissible.push(candidate);
-          if (admissible.length >= 8) break;
         }
         if (!admissible.length) {
           const details = [...new Set(related.map(({ graph: source, path, fixed, alert }) => {
@@ -348,7 +337,7 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
             const fixes = fixed.slice(0, 3).map(item => item.version).join(", ") || alert.fixedVersions?.join(", ") || "aucun correctif stable vérifié";
             return `${chain}. Correctifs vérifiés de ${alert.package} : ${fixes}`;
           }))].slice(0, 5).join(" ; ");
-          throw new ApiError(`${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé dans la recherche bornée (40 versions par paquet). Aucun override ni contrôle désactivé.`, 422);
+          throw new ApiError(`${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé dans le budget de recherche (${remediationVersionLimit} versions par paquet). Recherche bornée, absence de solution non démontrée au-delà du budget. Aucun override ni contrôle désactivé.`, 422);
         }
         const selected = constraints.get(root) || {};
         constraints.set(root, { ...selected, [direct]: admissible.map(item => item.version).join(" || ") });

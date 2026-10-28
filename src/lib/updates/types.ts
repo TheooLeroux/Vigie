@@ -39,7 +39,9 @@ export type UpdateCheck = {
   findings: SecurityFinding[];
   nodeEvidence?: { version: string; deploymentId: string; imageDigest: string; source: "container" | "railpack"; usage: "runtime" | "build"; instances?: string[] };
   blockers?: SecurityFinding[];
+  wordpressRetained?: { package: string; version: string }[];
 };
+export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
 export type UpdateResult = {
   targetId: string;
   name: string;
@@ -52,6 +54,7 @@ export type UpdateResult = {
   backup?: string;
   warnings: string[];
   checks?: UpdateCheck[];
+  manualUpdates?: WordPressManualUpdate[];
 };
 export type UpdateRun = {
   nodeReceipts?: import("./node-current").NodeValidationReceipt[];
@@ -68,8 +71,9 @@ export type UpdateRun = {
 };
 export type UpdateState = {
   automaticControls?: import("../automatic-control-state").AutomaticControl[];
-  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; error?: string }[];
+  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string }[];
   enabled: boolean;
+  disabledReason?: string;
   targets: UpdateTarget[];
   runs: UpdateRun[];
 };

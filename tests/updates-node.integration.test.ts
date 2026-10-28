@@ -42,8 +42,14 @@ for (const manager of ["npm@11.9.0", "pnpm@10.11.0", "yarn@1.22.22", "yarn@4.9.2
 }
 
 test("Docker réel : un test en échec arrête la mise à jour avant publication", docker, async () => {
-  const { folder, names } = await fixture(undefined, "node -e \"process.exit(1)\"");
-  try { await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion), /a échoué/); }
+  const { folder, names } = await fixture(undefined, "node -e \"require('node:fs').writeFileSync('test-executed','yes');process.exit(1)\"");
+  // This case must reach the intentionally failing script. Public database
+  // availability is covered independently by the live scanner checks.
+  const transport: typeof fetch = async (input, options) => Response.json(String(input).includes("api.osv.dev") ? { results: JSON.parse(String(options?.body)).queries.map(() => ({})) } : { version: "7.0.0" });
+  try {
+    await assert.rejects(prepareNodeSources(folder, [""], names, nodeVersion, transport), /a échoué/);
+    assert.equal(await readFile(join(folder, "test-executed"), "utf8"), "yes");
+  }
   finally { await rm(folder, { recursive: true, force: true }); }
 });
 
@@ -111,18 +117,19 @@ test("Docker réel : la boucle sécurité recherche une autre proposition si les
       },
       image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
     });
-    assert.deepEqual(scanned, ["7.0.0", "6.0.0", "7.0.0", "5.0.0"]);
+    assert.deepEqual(scanned, ["6.0.0", "5.0.0"]);
     assert.equal(JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["is-number"], "5.0.0");
-    assert.ok(messages.some(message => message.includes("écartée après échec des tests")));
-    assert.ok(prepared.warnings.some(message => message.includes("sans ignorer les assertions")));
+    assert.ok(messages.some(message => message.includes("combinaison précise écartée après refus des tests")));
+    assert.ok(prepared.warnings.some(message => message.includes("combinaison refusée mémorisée")));
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
 test("Docker réel : un conflit de dépendances est résolu sans forcer l’installation", docker, async () => {
   const { folder, names } = await fixture();
   await writeFile(join(folder, "package.json"), JSON.stringify({ name: "vigie-peer-conflict-fixture", private: true, dependencies: { react: "18.3.1", "react-dom": "18.3.1" }, scripts: { test: "node --version" } }));
-  const transport: typeof fetch = async input => {
+  const transport: typeof fetch = async (input, options) => {
     const url = String(input);
+    if (url.includes("api.osv.dev")) return Response.json({ results: JSON.parse(String(options?.body)).queries.map(() => ({})) });
     if (url.includes("react-dom")) {
       const item = { version: "18.3.1", peerDependencies: { react: "^18.3.1" } };
       return Response.json(url.endsWith("/latest") ? item : { versions: { "18.3.1": item } });
@@ -163,7 +170,7 @@ test("Docker réel : une proposition sans intersection de pairs est écartée sa
       },
       image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
     });
-    assert.deepEqual(scanned, ["7.0.0", "5.0.0"]);
+    assert.deepEqual(scanned, ["6.0.0"]);
     assert.ok(messages.some(message => message.includes("pairs indirects ne permettent aucun ensemble admissible")));
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
@@ -176,7 +183,8 @@ test("Docker réel : un pair indirect refusé par npm fait recalculer les versio
   names.push("parent.tgz", "package/package.json");
   await writeFile(join(folder, "package.json"), JSON.stringify({ name: "vigie-transitive-peer-fixture", private: true, dependencies: { "vigie-indirect-parent": "file:parent.tgz", react: "^18.0.0", "react-dom": "^18.0.0" }, scripts: { test: "node -e \"if(!require('react/package.json').version.startsWith('18.'))process.exit(1)\"" } }));
   const versions: Record<string, any[]> = { react: [{ version: "19.0.0" }, { version: "18.3.1" }], "react-dom": [{ version: "19.0.0", peerDependencies: { react: "^19" } }, { version: "18.3.1", peerDependencies: { react: "^18" } }], "react-json-view-lite": [{ version: "1.5.0", peerDependencies: { react: "^16.13.1 || ^17.0.0 || ^18.0.0", "react-dom": "^16.13.1 || ^17.0.0 || ^18.0.0" } }] };
-  const transport: typeof fetch = async input => {
+  const transport: typeof fetch = async (input, options) => {
+    if (String(input).includes("api.osv.dev")) return Response.json({ results: JSON.parse(String(options?.body)).queries.map(() => ({})) });
     const path = new URL(String(input)).pathname.slice(1), all = !path.endsWith("/latest"), name = decodeURIComponent(all ? path : path.slice(0, -7));
     assert.ok(versions[name], name);
     const items = versions[name];
@@ -220,7 +228,8 @@ for (const crossRootRetry of [false, true]) test(`Docker réel : coordination tr
     await writeFile(join(folder, "ui/package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { "is-number": "^6.0.0" } }, "node_modules/is-number": { version: "6.0.0" } } }));
     names.push("ui/package.json", "ui/package-lock.json");
   }
-  const registry: typeof fetch = async input => {
+  const registry: typeof fetch = async (input, options) => {
+    if (String(input).includes("api.osv.dev")) return Response.json({ results: JSON.parse(String(options?.body)).queries.map(() => ({})) });
     assert.ok(String(input).includes("/is-number"));
     return Response.json(String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
   };
@@ -245,7 +254,7 @@ for (const crossRootRetry of [false, true]) test(`Docker réel : coordination tr
     if (crossRootRetry) {
       assert.equal(JSON.parse(await readFile(join(folder, "ui/package.json"), "utf8")).dependencies["is-number"], "6.0.0");
       assert.equal(messages.filter(message => message.includes("coordination des versions indirectes")).length, 2);
-      assert.ok(messages.some(message => message.includes("reprise de compatibilité")));
+      assert.ok(messages.some(message => message.includes("combinaison précise écartée")));
     }
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
@@ -338,15 +347,16 @@ test("Docker réel : une rupture d’API identifiée conserve la branche compati
   const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
   manifest.dependencies["is-odd"] = "2.0.0";
   await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
-  const transport: typeof fetch = async input => {
-    if (String(input).includes("is-odd")) return Response.json({ version: "3.0.1" });
+  const transport: typeof fetch = async (input, options) => {
+    if (String(input).includes("api.osv.dev")) return Response.json({ results: JSON.parse(String(options?.body)).queries.map(() => ({})) });
+    if (String(input).includes("is-odd")) return Response.json(String(input).endsWith("/latest") ? { version: "3.0.1" } : { versions: { "3.0.1": { version: "3.0.1" }, "2.0.0": { version: "2.0.0" } } });
     return Response.json(String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
   };
   try {
     const result = await prepareNodeSources(folder, [""], names, nodeVersion, transport);
     const updated = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
     assert.deepEqual(updated.dependencies, { "is-number": "6.0.0", "is-odd": "3.0.1" });
-    assert.ok(result.warnings.some(warning => warning.includes("montée majeure écartée")));
+    assert.ok(result.warnings.some(warning => warning.includes("combinaison refusée mémorisée")));
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 

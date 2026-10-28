@@ -7,6 +7,7 @@ import { ProjectHealthSummary } from "../src/components/project-health-summary";
 import { healthFixture, healthUpdates, healthCheck, healthAt } from "./project-health-fixture";
 import type { SiteInventory, WordPressComponent } from "../src/lib/types";
 import { wordpressSecurityVersions } from "../src/lib/updates/wordpress-security-key";
+import { UpdateReadiness } from "../src/components/project-updates";
 
 function component(slug: string, version: string, latestVersion = version): WordPressComponent {
   return { file: slug + "/main.php", slug, name: slug, version, latestVersion, updateState: version === latestVersion ? "current" : "available", updateCheckedAt: healthAt, updateSource: "wordpress", active: true, mustUse: false, autoUpdate: false, requiresPhp: null, requiresWordPress: null, template: null };
@@ -27,7 +28,7 @@ test("WordPress : succès avec extension privée et deux thèmes restants expliq
   assert.equal(health.updates.length, 3);
   assert.equal(health.manualUpdates.length, 3);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
-  assert.match(html, /Mises à jour à traiter séparément/);
+  assert.match(html, /Interventions manuelles requises/);
   assert.match(html, /Vigie ne peut pas télécharger cette extension/);
   assert.match(html, /Vigie ne met pas les thèmes à jour actuellement/);
   assert.match(html, /Apparence → Thèmes/);
@@ -99,4 +100,57 @@ test("WordPress : contrôle indisponible ne présente pas de confirmation de sé
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /Contrôle de sécurité indisponible/);
   assert.doesNotMatch(html, /Aucune alerte connue/);
+});
+
+test("WordPress : le résumé distingue la configuration actuelle de l’ancien échec", () => {
+  const { detail, state } = wordpressFixture();
+  state.runs[0].stage = "failed";
+  state.runs[0].results[0].checks = [healthCheck({tool:"WPVulnerability",status:"blocked"})];
+  state.targets = state.runs[0].targets;
+  state.enabled = false;
+  state.disabledReason = "L’exécuteur de maintenance n’est pas connecté à cette instance de Vigie.";
+  let html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  assert.match(html, /Maintenance non activée/);
+  assert.match(html, /exécuteur de maintenance n’est pas connecté/);
+  assert.doesNotMatch(html, /Dernière tentative WordPress bloquée|Combinaison sûre non validée/);
+  state.enabled = true;
+  state.targets[0].unavailable = "Le contrôle de l’agent a expiré.";
+  html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  assert.match(html, /Vérification technique requise/);
+  state.targets[0].unavailable = null;
+  html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  assert.match(html, /Interventions manuelles requises/);
+});
+
+test("WordPress : les correctifs manuels ne gonflent pas le compteur automatique", () => {
+  const {detail,inventory,state} = wordpressFixture();
+  state.targets = state.runs[0].targets;
+  state.currentSecurity = [{targetId:"target",versions:wordpressSecurityVersions(inventory),warnings:state.runs[0].results[0].warnings,check:healthCheck({tool:"WPVulnerability",phase:"before",findings:[{...healthCheck().findings[0],package:"plugins/private-pro",version:"3.0.103",scope:undefined,fixedVersions:["3.0.124"]}]})}];
+  const health = projectHealth(detail,state);
+  assert.equal(health.manualSecurityFixes.length,1);
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  assert.match(html,/Interventions manuelles requises/);
+  assert.match(html,/Correctifs de sécurité à traiter manuellement/);
+  assert.doesNotMatch(html,/1 correctif\(s\) ou mise\(s\) à jour à examiner/);
+  state.currentSecurity[0].warnings=[];
+  state.runs[0].results[0].warnings=[];
+  state.currentSecurity[0].manualUpdates=[{package:"plugins/private-pro",version:"3.0.103",reason:"Fichiers personnalisés",action:"Reporter les modifications avec le développeur"}];
+  assert.equal(projectHealth(detail,state).manualSecurityFixes.length,1,"une extension personnalisée est conservée même sans avertissement de catalogue privé");
+});
+
+test("Disponibilité : les composants manuels n’empêchent pas un WordPress techniquement prêt", () => {
+  const {state} = wordpressFixture();
+  state.targets = state.runs[0].targets;
+  state.runs[0].results[0].manualUpdates = [{package:"plugins/private-pro",version:"3",reason:"Privé",action:"Intervention manuelle"}];
+  let html = renderToStaticMarkup(createElement(UpdateReadiness,{state}));
+  assert.match(html,/WordPress est prêt pour une maintenance/);
+  assert.match(html,/Ils ne bloquent pas/);
+  state.enabled = false;
+  state.disabledReason = "Exécuteur déconnecté.";
+  state.targets[0].unavailable = "Le contrôle de l’agent a expiré.";
+  html = renderToStaticMarkup(createElement(UpdateReadiness,{state}));
+  assert.match(html,/Maintenance non activée/);
+  assert.match(html,/Exécuteur déconnecté/);
+  assert.match(html,/Vérification technique/);
+  assert.doesNotMatch(html,/0 service|WordPress est prêt/);
 });

@@ -119,6 +119,10 @@ test("observateur : format strict, nonce, répertoire, fraîcheur et données pr
   assert.equal(result.warnings.length, 2);
   assert.ok(!JSON.stringify(result).includes("never-return"));
   assert.ok(!JSON.stringify(result).includes("hidden"));
+  const external = payload();
+  const classified = parseObserverPayload({ ...external, plugins: [{ ...external.plugins[0], updateOrigin: "external", updateUri: "https://private.invalid/?token=never-return" }] }, nonce, root);
+  assert.equal(classified.plugins[0].updateOrigin, "external");
+  assert.ok(!JSON.stringify(classified).includes("never-return"));
   for (const bad of [
     { ...data, nonce: "c".repeat(32) },
     { ...data, documentRoot: "/home/other/site" },
@@ -266,6 +270,8 @@ test("connecteur PHP réel : requêtes ordinaires intactes ; signature, corps et
     assert.equal(valid.status, 200);
     const result = await valid.json();
     assert.equal(result.configuration.objectCache, false);
+    assert.equal(result.plugins[0].updateOrigin, "external");
+    assert.equal(JSON.stringify(result).includes("never-return"), false);
     assert.equal(result.plugins[0].active, true);
     assert.equal(
       parseObserverPayload(result, nonce, temporary.replace(/\\/g, "/"))

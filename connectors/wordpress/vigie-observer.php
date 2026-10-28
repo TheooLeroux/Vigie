@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Vigie — Inventaire
  * Description: Inventaire privé en lecture seule pour le plateau interne Vigie.
- * Version: 1.0.4
+ * Version: 1.0.5
  * Requires PHP: 7.4
  */
 if (!defined('ABSPATH')) { exit; }
@@ -45,6 +45,12 @@ add_action($vigie_observer_early ? 'muplugins_loaded' : 'wp_loaded', static func
     $theme_updates = get_site_transient('update_themes');
     $core_updates = get_site_transient('update_core');
     $clean = static function ($value) { return is_scalar($value) ? substr(wp_strip_all_tags((string)$value), 0, 500) : ''; };
+    // Only return the classification, never a private update URL or its licence token.
+    $origin = static function ($uri, $slug, $kind) {
+        $uri = rtrim(trim((string)$uri), '/');
+        if ($uri === '') { return 'unknown'; }
+        return in_array($uri, array('https://wordpress.org/'.$kind.'s/'.$slug, 'http://wordpress.org/'.$kind.'s/'.$slug, 'w.org/'.$kind.'/'.$slug), true) ? 'wordpress.org' : 'external';
+    };
     $update = static function ($cache, $id, $version) use ($clean) {
         $cache = (array)$cache;
         $available = isset($cache['response'][$id]) ? (array)$cache['response'][$id] : array();
@@ -55,7 +61,9 @@ add_action($vigie_observer_early ? 'muplugins_loaded' : 'wp_loaded', static func
     };
     $plugins = array(); $automatic_plugins = (array)get_site_option('auto_update_plugins', array());
     foreach (get_plugins() as $file => $meta) {
+        $metaOrigin = $origin(isset($meta['UpdateURI']) ? $meta['UpdateURI'] : '', dirname($file) === '.' ? basename($file, '.php') : dirname($file), 'plugin');
         $plugins[] = array_merge(array('file' => $clean($file), 'slug' => $clean(dirname($file) === '.' ? basename($file, '.php') : dirname($file)), 'name' => $clean($meta['Name']), 'version' => $clean($meta['Version']) ?: null, 'active' => is_plugin_active($file) || is_plugin_active_for_network($file), 'mustUse' => false, 'autoUpdate' => in_array($file, $automatic_plugins, true), 'requiresPhp' => $clean(isset($meta['RequiresPHP']) ? $meta['RequiresPHP'] : '') ?: null, 'requiresWordPress' => $clean(isset($meta['RequiresWP']) ? $meta['RequiresWP'] : '') ?: null, 'template' => null), $update($plugin_updates, $file, $meta['Version']));
+        $plugins[count($plugins) - 1]['updateOrigin'] = $metaOrigin;
     }
     foreach (get_mu_plugins() as $file => $meta) {
         $plugins[] = array('file' => $clean($file), 'slug' => $clean(basename($file, '.php')), 'name' => $clean($meta['Name']), 'version' => $clean($meta['Version']) ?: null, 'active' => true, 'mustUse' => true, 'autoUpdate' => null, 'requiresPhp' => $clean(isset($meta['RequiresPHP']) ? $meta['RequiresPHP'] : '') ?: null, 'requiresWordPress' => null, 'template' => null, 'latestVersion' => null, 'updateCheckedAt' => null, 'updateSource' => 'wordpress', 'updateState' => 'unknown');
@@ -63,6 +71,7 @@ add_action($vigie_observer_early ? 'muplugins_loaded' : 'wp_loaded', static func
     $themes = array(); $automatic_themes = (array)get_site_option('auto_update_themes', array());
     foreach (wp_get_themes() as $slug => $theme) {
         $themes[] = array_merge(array('file' => $clean($slug).'/style.css', 'slug' => $clean($slug), 'name' => $clean($theme->get('Name')), 'version' => $clean($theme->get('Version')) ?: null, 'active' => $slug === get_stylesheet() || $slug === get_template(), 'mustUse' => false, 'autoUpdate' => in_array($slug, $automatic_themes, true), 'requiresPhp' => $clean($theme->get('RequiresPHP')) ?: null, 'requiresWordPress' => $clean($theme->get('RequiresWP')) ?: null, 'template' => $clean($theme->get('Template')) ?: null), $update($theme_updates, $slug, $theme->get('Version')));
+        $themes[count($themes) - 1]['updateOrigin'] = $origin($theme->get('UpdateURI'), $slug, 'theme');
     }
     $latest_core = null; $core_state = 'unknown';
     if (is_object($core_updates) && isset($core_updates->version_checked) && $core_updates->version_checked === $wp_version && !empty($core_updates->last_checked)) {

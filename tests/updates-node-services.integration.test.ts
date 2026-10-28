@@ -9,7 +9,7 @@ import { nodeValidationRuntime, prepareNodeSources } from "../src/lib/updates/no
 import { runCommand } from "../src/lib/updates/process";
 
 const docker = { skip: process.env.VIGIE_TEST_DOCKER !== "1" }, nodeVersion = "24.14.0";
-const transport: typeof fetch = async input => Response.json(String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
+const transport: typeof fetch = async (input, options) => Response.json(String(input).includes("api.osv.dev") ? { results: JSON.parse(String(options?.body)).queries.map(() => ({})) } : String(input).endsWith("/latest") ? { version: "7.0.0" } : { versions: { "7.0.0": { version: "7.0.0" }, "6.0.0": { version: "6.0.0" } } });
 async function fixture(programs: Record<string, string>) {
   const folder = await mkdtemp(join(tmpdir(), "vigie-services-native-")), names: string[] = [];
   for (const [root, program] of Object.entries(programs)) {
@@ -69,7 +69,7 @@ test("Docker parallèle : le repli d’un service ne relance pas la préparation
     assert.equal(scans.get("first"), 1, "le service déjà accepté ne doit pas être repréparé");
     assert.equal(scans.get("second"), 2, "la reprise reste limitée au service incompatible");
     assert.deepEqual(validated.sort(), ["final:first", "final:second", "prepare:first", "prepare:second"]);
-    assert.ok(remediations.some(message => message.includes("montée majeure") || message.includes("reprise de compatibilité")));
+    assert.ok(remediations.some(message => message.includes("combinaison précise écartée")));
     assert.equal(JSON.parse(await readFile(join(folder, "first/package.json"), "utf8")).dependencies["is-number"], "7.0.0");
     assert.equal(JSON.parse(await readFile(join(folder, "second/package.json"), "utf8")).dependencies["is-number"], "6.0.0");
     assert.equal(result.allowed.size, 4);

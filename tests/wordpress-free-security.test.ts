@@ -53,17 +53,17 @@ test("Contrôle gratuit : bornes réelles, correctifs, CVSS, alias et risques de
   assert.throws(() => freeWordPressFindings(data, "plugin", "another", "1"), /correspond pas/);
 });
 
-test("Contrôle gratuit : aucun compte, jeton, thème ou PHP envoyé ; cœur par version et cache des extensions", async () => {
+test("Contrôle gratuit : cœur, extensions et thèmes publics sans jeton ; versions personnalisées conservées", async () => {
   const calls: string[] = [];
   const scan = freeWordPressScanner((async (input, options) => {
     const url = new URL(String(input)); assert.equal(url.hostname, "www.wpvulnerability.net");
     assert.equal(new Headers(options?.headers).has("Authorization"), false); calls.push(url.pathname);
-    return Response.json(url.pathname.startsWith("/core/") ? { error: 0, updated: 1792736835, data: { core: url.pathname.split("/")[2], vulnerability: null } } : report());
+    return Response.json(url.pathname.startsWith("/core/") ? { error: 0, updated: 1792736835, data: { core: url.pathname.split("/")[2], vulnerability: null } } : url.pathname.startsWith("/theme/") ? { error: 0, updated: 1792736835, data: { theme: "integer-theme", name: null, vulnerability: [] } } : report());
   }) as typeof fetch);
   const candidate = await scan.prepare(plan());
   await scan(candidate, false); await scan(candidate, true); await scan(candidate, false);
-  assert.deepEqual(calls, ["/plugin/example/", "/core/6.8.3/", "/core/7.1.3/"]);
-  assert.equal(scan.warnings.length, 0);
+  assert.deepEqual(calls, ["/plugin/example/", "/core/6.8.3/", "/theme/integer-theme/", "/core/7.1.3/"]);
+  assert.ok(scan.warnings.some(warning => warning.includes("custom-child")));
 });
 
 test("Catalogue inconnu : extension conservée avec réserve explicite ; erreur fournisseur bloquante", async () => {

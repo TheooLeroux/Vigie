@@ -1,34 +1,15 @@
 import { compare, major, minor, patch, satisfies, validRange } from "semver";
-import { z } from "zod";
 import { ApiError } from "../http";
-import { dependencyRange, npmGraph, seedNpmCoordinatedVersion } from "./remediation";
-import { packageCatalog, stableVersion, type PackageVersion } from "./versions";
+import { dependencyRange, npmGraph, seedNpmCoordinatedVersion, remediationVersionLimit } from "./remediation";
+import { packageCatalog, stableVersion } from "./versions";
+import { safeVersions as screenedVersions } from "./advisories";
 
 export type IndirectCandidate = { name: string; version: string; lock: string; paths: string[]; coordinated?: string[] };
 export type IndirectEvaluation = { kind: "valid"; lock: string } | { kind: "incompatible" | "rejected" };
 
-async function screenedVersions(name: string, versions: PackageVersion[], transport: typeof fetch) {
-  if (!versions.length) return [];
-  let response: Response | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const current = await transport("https://api.osv.dev/v1/querybatch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries: versions.map(item => ({ package: { name, ecosystem: "npm" }, version: item.version })) }), redirect: "error", signal: AbortSignal.timeout(30000) });
-      if (current.ok) { response = current; break; }
-      if (current.status !== 429 && current.status < 500) throw new ApiError("La vérification OSV des versions indirectes est indisponible.", 502);
-    } catch (error) { if (error instanceof ApiError) throw error; }
-    if (!attempt) await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  if (!response) throw new ApiError(`OSV ne permet pas de vérifier les versions indirectes de ${name} après deux tentatives.`, 502);
-  const content = await response.text();
-  if (content.length > 4_000_000) throw new ApiError("La réponse OSV des versions indirectes est trop volumineuse.", 502);
-  const parsed = z.object({ results: z.array(z.object({ vulns: z.array(z.object({ id: z.string() })).optional(), next_page_token: z.string().optional() }).passthrough()) }).parse(JSON.parse(content));
-  if (parsed.results.length !== versions.length || parsed.results.some(item => item.next_page_token || "error" in item)) throw new ApiError("La vérification OSV des versions indirectes est incomplète.", 502);
-  // Screen every advisory before spending the installation/test budget; the
-  // complete graph is still freshly scanned before any project scripts run.
-  return versions.filter((_, index) => !parsed.results[index].vulns?.length);
-}
+export const maxIndirectAttempts = 12;
 
-export async function searchIndirectCompatibility(original: string, failed: string, names: string[], node: string, evaluate: (candidate: IndirectCandidate) => Promise<IndirectEvaluation>, transport: typeof fetch = fetch, notify: (message: string) => Promise<void> = async () => {}, budget = 6, attempted: () => void = () => {}, targets: string[] = []) {
+export async function searchIndirectCompatibility(original: string, failed: string, names: string[], node: string, evaluate: (candidate: IndirectCandidate) => Promise<IndirectEvaluation>, transport: typeof fetch = fetch, notify: (message: string) => Promise<void> = async () => {}, budget = maxIndirectAttempts, attempted: () => void = () => {}, targets: string[] = []) {
   const graph = npmGraph(failed), baseline = npmGraph(original);
   const nameOf = (path: string, item: { name?: string }) => item.name || path.slice(path.lastIndexOf("node_modules/") + 13);
   const direct = new Set(graph.edges("").map(edge => edge.target)), incoming = new Map<string, string[]>(), fixedIncoming = new Map<string, string[]>();
@@ -55,7 +36,7 @@ export async function searchIndirectCompatibility(original: string, failed: stri
       try { const url = new URL(item.dist.tarball); publicArtifact = url.origin === "https://registry.npmjs.org" && !url.username && !url.password && /^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+$/.test(item.dist.integrity); } catch {}
       const usable = publicArtifact && locations.some(([path, current]) => compare(item.version, current.version!) < 0 && (fixedIncoming.get(path) || []).every(range => { const declared = dependencyRange(range); return declared && satisfies(item.version, declared); }));
       return usable;
-    }).slice(0, 40).filter(item => !!seedNpmCoordinatedVersion(original, failed, name, item, targets));
+    }).slice(0, remediationVersionLimit).filter(item => !!seedNpmCoordinatedVersion(original, failed, name, item, targets));
     const newest = locations.map(([, item]) => item.version!).sort((a, b) => compare(b, a))[0], oldest = domain.at(-1)?.version;
     const span = newest && oldest ? [major(newest) - major(oldest), minor(newest) - minor(oldest), patch(newest) - patch(oldest)] : [-1, -1, -1];
     return { name, domain, span, peers: locations.reduce((sum, [path]) => sum + (peerConsumers.get(path) || 0), 0) };

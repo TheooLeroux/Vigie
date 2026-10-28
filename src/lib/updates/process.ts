@@ -29,14 +29,26 @@ function affectedPackages(diagnostics: string, allowed: string[]) {
   return [...new Set(result)];
 }
 
-export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[]; diagnosticIndirectPackages?: string[]; diagnosticIndirectLocations?: Record<string, string>; peerResolution?: boolean } = {}): Promise<string> {
+export function yarnPeerWarning(diagnostics: string) {
+  const clean = diagnostics.replace(/\u001b\[[0-9;]*m/g, "");
+  return /\bYN(?:0002|0059|0060)\b/.test(clean) || /\b(?:unmet|incorrect) peer dependency\b/i.test(clean);
+}
+
+export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[]; diagnosticIndirectPackages?: string[]; diagnosticIndirectLocations?: Record<string, string>; peerResolution?: boolean; strictYarnPeers?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env || process.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let output = "", errorOutput = "", size = 0, settled = false;
     const directDiagnostics = new Set<string>(), indirectDiagnostics = new Set<string>(), allowedIndirects = new Set(options.diagnosticIndirectPackages);
     const indirectLocations = new Set<string>();
     const tails = { stdout: "", stderr: "" };
+    const policyTails = { stdout: "", stderr: "" };
+    let invalidYarnPeers = false;
     function diagnose(chunk: string, stream: keyof typeof tails) {
+      if (options.strictYarnPeers) {
+        const sample = policyTails[stream] + chunk;
+        invalidYarnPeers ||= yarnPeerWarning(sample);
+        policyTails[stream] = sample.slice(-512);
+      }
       if (!options.diagnosticPackages?.length && !allowedIndirects.size) return;
       const sample = (tails[stream] + chunk).replace(/\u001b\[[0-9;]*m/g, "");
       for (const name of affectedPackages(sample, options.diagnosticPackages || [])) directDiagnostics.add(name);
@@ -72,6 +84,7 @@ export function runCommand(command: string, args: string[], options: { cwd?: str
     child.stderr.on("data", chunk => { diagnose(chunk.toString(), "stderr"); if (errorOutput.length < 20_000) errorOutput += chunk.toString().slice(0, 20_000 - errorOutput.length); });
     child.on("error", () => finish(new ApiError(`L’outil ${command} n’est pas disponible sur l’exécuteur.`, 503)));
     child.on("close", code => {
+      if (invalidYarnPeers) { finish(new ApiError("Installation Yarn refusée : dépendances de pairs absentes, invalides ou incompatibles. Aucun avertissement de compatibilité ignoré.", 422)); return; }
       const reason = output.match(/^VIGIE_ERROR=([a-z_]+)$/m)?.[1];
       const known = options.errorPatterns?.find(item => item.pattern.test(output + "\n" + errorOutput));
       const message = reason && options.errorMessages?.[reason] || known?.message || `L’étape ${command} a échoué. Aucune publication supplémentaire n’a été lancée.`;

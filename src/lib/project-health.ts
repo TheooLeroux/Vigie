@@ -17,6 +17,7 @@ export type ProjectHealth = {
   attention: boolean;
   securityFromScan: boolean;
   securityFixes: string[];
+  manualSecurityFixes: string[];
   securitySearchIncomplete: boolean;
 };
 
@@ -90,6 +91,8 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     const siteRun = state?.runs.find(run => run.projectId === detail.project.id && run.targets.some(target => target.mode === "wordpress" && target.remoteId === installation.id && target.connectionId === installation.connectionId));
     const result = siteRun?.results.find(result => siteRun.targets.some(target => target.id === result.targetId && target.mode === "wordpress" && target.remoteId === installation.id && target.connectionId === installation.connectionId));
     const installed = result?.checks?.findLast(check => isWordPressSecurityCheck(check) && check.phase === "after");
+    const observation = state?.currentSecurity?.find(item => item.targetId === `wordpress:${installation.id}` && !item.error && item.versions === wordpressSecurityVersions(inventory));
+    const manualItems = observation?.manualUpdates ?? result?.manualUpdates ?? [];
     const oldInventory = result?.stage === "completed" && installed && inventory.observedAt && Date.parse(inventory.observedAt) < Date.parse(installed.checkedAt);
     if (oldInventory) incomplete = true;
     const components = oldInventory ? [] : [
@@ -106,11 +109,21 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         const slug = "slug" in component && typeof component.slug === "string" ? component.slug : null;
         // Persisted execution warnings also explain retained private packages in older runs.
         const currentWarnings = state?.currentSecurity?.find(item => item.targetId === `wordpress:${installation.id}` && item.versions === wordpressSecurityVersions(inventory))?.warnings || [];
-        const retainedPlugin = component.id.startsWith("plugin:") && slug && [...(result?.warnings || []), ...currentWarnings].some(warning => warning.startsWith(slug + " :") && warning.includes("catalogue privé, non identifié ou fermé"));
-        const reason = component.id.startsWith("theme:") ? "Vigie ne met pas les thèmes à jour actuellement. À mettre à jour depuis WordPress → Apparence → Thèmes." : retainedPlugin ? "Vigie ne peut pas télécharger cette extension privée ou non reconnue. À mettre à jour depuis WordPress ou le compte de l’éditeur." : null;
+        const retained = manualItems.find(item => item.package === `${component.id.startsWith("theme:") ? "themes" : "plugins"}/${slug}` && item.version === component.version);
+        const retainedPlugin = component.id.startsWith("plugin:") && slug && (retained || ("updateOrigin" in component && component.updateOrigin === "external") || [...(result?.warnings || []), ...currentWarnings].some(warning => warning.startsWith(slug + " :") && /catalogue privé, non identifié ou fermé|intervention manuelle requise/.test(warning)));
+        const reason = retained ? `${retained.reason} ${retained.action}` : component.id.startsWith("theme:") ? "Vigie ne met pas les thèmes à jour actuellement. À mettre à jour depuis WordPress → Apparence → Thèmes." : retainedPlugin ? "Vigie ne peut pas télécharger cette extension privée ou non reconnue. À mettre à jour depuis WordPress ou le compte de l’éditeur." : null;
         if (reason) manualUpdates.set(key, { label, reason });
       } else if (component.updateState === "current") versionsKnown = true;
       else incomplete = true;
+    }
+    for (const item of oldInventory ? [] : manualItems) {
+      const [kind, slug] = item.package.split("/");
+      const current = kind === "wordpress" ? inventory.wordpress?.version : kind === "mu-plugins" ? inventory.plugins.find(component => component.mustUse && component.slug === slug)?.version : kind === "plugins" || kind === "themes" ? inventory[kind].find(component => component.slug === slug)?.version : undefined;
+      if (current !== item.version && !(current === null && ["", "inconnue"].includes(item.version))) continue;
+      const label = `${item.package} : ${item.version || "version inconnue"}${item.target ? ` → ${item.target}` : " — mise à jour à vérifier"}.`;
+      const component = kind === "plugins" || kind === "themes" ? inventory[kind].find(component => component.slug === slug) : undefined;
+      const existingKey = component && `${installation.id}:${kind === "plugins" ? "plugin" : "theme"}:${component.file}`;
+      if (!existingKey || !manualUpdates.has(existingKey)) manualUpdates.set(`${installation.id}:manual:${item.package}`, { label, reason: `${item.reason} ${item.action}` });
     }
     const php = inventory.php;
     if (php?.release) {
@@ -189,7 +202,11 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         if (finding.fixedVersions?.length) {
           const key = `${target.id}:${finding.package}:${finding.version}`;
           const privatePlugin = target.mode === "wordpress" && result.warnings.some(warning => warning.startsWith(finding.package.replace(/^plugins\//, "") + " :") && warning.includes("catalogue privé, non identifié ou fermé"));
-          const fix = fixes.get(key) || { label: `${result.name} · ${component} ${finding.version}`, versions: new Set<string>(), manual: privatePlugin };
+          const observation = state?.currentSecurity?.find(item => item.targetId === target.id && inventory && item.versions === wordpressSecurityVersions(inventory));
+          const retained = [...(observation?.manualUpdates || []), ...("manualUpdates" in result ? result.manualUpdates || [] : [])];
+          const manual = target.mode === "wordpress" && (privatePlugin || finding.package.startsWith("themes/") || retained.some(item => item.package === finding.package && item.version === finding.version));
+          const fix = fixes.get(key) || { label: `${result.name} · ${component} ${finding.version}`, versions: new Set<string>(), manual };
+          fix.manual ||= manual;
           finding.fixedVersions.forEach(version => fix.versions.add(version));
           fixes.set(key, fix);
         }
@@ -197,5 +214,6 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     }
   }
   const securitySearchIncomplete = !!latest && ["failed", "attention"].includes(latest.stage) && latest.results.some(result => result.checks?.some(check => check.status === "blocked" && ["OSV", "Trivy", "WPScan", "WPVulnerability"].includes(check.tool)));
-  return { security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fix => `${fix.label} : correctifs référencés ${[...fix.versions].join(", ")} ; ${fix.manual ? "Vigie ne peut pas télécharger cette extension. Mise à jour à effectuer depuis WordPress ou le compte de l’éditeur, après validation de compatibilité" : "compatibilité à valider"}.`), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
+  const fixLabel = (fix: { label: string; versions: Set<string>; manual?: boolean }) => `${fix.label} : correctifs référencés ${[...fix.versions].join(", ")} ; ${fix.manual ? "Composant conservé. Mise à jour à effectuer depuis WordPress ou le compte de l’éditeur, avec le développeur si nécessaire, après validation de compatibilité" : "compatibilité à valider"}.`;
+  return { security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fixLabel), manualSecurityFixes: [...fixes.values()].filter(fix => fix.manual).map(fixLabel), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
 }

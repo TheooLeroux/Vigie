@@ -5,8 +5,8 @@ import { shellQuote } from "./wordpress";
 import type { SecurityFinding } from "./types";
 
 const version = z.string().max(80).regex(/^\d+(?:\.\d+){0,7}$/);
-const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]) });
-export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default("") }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]) }).superRefine((plan, context) => {
+const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]), updateOrigin: z.enum(["wordpress.org", "external", "unknown"]).optional(), manualReason: z.string().max(500).optional(), template: z.string().max(150).optional() });
+export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default(""), manualReason: z.string().max(500).optional(), integrity: z.enum(["verified", "unverified"]).optional() }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]) }).superRefine((plan, context) => {
   for (const item of plan.plugins) if (item.current !== item.target && (!version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) < 0)) context.addIssue({ code: "custom", message: "Version d’extension non admissible.", path: ["plugins"] });
   for (const item of plan.themes) if (item.current !== item.target) context.addIssue({ code: "custom", message: "Les thèmes sont conservés.", path: ["themes"] });
 });
@@ -31,17 +31,38 @@ wp_version_check(); wp_update_plugins();
 $core = get_site_transient('update_core'); $target = get_bloginfo('version'); $requiresPhp = '';
 foreach (($core->updates ?? array()) as $update) { if ($update->response === 'upgrade') { $target = $update->version; $requiresPhp = $update->php_version ?? ''; break; } }
 $data = array('wordpress' => array('current' => get_bloginfo('version'), 'target' => $target, 'requiresPhp' => $requiresPhp), 'php' => PHP_VERSION, 'plugins' => array(), 'themes' => array(), 'warnings' => array());
+$check = WP_CLI::runcommand('core verify-checksums --quiet', array('return' => 'all', 'exit_error' => false));
+$data['wordpress']['integrity'] = 'verified';
+if ($check->return_code !== 0 || trim($check->stderr) !== '' || trim($check->stdout) !== '') {
+    $data['wordpress']['integrity'] = 'unverified';
+    $data['wordpress']['target'] = $data['wordpress']['current']; $data['wordpress']['requiresPhp'] = '';
+    $data['wordpress']['manualReason'] = 'Fichiers du cœur personnalisés ou intégrité non vérifiable : intervention manuelle requise.';
+    $data['warnings'][] = 'WordPress : '.$data['wordpress']['manualReason'];
+}
+$origin = static function ($uri, $slug, $kind) {
+  $uri = rtrim(trim((string)$uri), '/');
+  if ($uri === '') { return 'unknown'; }
+  return in_array($uri, array('https://wordpress.org/'.$kind.'s/'.$slug, 'http://wordpress.org/'.$kind.'s/'.$slug, 'w.org/'.$kind.'/'.$slug), true) ? 'wordpress.org' : 'external';
+};
 $updates = get_site_transient('update_plugins');
 foreach (get_plugins() as $file => $headers) {
-  $update = $updates->response[$file] ?? null; $slug = $update->slug ?? (dirname($file) === '.' ? basename($file, '.php') : dirname($file));
+  $update = $updates->response[$file] ?? null; $slug = dirname($file) === '.' ? basename($file, '.php') : dirname($file);
   $dependencies = $update->requires_plugins ?? ($headers['RequiresPlugins'] ?? '');
   if (is_string($dependencies)) { $dependencies = array_values(array_filter(array_map('trim', explode(',', $dependencies)))); }
   $current = (string)$headers['Version']; $next = $update->new_version ?? $current;
   if (!preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) || !preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $next)) { $next = $current; $data['warnings'][] = $slug . ' : version absente ou non standard, extension conservée.'; }
-  $data['plugins'][] = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $update->requires_php ?? ($headers['RequiresPHP'] ?? ''), 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies);
+  $source = $origin($headers['UpdateURI'] ?? '', $slug, 'plugin'); $manual = '';
+  if ($source === 'external') { $manual = 'Distribution privée ou personnalisée : mise à jour à effectuer avec l’éditeur ou le développeur.'; }
+  elseif ($next !== $current && preg_match('/^[a-z0-9_-]{1,150}$/iD', $slug)) {
+    // A skipped verification (e.g. no published checksums) is not proof of integrity.
+    $check = WP_CLI::runcommand('plugin verify-checksums '.escapeshellarg($slug).' --version='.escapeshellarg($current).' --strict --format=json', array('return' => 'all', 'exit_error' => false));
+    if ($check->return_code !== 0 || trim($check->stderr) !== '' || trim($check->stdout) !== 'Success: Verified 1 of 1 plugins.') { $manual = 'Fichiers personnalisés ou intégrité non vérifiable : faire vérifier les différences avant mise à jour.'; }
+  }
+  if ($manual !== '') { $next = $current; }
+  $data['plugins'][] = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $update->requires_php ?? ($headers['RequiresPHP'] ?? ''), 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies, 'updateOrigin' => $source, 'manualReason' => $manual);
 }
 foreach (wp_get_themes() as $slug => $theme) {
-  $data['themes'][] = array('slug' => $slug, 'current' => (string)$theme->get('Version'), 'target' => (string)$theme->get('Version'), 'requiresPhp' => '', 'requiresWordPress' => '', 'requiresPlugins' => array());
+  $data['themes'][] = array('slug' => $slug, 'current' => (string)$theme->get('Version'), 'target' => (string)$theme->get('Version'), 'requiresPhp' => '', 'requiresWordPress' => '', 'requiresPlugins' => array(), 'updateOrigin' => $origin($theme->get('UpdateURI'), $slug, 'theme'), 'template' => (string)$theme->get('Template'));
 }
 echo 'VIGIE_PLAN=' . base64_encode(wp_json_encode($data)) . "\\n";`;
   return php;

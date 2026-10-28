@@ -26,6 +26,7 @@ import { nodeCatalogState } from "./node-catalog-state";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
 import { freeWordPressScanner } from "./wordpress-free-security";
+import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
@@ -381,14 +382,16 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
     const plan = await scan.prepare(parseWordPressPlan(await execute(wordpressPlanScript(target.root))));
     checkWordPressRequirements(plan);
     const baseline = await scan(plan, false);
-    result.checks = [securityCheck("WPVulnerability", "before", "WordPress et extensions couvertes", baseline)];
+    result.checks = [securityCheck("WPVulnerability", "before", "WordPress, extensions et thèmes publics identifiables", baseline)];
     await progress("checking", "Vérification de sécurité des versions WordPress candidates.");
-    const candidate = securityCheck("WPVulnerability", "candidate", "Versions proposées de WordPress et des extensions", await scan(plan, true), baseline);
+    const candidateFindings = await scan(plan, true);
+    recordWordPressManualUpdates(result, plan, fresh, candidateFindings);
+    const candidate = wordpressMaintenanceCheck(plan, "candidate", "Versions proposées et composants conservés de WordPress", candidateFindings);
     result.checks.push(candidate);
-    await progress("checking", "Sécurité WordPress et prérequis vérifiés.");
+    await progress("checking", "Contrôle des versions à installer terminé ; composants manuels conservés.");
     requireSecurityPass(candidate);
     result.warnings.push(...scan.warnings);
-    if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) { result.stage = "completed"; result.message = "Aucune mise à jour applicable à WordPress ou aux extensions."; return; }
+    if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) { result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return; }
     await progress("checking", "Vérification de WordPress et sauvegarde des fichiers et de la base.");
     const backupOutput = await execute(wordpressBackupScript(target.root, username, run.id, target.url!, fresh.php!.version));
     const backup = backupOutput.match(/^VIGIE_BACKUP=(\/home\/[\w-]+\/\.vigie-backups\/[a-f0-9-]{36}\/[a-f0-9]{12})$/m)?.[1];
@@ -407,12 +410,12 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
       const key = kind as "plugins" | "themes";
       return installed[key].length !== plan[key].length || plan[key].some(item => installed[key].find(next => next.slug === item.slug)?.current !== item.target);
     })) throw new ApiError("Les versions WordPress installées ne correspondent pas au plan vérifié. Sauvegarde conservée.");
-    const finalCheck = securityCheck("WPVulnerability", "after", "Versions réellement installées après mise à jour", await scan(installed, false), baseline);
+    const finalCheck = wordpressMaintenanceCheck(plan, "after", "Versions réellement installées après mise à jour", await scan(installed, false));
     result.checks.push(finalCheck);
     await progress("verifying", "Contrôle de sécurité WordPress après installation.");
     requireSecurityPass(finalCheck);
     result.stage = "completed";
-    result.message = "WordPress et extensions mis à jour ; contrôle HTTPS réussi. PHP et thèmes conservés.";
+    result.message = wordpressCompletionMessage(result, true);
     result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
   });
 }
@@ -457,7 +460,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       }
       requireZeroFinalFindings(run.results);
       run.stage = "completed";
-      run.message = run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
+      const manualCount = run.results.reduce((count, result) => count + (result.manualUpdates?.length || 0), 0);
+      run.message = manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       await log("live", "updates.completed", run.message, run.projectId);
     });
   } catch (error) {

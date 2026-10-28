@@ -302,7 +302,7 @@ export async function observerPlan(id: string) {
     project: item.project.name,
     path: posix.join(item.documentRoot, "wp-content/mu-plugins", observerFile),
     url: (await inventoryUrl(item)),
-    version: "1.0.4",
+    version: "1.0.5",
     sourceSha256: createHash("sha256").update(source).digest("hex"),
     installed: Boolean((await observerRow(id))),
     source,
@@ -469,11 +469,13 @@ async function installObserverOnAccount(
       }
       (await transaction(async () => {
         (await assertCurrent(item));
+        const current = await observerRow(id);
+        if (!current) throw new ApiError("Le rattachement du connecteur a changé pendant son installation.", 409);
         (await (await hostingStorage())
           .prepare(
-            "UPDATE hosting_observers SET data=json_set(data,'$.sourceSha256',?) WHERE installation_id=?",
+            "UPDATE hosting_observers SET data=? WHERE installation_id=?",
           )
-          .run(hash, id));
+          .run(JSON.stringify({ ...JSON.parse(current.data), sourceSha256: hash }), id));
       }));
       const snapshot = await enrichPhpRelease(
         await collectObserver(plan.url, root, secret, transport, resolveDns),
@@ -497,7 +499,7 @@ async function installObserverOnAccount(
         (await log(
           "live",
           "hosting.observer_installed",
-          `Connecteur d’inventaire WordPress 1.0.4 installé et vérifié sur ${item.domains[0]}.`,
+          `Connecteur d’inventaire WordPress 1.0.5 installé et vérifié sur ${item.domains[0]}.`,
           item.project!.id,
         ));
       }));

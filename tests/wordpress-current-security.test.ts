@@ -42,3 +42,19 @@ test("Contrôle WordPress en lecture seule : cache lié aux versions, aucun ordr
   assert.ok(failed.error);
   assert.equal(failed.check, undefined);
 });
+
+test("Contrôle en lecture seule : interventions manuelles avant exécution et mises à jour publiques laissées admissibles", async () => {
+  const target: UpdateTarget = { id: "wordpress:manual-readonly", remoteId: "manual-readonly", name: "Fixture", projectId: "project", connectionId: "hosting", root: "/home/fixture/site", provider: "o2switch", mode: "wordpress", url: "https://example.test", environmentId: null, repository: null, branch: null, configured: true, unavailable: null };
+  const component = (slug: string) => ({ slug, version: "1", latestVersion: "2", updateState: "available", active: false });
+  const site = { id: target.remoteId, project: healthFixture().project, connectionId: "hosting", documentRoot: target.root, inventory: { source: "wordpress-observer", observedAt: new Date().toISOString(), wordpress: { version: "7.1.3", updateState: "current" }, php: { version: "8.2.35" }, plugins: [component("public"), component("private")], themes: [component("parent")], error: null } } as unknown as HostingInstallationView;
+  const dependencies = { site: async () => site, transport: (async input => {
+    const url = new URL(String(input)), identity = url.pathname.split("/")[2];
+    const issue = { uuid: "public-issue", operator: { max_version: "2", max_operator: "lt" } };
+    return Response.json({ error: 0, updated: 1, data: url.pathname.startsWith("/core/") ? { core: identity, vulnerability: [] } : url.pathname.startsWith("/theme/") ? { theme: identity, name: identity, vulnerability: [] } : { plugin: identity, name: identity === "private" ? null : identity, link: `https://wordpress.org/plugins/${identity}/`, vulnerability: identity === "public" ? [issue] : [] } });
+  }) as typeof fetch };
+  const observation = await currentWordPressSecurity(target, dependencies);
+  assert.equal(observation.check?.findings.length, 1, "la vulnérabilité publique reste visible");
+  assert.deepEqual(observation.manualUpdates?.map(item => item.package), ["plugins/private", "themes/parent"]);
+  assert.equal(observation.manualUpdates?.[0].target, "2");
+  assert.deepEqual((await currentWordPressSecurity(target, { ...dependencies, cacheOnly: true })).manualUpdates, observation.manualUpdates);
+});

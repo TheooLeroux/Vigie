@@ -141,6 +141,7 @@ function ComponentsTable({
                   {item.autoUpdate === true && (
                     <small>Mises à jour automatiques activées</small>
                   )}
+                  {item.mustUse && item.slug === "vigie-observer" && item.file === "vigie-observer.php" ? <small>Connecteur géré automatiquement par Vigie.</small> : (item.mustUse || item.template || item.updateOrigin === "external") && <small className="wp-warning">À gérer manuellement · {item.mustUse ? "extension obligatoire" : item.template ? "thème enfant personnalisé" : "distribution privée ou personnalisée"}. Les autres mises à jour restent possibles.</small>}
                 </td>
                 <td>{item.version || "Inconnue"}</td>
                 <td>

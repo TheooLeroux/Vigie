@@ -83,7 +83,7 @@ test("Résumé projet : absence de catalogue ne devient pas un état sécurisé 
   assert.doesNotMatch(html, /Aucune alerte connue|Aucune mise à jour signalée/);
   detail.railway = healthFixture().railway;
   detail.railway![0].connectionError = "Relevé indisponible";
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail })), /incomplets ou à actualiser/);
+  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail })), /Couverture partielle|Contrôle à actualiser/);
 });
 
 test("Résumé projet : WordPress, extensions, thèmes et PHP ; une mise à jour ordinaire ne devient pas une faille", () => {

@@ -32,6 +32,6 @@ test("WordPress : ancien échec reste historique mais sa présentation explique 
   const html = renderToStaticMarkup(createElement(UpdateProgress, { run }));
   assert.match(html, /Mise à jour bloquée/);
   assert.doesNotMatch(html, /Non publiée|Recherche d’une autre combinaison/);
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail: healthFixture(), updates: state })), /Mise à jour WordPress bloquée/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail: healthFixture(), updates: state })), /Dernière tentative WordPress bloquée/);
   assert.match(run.message, /Recherche/, "la présentation ne réécrit pas le rapport historique");
 });

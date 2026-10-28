@@ -2,6 +2,7 @@ import { posix } from "node:path";
 import type { SiteInventory, WordPressComponent } from "../types";
 import type { cpanelReadClient } from "./cpanel-read";
 import { catalogUpdate, unknownUpdate } from "./wordpress-catalog";
+import { wordPressUpdateOrigin } from "../wordpress-component-policy";
 export function readHeader(source: string, label: string): string | null {
   return (
     source
@@ -36,6 +37,7 @@ export function componentFromHeader(
     requiresPhp: readHeader(source, "Requires PHP"),
     requiresWordPress: readHeader(source, "Requires at least"),
     template: kind === "theme" ? readHeader(source, "Template") : null,
+    updateOrigin: wordPressUpdateOrigin(readHeader(source, "Update URI"), file.includes("/") ? file.split("/")[0] : file.replace(/\.php$/, ""), kind),
     ...unknownUpdate(),
   };
 }
@@ -125,11 +127,9 @@ export async function collectWordPressFiles(
           );
           if (!component) continue;
           found = true;
-          const external = readHeader(text, "Update URI");
           if (
             !component.mustUse &&
-            (!external ||
-              /^https?:\/\/(?:www\.)?wordpress\.org\//i.test(external))
+            component.updateOrigin !== "external"
           )
             Object.assign(
               component,
@@ -172,7 +172,7 @@ export async function collectWordPressFiles(
           ),
           theme = componentFromHeader(text, entry.file + "/style.css", "theme");
         if (theme) {
-          if (!theme.template)
+          if (!theme.template && theme.updateOrigin !== "external")
             Object.assign(
               theme,
               await catalogUpdate(

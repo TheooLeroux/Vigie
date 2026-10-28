@@ -50,8 +50,8 @@ const registry = (parents: PackageVersion[], safe = ["2.2.0"], additional: Recor
     const url = new URL(String(input));
     if (url.hostname === "api.osv.dev") {
       assert.equal(url.pathname, "/v1/querybatch");
-      const queries = JSON.parse(String(options?.body)).queries as { version: string }[];
-      return Response.json({ results: queries.map(item => safe.includes(item.version) ? {} : { vulns: [{ id: alert.id }] }) });
+      const queries = JSON.parse(String(options?.body)).queries as { package: { name: string }; version: string }[];
+      return Response.json({ results: queries.map(item => !["indirect", "other"].includes(item.package.name) || safe.includes(item.version) ? {} : { vulns: [{ id: alert.id }] }) });
     }
     assert.equal(url.origin, "https://registry.npmjs.org");
     const latest = url.pathname.endsWith("/latest"), name = decodeURIComponent(url.pathname.slice(1).replace(/\/latest$/, ""));
@@ -71,6 +71,33 @@ async function fixture(parent = "2.0.0", range = "^1.0.0") {
   return { folder, manifest, content, originals };
 }
 const noPatch: typeof runCommand = async () => JSON.stringify({ patches: [] });
+
+test("Remédiation : trouve un parent corrigé au-delà des quarante premières versions", async () => {
+  const current = await fixture("3.0.55");
+  const parents = Array.from({ length: 56 }, (_, index) => ({ version: `3.0.${55 - index}`, dependencies: { indirect: index === 45 ? "^2.1.2" : "^1" } }));
+  try {
+    const decision = await createNodeRemediator(registry(parents), noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set());
+    assert.equal(decision.kind, "parents");
+    if (decision.kind === "parents") assert.equal(decision.constraints.get("")?.parent, "3.0.10");
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
+
+test("Remédiation : un parent qui corrige son enfant mais possède sa propre faille est écarté", async () => {
+  const current = await fixture();
+  const base = registry([{ version: "3.0.0", dependencies: { indirect: "^2" } }, { version: "2.0.0", dependencies: { indirect: "^2" } }]);
+  const transport: typeof fetch = async (input, options) => {
+    if (String(input).includes("api.osv.dev")) {
+      const queries = JSON.parse(String(options?.body)).queries;
+      if (queries.every((item: { package: { name: string } }) => item.package.name === "parent")) return Response.json({ results: queries.map((item: { version: string }) => item.version === "3.0.0" ? { vulns: [{ id: "GHSA-parent-low" }] } : {}) });
+    }
+    return base(input, options);
+  };
+  try {
+    const decision = await createNodeRemediator(transport, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set());
+    assert.equal(decision.kind, "parents");
+    if (decision.kind === "parents") assert.equal(decision.constraints.get("")?.parent, "2.0.0");
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
 test("Remédiation : les suffixes incompatibles communs sont prouvés une seule fois dans le budget", async () => {
   const current = await fixture();
   try {
@@ -327,7 +354,7 @@ test("Remédiation : registre ou service OSV indisponible ne deviennent pas une 
       return transport(input, options);
     };
     assert.equal((await createNodeRemediator(transient, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set())).kind, "parents");
-    assert.equal(attempts, 2);
+    assert.equal(attempts, 3, "une reprise du lot de correctifs puis un lot pour les parents eux-mêmes");
     const offline: typeof fetch = (input, options) => String(input).startsWith("https://api.osv.dev/") ? Promise.reject(new TypeError("fetch failed")) : transport(input, options);
     await assert.rejects(createNodeRemediator(offline, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set()), /OSV est injoignable.*indirect.*deux tentatives/);
   } finally { await rm(current.folder, { recursive: true, force: true }); }

@@ -11,6 +11,31 @@ function FindingDetails({ finding }: { finding: SecurityFinding }) {
   return <div><p><strong>{finding.title || finding.package}</strong></p><p><code>{finding.package}@{finding.version}</code> · {finding.aliases[0] || finding.id} · sévérité {level}</p>{finding.explanation && <p>{finding.explanation}</p>}{finding.fixedVersions?.length ? <p>Version(s) correctrice(s) référencée(s) : {finding.fixedVersions.join(", ")}. Leur compatibilité doit être vérifiée avant installation.</p> : null}{finding.url && <a href={finding.url} target="_blank" rel="noreferrer">Consulter la source du signalement</a>}</div>;
 }
 export const updateStageLabels: Record<UpdateStage, string> = { queued: "En attente", checking: "Vérification", updating: "Mise à jour", publishing: "Publication", verifying: "Contrôle du déploiement", completed: "Terminé", failed: "Non publiée", attention: "À vérifier" };
+export function UpdateReadiness({ state }: { state: UpdateState }) {
+  const ready = state.targets.filter(target => !target.unavailable);
+  const wordpress = state.targets.some(target => target.mode === "wordpress");
+  return <div className="updates-note" role="status">
+    {!state.enabled && <p><strong>Maintenance non activée.</strong> {state.disabledReason || "L’exécuteur de maintenance doit être configuré et activé."}</p>}
+    {state.targets.filter(target => target.unavailable).map(target => <p key={target.id}><strong>Vérification technique · {target.name} :</strong> {target.unavailable}</p>)}
+    {state.enabled && ready.length > 0 && <p>{wordpress ? "WordPress est prêt pour une maintenance des composants compatibles." : `${ready.length} service(s) prêt(s) sur ${state.targets.length}.`}</p>}
+    {state.targets.length === 0 && <p>Aucun service de mise à jour rattaché. Consultez les connexions et la configuration.</p>}
+    {wordpress && <p>Les composants manuels sont conservés et signalés. Ils ne bloquent pas la mise à jour du cœur et des autres extensions compatibles.</p>}
+  </div>;
+}
+export function WordPressManualUpdates({ run, observations, targets = [] }: { run?: UpdateRun; observations?: UpdateState["currentSecurity"]; targets?: UpdateTarget[] }) {
+  const current = observations?.filter(item => !item.error && item.check && item.manualUpdates !== undefined) || [];
+  const groups = current.length ? current.map(item => ({ targetId: item.targetId, name: targets.find(target => target.id === item.targetId)?.name || item.targetId, manualUpdates: item.manualUpdates })) : run?.results || [];
+  if (!groups.some(result => result.manualUpdates?.length)) return null;
+  const at = current.length ? current.map(item => item.check!.checkedAt).sort()[0] : run?.updatedAt;
+  return <div className="updates-note" role="status">
+    <strong>{current.length ? "Composants à traiter manuellement" : "Interventions manuelles restantes"}</strong>
+    <p>{current.length ? "Selon le contrôle en lecture seule, ces composants demandent une intervention ou une vérification manuelle." : "Ces composants ont été conservés."} Ils n’empêchent pas la mise à jour des autres composants ; leurs alertes de sécurité restent à traiter. {at && <>Liste relevée le {formatDate(at)}.</>}</p>
+    <ul>{groups.flatMap(result => (result.manualUpdates || []).map(item => <li key={`${result.targetId}:${item.package}`}>
+      <strong>{result.name} · {item.package} · {item.version || "version inconnue"}{item.target ? ` → ${item.target}` : " · mise à jour à vérifier"}</strong>
+      <p>{item.reason} {item.action}</p>
+    </li>))}</ul>
+  </div>;
+}
 export function UpdateProgress({ run }: { run: UpdateRun }) {
   const active = activeUpdateStages.includes(run.stage);
   const delayed = active && Date.now() - Date.parse(run.updatedAt) > 10 * 60_000;
@@ -76,6 +101,7 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const available = state?.targets.filter(target => !target.unavailable) || [];
   const unresolved = latest?.stage === "attention";
+  const newerObservation = latest?.stage === "failed" && state?.currentSecurity?.some(item => !item.error && item.check && Date.parse(item.check.checkedAt) > Date.parse(latest.updatedAt));
   return <section id="project-updates" className="panel project-updates" aria-label="Mises à jour du projet">
     <div className="updates-heading"><div><h2>Mettre le projet à jour</h2><p>{state?.targets.some(target => target.mode === "wordpress") ? "WordPress et extensions. Les thèmes se mettent à jour depuis WordPress." : "Node LTS et dépendances stables."}</p></div>
       <button className="button primary" disabled={busy || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
@@ -87,10 +113,9 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
     </div>
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
-    {state && !state.enabled && <p className="updates-note">Le service de mise à jour doit être activé une première fois par un administrateur.</p>}
-    {state && <p className="updates-note">{state.targets.length ? `${available.length} service(s) prêt(s) sur ${state.targets.length}.` : "Aucun service de mise à jour rattaché. Consultez les connexions et la configuration."}</p>}
-    {state?.targets.filter(target => target.unavailable).map(target => <p key={target.id} className="updates-note" role="status"><strong>{target.name} : </strong>{target.unavailable}</p>)}
-    {latest && (latest.stage === "completed" ? <details className="updates-details"><summary>Dernière mise à jour terminée · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
+    {state && <UpdateReadiness state={state} />}
+    {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
+    <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />
     {!!state?.currentSecurity?.length && <details className="updates-details"><summary>Rapports de sécurité</summary>
       {state.currentSecurity.map(observation => <details className="updates-security-report" key={observation.targetId}><summary>{state.targets.find(target => target.id === observation.targetId)?.name || "Service"}{observation.check ? ` · ${observation.check.findings.length} signalement(s)` : " · indisponible"}</summary>{observation.error && <p role="status">{observation.error}</p>}{observation.check && <><p>{formatDate(observation.check.checkedAt)} · Ce contrôle ne lance aucune mise à jour. Les rapports des exécutions précédentes restent dans l’historique.</p>{observation.check.findings.map(finding => <FindingDetails key={finding.id} finding={finding} />)}{!observation.check.findings.length && <p>Aucune vulnérabilité connue dans le périmètre contrôlé.</p>}</>}{observation.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>)}
     </details>}

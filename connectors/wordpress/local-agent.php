@@ -81,11 +81,13 @@ function va_validate_plan(array $plan): void {
 function va_same_versions(array $actual, array $expected, bool $updated): void {
     $field = $updated ? 'target' : 'current';
     if ($actual['wordpress']['current'] !== $expected['wordpress'][$field] || $actual['php'] !== $expected['php']) { throw new RuntimeException('versions_changed'); }
+    if (!$updated && $expected['wordpress']['current'] !== $expected['wordpress']['target'] && !empty($actual['wordpress']['manualReason'])) { throw new RuntimeException('component_integrity_changed'); }
     foreach (['plugins', 'themes'] as $kind) {
         if (count($actual[$kind]) !== count($expected[$kind])) { throw new RuntimeException('components_changed'); }
         foreach ($expected[$kind] as $item) {
             $match = array_values(array_filter($actual[$kind], static fn($v) => $v['slug'] === $item['slug']));
             if (count($match) !== 1 || $match[0]['current'] !== $item[$field]) { throw new RuntimeException('versions_changed'); }
+            if (!$updated && $item['current'] !== $item['target'] && !empty($match[0]['manualReason'])) { throw new RuntimeException('component_integrity_changed'); }
         }
     }
 }
@@ -131,6 +133,13 @@ function va_update(array $config, array $job): array {
     if ($plan['php'] !== PHP_VERSION || ($job['webPhp'] ?? null) !== PHP_VERSION) { throw new RuntimeException('php_mismatch'); }
     va_same_versions(va_plan($config), $plan, false);
     va_verify_backup($config, $job['runId']);
+    // Recheck immediately before mutations, including edits made after inspection.
+    foreach ($plan['plugins'] as $item) {
+        if ($item['current'] !== $item['target']) {
+            $verified = va_wp($config, ['plugin', 'verify-checksums', $item['slug'], '--version='.$item['current'], '--strict', '--format=json']);
+            if (trim($verified) !== 'Success: Verified 1 of 1 plugins.') { throw new RuntimeException('component_integrity_changed'); }
+        }
+    }
     va_wp($config, ['maintenance-mode', 'activate']);
     try {
         if ($plan['wordpress']['current'] !== $plan['wordpress']['target']) { va_wp($config, ['core','update','--version='.$plan['wordpress']['target']], 300); }
@@ -138,7 +147,7 @@ function va_update(array $config, array $job): array {
         foreach ($plan['plugins'] as $item) {
             if ($item['current'] !== $item['target']) { va_wp($config, ['plugin','update',$item['slug'],'--version='.$item['target']], 300); }
         }
-        va_wp($config, ['core','verify-checksums']);
+        if (($plan['wordpress']['integrity'] ?? null) !== 'unverified') { va_wp($config, ['core','verify-checksums']); }
         va_wp($config, ['cache','flush']);
     } finally {
         // This removal does not need WordPress to boot after a fatal plugin error.

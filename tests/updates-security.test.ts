@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseOsv, parseTrivy, requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, securityCheck, severity } from "../src/lib/updates/security";
+import { parseOsv, parseTrivy, requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, securityCheck, severity, SecurityPolicyError } from "../src/lib/updates/security";
 import { checkWordPressRequirements, compareWordPressVersions, parseWordPressPlan, wordPressScanner, wordpressPlanSchema, wordpressPlanScript, wordpressVulnerabilities } from "../src/lib/updates/wordpress-security";
 import { wordpressUpdateScript } from "../src/lib/updates/wordpress";
 import { runCommand } from "../src/lib/updates/process";
@@ -68,6 +68,8 @@ test("Trivy : paquets système et arrêt sur rapport incomplet ou système hors 
   assert.throws(() => parseTrivy(JSON.stringify({ ...report, Metadata: {} })), /n’a pas identifié/);
   assert.throws(() => parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", Eosl: true } } })), /fin de support/);
   assert.ok(parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", Eosl: true } } }), true).some(item => item.id === "EOL-OS"));
+  assert.throws(() => parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", EOSL: true } } })), /fin de support/);
+  assert.ok(parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", EOSL: true } } }), true).some(item => item.id === "EOL-OS"));
   assert.equal(dockerRuntimeBase("FROM node:20-bookworm AS build\nFROM node:22-slim\n"), "node:22-slim");
 });
 test("OSV : seuls les manifestes et verrous sont fournis, jamais les sources ou secrets du worker", async () => {
@@ -113,11 +115,31 @@ test("Trivy : commande bornée, pas de secrets, cible autorisée et erreurs non 
     assert.equal(command, "trivy");
     assert.ok(args.includes("--scanners=vuln"));
     assert.ok(!options?.env?.DATABASE_URL);
-    return JSON.stringify({ SchemaVersion: 2, Metadata: { OS: { Family: "debian" } }, Results: [{ Target: "debian" }] });
+    assert.ok(args.includes("--output"));
+    await writeFile(args[args.indexOf("--output") + 1], JSON.stringify({ SchemaVersion: 2, Metadata: { OS: { Family: "debian" } }, Results: [{ Target: "debian" }] }));
+    return "";
   });
   assert.ok(inspected);
   assert.deepEqual(report, []);
-  await assert.rejects(scanDockerImage("node:24-slim", async () => '{}'), /rapport d’image/);
+  await assert.rejects(scanDockerImage("node:24-slim", async (_command, args) => { await writeFile(args[args.indexOf("--output") + 1], '{}'); return ""; }), /rapport d’image/);
+  await assert.rejects(scanDockerImage("node:24-slim", async () => ""), /rapport d’image/);
+});
+
+test("Trivy : un rapport détaillé supérieur à la limite stdout conserve toutes ses alertes", async () => {
+  const report = { SchemaVersion: 2, Metadata: { OS: { Family: "debian", EOSL: false } }, Results: [{ Target: "debian", Vulnerabilities: [{ VulnerabilityID: "CVE-2026-12345", PkgName: "openssl", InstalledVersion: "3", Severity: "LOW", Description: "x".repeat(8_000_001) }, { VulnerabilityID: "CVE-2026-12346", PkgName: "libc6", InstalledVersion: "2", Severity: "UNKNOWN" }] }] };
+  const findings = await scanDockerImage("node:24-slim", async (_command, args) => { await writeFile(args[args.indexOf("--output") + 1], JSON.stringify(report)); return ""; });
+  assert.equal(findings.length, 2);
+  assert.deepEqual(findings.map(item => item.severity), ["low", "unknown"]);
+  assert.throws(() => requireSecurityPass(securityCheck("Trivy", "candidate", "fixture", findings)), SecurityPolicyError);
+});
+
+test("Trivy : un rapport au-delà du budget de lecture est bloqué avant son chargement", async () => {
+  await assert.rejects(scanDockerImage("node:24-slim", async (_command, args) => {
+    const file = await open(args[args.indexOf("--output") + 1], "w");
+    try { await file.truncate(64 * 1024 * 1024 + 1); }
+    finally { await file.close(); }
+    return "";
+  }), /budget de lecture/);
 });
 test("Exécuteur : seul le code vulnérabilités explicitement accepté autorise la lecture d’un rapport", async () => {
   assert.equal(await runCommand(process.execPath, ["-e", "process.stdout.write('report');process.exit(1)"], { acceptedExitCodes: [1] }), "report");

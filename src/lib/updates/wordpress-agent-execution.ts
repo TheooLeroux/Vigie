@@ -10,6 +10,7 @@ import { checkPublicSite } from "./providers";
 import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { refreshWordPressWeb } from "./wordpress-web-check";
+import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 
 export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget, result: UpdateResult, inventory: SiteInventory, progress: (stage: UpdateStage, message: string) => Promise<void>) {
   return withLocalWordPressAgent(target, async (operation, settings) => {
@@ -23,13 +24,15 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     const plan = await scan.prepare(proposed);
     checkWordPressRequirements(plan);
     const baseline = await scan(plan, false);
-    result.checks = [securityCheck("WPVulnerability", "before", "WordPress et extensions couvertes par la base gratuite", baseline)];
-    const candidate = securityCheck("WPVulnerability", "candidate", "Versions proposées de WordPress et des extensions", await scan(plan, true), baseline);
+    result.checks = [securityCheck("WPVulnerability", "before", "WordPress, extensions et thèmes publics identifiables", baseline)];
+    const candidateFindings = await scan(plan, true);
+    recordWordPressManualUpdates(result, plan, inventory, candidateFindings);
+    const candidate = wordpressMaintenanceCheck(plan, "candidate", "Versions proposées et composants conservés de WordPress", candidateFindings);
     result.warnings.push(...scan.warnings, "PHP est affiché et conservé ; sa gestion reste chez l’hébergeur. Les thèmes sont conservés.");
     result.checks.push(candidate); requireSecurityPass(candidate);
     if (scan.warnings.length && candidate.status === "passed") { candidate.status = "warning"; candidate.message += " Certains composants sont conservés et hors couverture ; détails dans le suivi."; }
     if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) {
-      result.stage = "completed"; result.message = "Aucune mise à jour applicable à WordPress ou aux extensions. Consultez les éventuelles réserves."; return;
+      result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return;
     }
     await progress("checking", "Sauvegarde privée des fichiers et de la base par l’agent local.");
     const saved = await operation(run.id, "backup", { webPhp: inventory.php!.version });
@@ -50,10 +53,10 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     await refreshWordPressWeb(target, "postflight");
     const web = (await hostingInstallation(target.remoteId)).inventory;
     if (!web || web.source !== "wordpress-observer" || web.collectionMode === "early" || web.error || !web.observedAt || Date.parse(web.observedAt) < checkedAt - 5000 || web.wordpress?.version !== installed.wordpress.current || web.php?.version !== installed.php || installed.plugins.some(item => (web.plugins.find(plugin => !plugin.mustUse && plugin.slug === item.slug)?.version || "") !== item.current) || installed.themes.some(item => (web.themes.find(theme => theme.slug === item.slug)?.version || "") !== item.current)) throw new ApiError("Le WordPress chargé côté web ne confirme pas les versions installées. Les sauvegardes sont conservées.");
-    const final = securityCheck("WPVulnerability", "after", "WordPress et extensions réellement installés", await scan(installed, false), baseline);
+    const final = wordpressMaintenanceCheck(plan, "after", "WordPress, extensions et thèmes réellement installés", await scan(installed, false));
     result.checks.push(final); requireSecurityPass(final);
     result.stage = "completed";
-    result.message = "WordPress et extensions mis à jour ; contrôle HTTPS réussi. PHP et thèmes conservés.";
+    result.message = wordpressCompletionMessage(result, true);
     result.warnings.push("La sauvegarde reste privée sur l’hébergement. Une restauration de base nécessite une décision explicite sur les données nouvelles ; les flux premium et les tests métier restent à qualifier.");
   });
 }

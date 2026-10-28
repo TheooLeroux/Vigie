@@ -45,15 +45,17 @@ sha256sum -c SHA256SUMS >/dev/null
 printf 'VIGIE_BACKUP=%s\\n' "$backup"
 `;
 }
-export function wordpressUpdateScript(root: string, backup: string, plan?: WordPressUpdatePlan) {
-  const updateCommands = plan ? [
+export function wordpressUpdateScript(root: string, backup: string, plan: WordPressUpdatePlan) {
+  if (!plan) throw new ApiError("Un plan WordPress vérifié est obligatoire avant toute mise à jour.");
+  const updateCommands = [
     `test "$(wp --path="$root" core version)" = ${shellQuote(plan.wordpress.current)}`,
     ...plan.plugins.map(item => `test "$(wp --path="$root" plugin get ${shellQuote(item.slug)} --field=version)" = ${shellQuote(item.current)}`),
     ...plan.themes.map(item => `test "$(wp --path="$root" theme get ${shellQuote(item.slug)} --field=version)" = ${shellQuote(item.current)}`),
     ...(plan.wordpress.target !== plan.wordpress.current ? [`wp --path="$root" core update --version=${shellQuote(plan.wordpress.target)}`] : []),
     `wp --path="$root" core update-db`,
     ...plan.plugins.filter(item => item.target !== item.current).map(item => `wp --path="$root" plugin update ${shellQuote(item.slug)} --version=${shellQuote(item.target)}`),
-  ].join("\n") : `wp --path="$root" core update\nwp --path="$root" core update-db\nwp --path="$root" plugin update --all`;
+  ].join("\n");
+  const integrity = plan.plugins.filter(item => item.target !== item.current).map(item => `test "$(wp --path="$root" plugin verify-checksums ${shellQuote(item.slug)} --version=${shellQuote(item.current)} --strict --format=json --no-color 2>&1)" = 'Success: Verified 1 of 1 plugins.'`).join("\n");
   return `set -eu
 root=${shellQuote(root)}
 backup=${shellQuote(backup)}
@@ -61,10 +63,12 @@ test "$(realpath -- "$root")" = "$root"
 cd "$backup"
 sha256sum -c SHA256SUMS >/dev/null
 test ! -f "$root/.maintenance"
+${plan.wordpress.current !== plan.wordpress.target ? 'wp --path="$root" core verify-checksums --quiet' : ""}
+${integrity}
 wp --path="$root" maintenance-mode activate >/dev/null
 trap 'wp --path="$root" maintenance-mode deactivate >/dev/null 2>&1 || true' EXIT
 ${updateCommands}
-wp --path="$root" core verify-checksums >/dev/null
+${plan.wordpress.integrity === "unverified" ? "# Cœur conservé : intégrité à traiter manuellement." : 'wp --path="$root" core verify-checksums >/dev/null'}
 wp --path="$root" cache flush >/dev/null
 if test -f "$root/.maintenance"; then wp --path="$root" maintenance-mode deactivate >/dev/null; fi
 trap - EXIT

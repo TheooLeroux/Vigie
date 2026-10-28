@@ -4,16 +4,20 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { ApiError } from "../http";
 import { runCommand, DependencyValidationError, IndirectValidationError, PeerResolutionError } from "./process";
-import { minVersion, satisfies, validRange } from "semver";
 import { compatibleVersions, CompatibilitySelectionError, verifiedPeerConflicts } from "./versions";
 import { dockerPackages, rewriteDockerfile, validateDockerfile } from "./dockerfile";
 import { nodeTestProfile } from "./node-test-profile";
 import { SecurityPolicyError } from "./security";
 import { createNodeRemediator, npmChangedIndirectPackages, npmGraph, npmIndirectVersionsChanged, seedNpmIndirectVersions, validateNpmProposal } from "./remediation";
-import { searchIndirectCompatibility, type IndirectEvaluation } from "./indirect-compatibility";
+import { searchIndirectCompatibility, maxIndirectAttempts, type IndirectEvaluation } from "./indirect-compatibility";
 export { stableVersion } from "./versions";
 import { stableVersion } from "./versions";
 import { withPlanningSession } from "./planning";
+import { checkPackageVersions } from "./advisories";
+import { requireStrictYarnConfiguration } from "./manager-policy";
+
+const maxRemediationProposals = 24;
+const maxValidationRetries = 12;
 
 export type SourceFile = { path: string; hash: string };
 export async function latestNode(transport: typeof fetch = fetch) {
@@ -115,7 +119,7 @@ export type NodeUpdateChecks = {
 };
 type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
-export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void> };
+export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void>; execute?: typeof runCommand };
 export function nodeValidationRuntime(nodeVersion: string, execute = runCommand): NodeValidationRuntime {
   let pending: Promise<string> | undefined;
   let directory: Promise<string> | undefined, disposed = false;
@@ -151,8 +155,9 @@ export function nodeValidationRuntime(nodeVersion: string, execute = runCommand)
     return id;
   })() };
 }
-type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; priority?: string; runtime?: NodeValidationRuntime };
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; rejected?: Map<string, Record<string, string>[]>; priority?: string; runtime?: NodeValidationRuntime };
 function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
+  const execute = runtime.execute || runCommand;
   return async (root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) => {
     const name = `vigie-check-${crypto.randomUUID()}`;
     try {
@@ -162,8 +167,8 @@ function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
       // remain private to each container. Nothing crosses update executions.
       const cacheMount = downloads ? ["--mount", `type=bind,source=${downloads},target=/vigie-npm-content`] : [];
       const cacheSetup = downloads ? "mkdir -p /tmp/npm/_cacache; ln -s /vigie-npm-content /tmp/npm/_cacache/content-v2; " : "";
-      await runCommand("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), ...cacheMount, "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${cacheSetup}${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
-    } finally { await runCommand("docker", ["rm", "--force", name]).catch(() => {}); }
+      await execute("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), ...cacheMount, "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${cacheSetup}${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, strictYarnPeers: /-- yarn (?:install|run)\b/.test(commands), errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
+    } finally { await execute("docker", ["rm", "--force", name]).catch(() => {}); }
   };
 }
 
@@ -208,7 +213,7 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
 async function prepareSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch, requiredDockerRoots: string[], retry: PreparationRetry, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
-  retry = { ...retry, remediation, resolution, indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
+  retry = { ...retry, remediation, resolution, rejected: retry.rejected || new Map(), indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
   const resolutionKey = (root: string) => JSON.stringify([root, Object.entries(remediation.constraints.get(root) || {}).sort(), Object.entries(retry.limits.get(root) || {}).sort()]);
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
@@ -238,6 +243,12 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     if (!manifest.scripts?.test && !manifest.scripts?.build) throw new ApiError("Ce projet doit fournir au moins un script test ou build pour vérifier la mise à jour.");
     const localNames = names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length));
     const manager = managerCommands(manifest, localNames);
+    if (manager.lock === "yarn.lock") {
+      for (const name of names.filter(name => /(^|\/)\.yarnrc(?:\.yml)?$/.test(name))) {
+        const directory = name.includes("/") ? name.slice(0, name.lastIndexOf("/")) : "";
+        if (!directory || directory === root || root.startsWith(directory + "/")) requireStrictYarnConfiguration(await readFile(join(folder, name), "utf8"));
+      }
+    }
     const dockerName = prefix + "Dockerfile", docker = names.includes(dockerName), dockerSource = docker ? await readFile(join(folder, dockerName), "utf8") : "";
     const extra = docker ? dockerPackages(dockerSource) : {};
     const limits: Record<string, string | string[]> = Object.assign(Object.create(null), retry.limits.get(root));
@@ -245,7 +256,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     const learned = resolution.learned.get(resolutionKey(root)) || {};
     for (const [name, ranges] of Object.entries(learned)) limits[name] = Object.hasOwn(limits, name) ? [limits[name], ranges].flat() : ranges;
     let upgraded: Awaited<ReturnType<typeof compatibleVersions>>;
-    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits); }
+    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits, { screen: items => checkPackageVersions(items, transport), rejectedCombinations: retry.rejected!.get(root), platform: { os: "linux", cpu: process.arch, libc: "glibc" } }); }
     catch (error) {
       if (!(error instanceof CompatibilitySelectionError) || !Object.keys(learned).length || !Object.keys(remediation.constraints.get(root) || {}).length) throw error;
       await changedSources(folder, initialSources, allowed);
@@ -258,6 +269,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       return result;
     }
     warnings.push(...upgraded.warnings);
+    warnings.push(`${root || "racine"} : sélection optimisée, priorité au nombre de dernières versions stables puis au recul minimal ; ${upgraded.selection.screenedVersions} versions préanalysées, ${upgraded.selection.states} états explorés.`);
     for (const name of Object.keys(remediation.constraints.get(root) || {})) if (upgraded.versions[name]) remediation.tried.add(`${root}:${name}@${upgraded.versions[name]}`);
     const content = JSON.stringify(upgraded.manifest, null, 2) + "\n";
     await remember(path);
@@ -288,6 +300,15 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, packages: Object.keys(upgraded.versions), environment: profile?.environment || {} });
   }
   const isolated = nodeSandbox(folder, retry.runtime!);
+  function rejectCombination(check: typeof checks[number], candidate: Record<string, any>) {
+    const selected = { ...candidate.dependencies, ...candidate.devDependencies, ...candidate.optionalDependencies };
+    const combination = Object.fromEntries(check.packages.filter(name => stableVersion(selected[name])).sort().map(name => [name, selected[name] as string]));
+    if (!Object.keys(combination).length) return false;
+    const previous = retry.rejected!.get(check.root) || [];
+    if (previous.some(item => JSON.stringify(item) === JSON.stringify(combination))) return false;
+    retry.rejected!.set(check.root, [...previous, combination]);
+    return true;
+  }
   async function validate(check: typeof checks[number], indirects: string[], locations?: Record<string, string>) {
     const files = await snapshotSources(folder, [...new Set([...names, ...allowed])].sort());
     // Include the WHOLE repository, not only this root: tests may import sibling
@@ -308,7 +329,8 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       if (previous) validateNpmProposal(previous, await readFile(join(folder, check.lock), "utf8"));
     }
     catch (error) {
-      if (!(error instanceof PeerResolutionError) || resolution.attempts >= 8) throw error;
+      if (!(error instanceof PeerResolutionError)) throw error;
+      if (resolution.attempts >= maxRemediationProposals) throw new ApiError("Budget de résolution des pairs épuisé. Recherche incomplète ; aucune publication autorisée.", 422);
       const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
       const selected = Object.assign({}, candidate.dependencies, candidate.devDependencies, candidate.optionalDependencies);
       const conflicts = await verifiedPeerConflicts(error.conflicts, selected, transport);
@@ -343,7 +365,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       break;
     } catch (error) {
       if (!(error instanceof SecurityPolicyError) || error.check.tool !== "OSV") throw error;
-      if (++remediation.iterations > 6) throw new ApiError("La recherche de versions sécurisées atteint sa limite de six propositions. Aucun contrôle n’a été désactivé.", 422);
+      if (++remediation.iterations > maxRemediationProposals) throw new ApiError(`Budget de remédiation épuisé (${maxRemediationProposals} propositions). Recherche incomplète ; aucune publication autorisée et aucun contrôle désactivé.`, 422);
       await changedSources(folder, resolvedFiles, new Set());
       await changedSources(folder, initialSources, allowed);
       const fingerprint = JSON.stringify({ files: resolvedFiles.map(file => [file.path, file.hash]), tried: [...remediation.tried].sort(), limits: [...retry.limits] });
@@ -405,7 +427,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       if (error instanceof IndirectValidationError && check.verify) {
         const originalLock = originalVersions.get(check.lock), failedLock = await readFile(join(folder, check.lock), "utf8");
         const used = retry.indirectAttempts!.get(check.root) || 0;
-        if (originalLock && used < 6) {
+        if (originalLock && used < maxIndirectAttempts) {
           await changedSources(folder, resolvedFiles, new Set());
           await changedSources(folder, initialSources, allowed);
           const result = await searchIndirectCompatibility(originalLock, failedLock, error.packages, nodeVersion, async (candidate): Promise<IndirectEvaluation> => {
@@ -435,7 +457,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
               if (candidateError instanceof PeerResolutionError || projectValidation && candidateError instanceof ApiError && candidateError.status === 502) return { kind: "incompatible" };
               throw candidateError;
             }
-          }, transport, async message => { warnings.push(message); await security?.remediating?.(`${check.root || "racine"} : ${message}`); }, 6 - used, () => { retry.indirectAttempts!.set(check.root, (retry.indirectAttempts!.get(check.root) || 0) + 1); }, error.locations);
+          }, transport, async message => { warnings.push(message); await security?.remediating?.(`${check.root || "racine"} : ${message}`); }, maxIndirectAttempts - used, () => { retry.indirectAttempts!.set(check.root, (retry.indirectAttempts!.get(check.root) || 0) + 1); }, error.locations);
           if (result) {
             retry.lockFallbacks = new Map(retry.lockFallbacks).set(check.root, failedLock);
             retry.lockSeeds = new Map(retry.lockSeeds).set(check.root, result.lock);
@@ -446,9 +468,9 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
           await writeFile(join(folder, check.lock), failedLock);
           resolvedFiles = await snapshotSources(folder, [...allowed]);
         }
-        if ((retry.indirectAttempts!.get(check.root) || 0) > used || used >= 6) throw new ApiError(`${check.root || "racine"} : aucune version indirecte validée trouvée dans la recherche bornée. Aucun contrôle n’a été désactivé.`, 422);
+        if ((retry.indirectAttempts!.get(check.root) || 0) > used || used >= maxIndirectAttempts) throw new ApiError(`${check.root || "racine"} : aucune version indirecte validée dans le budget de ${maxIndirectAttempts} essais. Recherche incomplète au-delà du budget ; aucun contrôle désactivé.`, 422);
       }
-      if (retry.attempt >= 3) throw error;
+      if (retry.attempt >= maxValidationRetries) throw new ApiError(`Budget de validation épuisé (${maxValidationRetries} reprises). Recherche incomplète ; aucune publication autorisée.`, 422);
       if (error instanceof ApiError && error.status === 502 && !(error instanceof DependencyValidationError) && check.verify && !retry.lockFallbacks?.has(check.root)) {
         const originalLock = originalVersions.get(check.lock), candidateLock = await readFile(join(folder, check.lock), "utf8");
         if (originalLock && npmIndirectVersionsChanged(originalLock, candidateLock)) {
@@ -476,6 +498,8 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         const remaining = { ...secured };
         for (const name of rejected) delete remaining[name];
         remediation.constraints.set(check.root, remaining);
+        const manifest = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
+        rejectCombination(check, manifest);
         const message = `${check.root || "racine"} : proposition de sécurité écartée après échec des tests (${rejected.join(", ")}) ; recherche d’une autre combinaison sans ignorer les assertions.`;
         await security?.remediating?.(message);
         for (const [name, content] of originalVersions) {
@@ -487,26 +511,15 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         return result;
       }
       if (!(error instanceof DependencyValidationError)) throw error;
-      const limits = structuredClone(retry.limits), held: string[] = [];
-      let rootLimits = limits.get(check.root) || {};
       const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
-      for (const name of error.packages) {
-        const range = check.original.dependencies?.[name] || check.original.devDependencies?.[name] || check.original.optionalDependencies?.[name];
-        const minimum = typeof range === "string" && validRange(range) ? minVersion(range) : null;
-        const selected = candidate.dependencies?.[name] || candidate.devDependencies?.[name] || candidate.optionalDependencies?.[name];
-        if (!minimum || !stableVersion(selected) || satisfies(selected, `^${minimum.version}`) || Object.hasOwn(rootLimits, name)) continue;
-        rootLimits = { ...rootLimits, [name]: `^${minimum.version}` };
-        held.push(name);
-      }
-      if (!held.length) throw error;
-      limits.set(check.root, rootLimits);
-      await security?.remediating?.(`${check.root || "racine"} : reprise de compatibilité après refus des tests (${held.join(", ")}) ; nouvelle résolution, nouveau scan et tests obligatoires.`);
+      if (!rejectCombination(check, candidate)) throw error;
+      await security?.remediating?.(`${check.root || "racine"} : combinaison précise écartée après refus des tests (${error.packages.join(", ")}) ; aucune branche entière exclue. Nouvelle résolution, nouveau scan et tests obligatoires.`);
       for (const [name, content] of originalVersions) {
         if (content === null) await rm(join(folder, name), { force: true });
         else await writeFile(join(folder, name), content);
       }
-      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, limits, attempt: retry.attempt + 1, remediation, resolution }, security);
-      result.warnings.push(...held.map(name => `${name} : montée majeure écartée après les tests ; dernière version compatible de la branche actuelle retenue.`));
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1, remediation, resolution }, security);
+      result.warnings.push(...warnings, `${check.root || "racine"} : combinaison refusée mémorisée ; autre ensemble choisi et validé sans exclure une branche entière.`);
       return result;
     }
     await security?.validated(check.root, ["typecheck", "test", "build", "test:integration", "test:e2e"].filter(name => check.original.scripts?.[name]));
