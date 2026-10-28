@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { scanCurrentNode } from "../src/lib/updates/node-monitor";
 import { healthUpdates } from "./project-health-fixture";
+import { repositoryAllowed } from "../src/lib/updates/github";
 
 test("Sonde Node : analyse en lecture seule du commit déployé, sans exécuter ses scripts", async () => {
   process.env.VIGIE_UPDATES_GITHUB_TOKENS = '{"example":"unit-test-token"}';
@@ -34,9 +35,14 @@ test("Sonde Node : analyse en lecture seule du commit déployé, sans exécuter 
   assert.equal(result.checks[0].findings[0].scope, "backend");
   assert.match(result.updates[0], /1.0.0 → 2.0.0/);
   await assert.rejects(access(folder), "les sources temporaires sont supprimées");
+  process.env.VIGIE_UPDATES_REPOSITORIES = "";
+  await scanCurrentNode(target, commit, dependencies);
+  assert.equal(repositoryAllowed(target.repository!), false, "la surveillance en lecture n’accorde aucun droit de publication au dépôt");
   calls.length = 0;
   await assert.rejects(scanCurrentNode(target, null, dependencies), /commit réellement déployé/);
   assert.deepEqual(calls, [], "aucun recours à la tête de branche");
   await assert.rejects(scanCurrentNode({ ...target, root: "../escape" }, commit, dependencies), /Répertoire source invalide/);
+  await assert.rejects(scanCurrentNode({ ...target, repository: "example/../escape" }, commit, dependencies), /accès GitHub en lecture/);
+  await assert.rejects(scanCurrentNode({ ...target, mode: "archive", repository: null }, commit, dependencies), /ne sont pas reliées/);
   await assert.rejects(scanCurrentNode(target, commit, { ...dependencies, github: async () => [{ name: "package.json", type: "file" }, { name: "package-lock.json", type: "symlink" }] }), /verrou absent/);
 });

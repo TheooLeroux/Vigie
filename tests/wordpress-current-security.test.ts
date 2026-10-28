@@ -29,6 +29,13 @@ test("Contrôle WordPress en lecture seule : cache lié aux versions, aucun ordr
   assert.equal(calls, 4, "l’ouverture d’une fiche ne déclenche aucun scan distant");
   assert.equal((await currentWordPressSecurity(target, dependencies)).check?.findings.length, 0);
   assert.equal(calls, 6, "une nouvelle version invalide le contrôle précédent");
+  site.inventory!.collectionMode = "early";
+  const early = await currentWordPressSecurity(target, dependencies);
+  assert.equal(early.error, undefined, "les versions relevées par le connecteur signé restent analysables sans chargement complet de WordPress");
+  assert.equal(early.check?.findings.length, 0);
+  assert.ok(early.warnings.some(warning => warning.includes("mode de secours")));
+  assert.equal(calls, 8);
+  assert.equal((await currentWordPressSecurity(target, { ...dependencies, cacheOnly: true })).warnings.some(warning => warning.includes("mode de secours")), true);
   assert.ok((await currentWordPressSecurity({ ...target, root: "/another" }, dependencies)).error);
   site.inventory!.plugins[0].version = "3";
   const failed = await currentWordPressSecurity(target, { ...dependencies, transport: (async () => { throw new Error("offline"); }) as typeof fetch });

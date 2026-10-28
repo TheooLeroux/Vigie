@@ -13,8 +13,8 @@ export async function currentWordPressSecurity(target: UpdateTarget, dependencie
   const site = await (dependencies.site || hostingInstallation)(target.remoteId), inventory = site.inventory;
   const versions = inventory ? wordpressSecurityVersions(inventory) : "";
   const unavailable = { targetId: target.id, versions, warnings: [], error: "Actualisez l’inventaire WordPress pour contrôler les versions actuelles." };
-  if (target.mode !== "wordpress" || site.project?.id !== target.projectId || site.connectionId !== target.connectionId || site.documentRoot !== target.root || site.missingSince || !inventory?.wordpress || !inventory.php || inventory.error || inventory.collectionMode === "early" || !inventory.observedAt || !Number.isFinite(Date.parse(inventory.observedAt)) || Date.now() - Date.parse(inventory.observedAt) > 24 * 3600_000) return unavailable;
-  const key = "security:wp-current:1:" + createHash("sha256").update(JSON.stringify([target.id, target.projectId, target.connectionId, target.root, versions])).digest("hex");
+  if (target.mode !== "wordpress" || site.project?.id !== target.projectId || site.connectionId !== target.connectionId || site.documentRoot !== target.root || site.missingSince || !inventory?.wordpress || !inventory.php || inventory.error || (inventory.collectionMode === "early" && inventory.source !== "wordpress-observer") || !inventory.observedAt || !Number.isFinite(Date.parse(inventory.observedAt)) || Date.now() - Date.parse(inventory.observedAt) > 24 * 3600_000) return unavailable;
+  const key = "security:wp-current:1:" + createHash("sha256").update(JSON.stringify([target.id, target.projectId, target.connectionId, target.root, versions, ...(inventory.collectionMode === "early" ? ["early"] : [])])).digest("hex");
   const db = await hostingStorage();
   const cached = await db.prepare("SELECT data FROM wordpress_catalog WHERE cache_key=? AND expires_at>?").get(key, new Date().toISOString()) as { data: string } | undefined;
   if (cached && !dependencies.fresh) return JSON.parse(cached.data) as Observation;
@@ -30,7 +30,9 @@ export async function currentWordPressSecurity(target: UpdateTarget, dependencie
       const findings = await scan(await scan.prepare(plan), false);
       const order = ["critical", "high", "moderate", "low", "unknown"];
       findings.sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity) || Number(a.kind === "supply-chain") - Number(b.kind === "supply-chain"));
-      result = { targetId: target.id, versions, check: securityCheck("WPVulnerability", "before", "Contrôle en lecture seule des versions actuellement installées", findings), warnings: [...scan.warnings, "Les thèmes et extensions MU ne sont pas analysés par ce contrôle."] };
+      // A signed early inventory still identifies installed core/plugin files.
+      // It proves no runtime health and must never enable maintenance operations.
+      result = { targetId: target.id, versions, check: securityCheck("WPVulnerability", "before", "Contrôle en lecture seule des versions actuellement installées", findings), warnings: [...scan.warnings, "Les thèmes et extensions MU ne sont pas analysés par ce contrôle.", ...(inventory.collectionMode === "early" ? ["Inventaire signé en mode de secours : analyse des versions installées uniquement. Le chargement complet de WordPress et la disponibilité de la maintenance ne sont pas confirmés."] : [])] };
     } catch { result = { ...unavailable, error: "Le contrôle de sécurité actuel est indisponible. Les anciens rapports restent dans l’historique et ne constituent pas un nouveau contrôle." }; }
     await db.prepare("INSERT INTO wordpress_catalog(cache_key,data,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at").run(key, JSON.stringify(result), new Date(Date.now() + (result.error ? 60_000 : 3600_000)).toISOString());
     return result;
