@@ -77,7 +77,7 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
 function scannerEnvironment(temporary: string): NodeJS.ProcessEnv {
   return { NODE_ENV: "production", PATH: process.env.PATH, HOME: temporary, TMPDIR: temporary, ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}) };
 }
-export async function scanNodeSources(folder: string, roots: string[], names: string[], execute = runCommand, inventory?: (names: string[]) => Promise<void>) {
+export async function scanNodeSources(folder: string, roots: string[], names: string[], execute = runCommand, inventory?: (names: string[], packages?: { name: string; version?: string }[]) => Promise<void>) {
   const temporary = await mkdtemp(join(tmpdir(), "vigie-osv-"));
   try {
     const locks: string[] = [];
@@ -103,7 +103,7 @@ export async function scanNodeSources(folder: string, roots: string[], names: st
     if (locks.some(lock => !report.sources.some(source => scannedLock(source) === lock))) throw new ApiError("OSV n’a pas confirmé l’analyse de tous les fichiers de verrouillage.", 502);
     if ([...nonempty].some(lock => !report.coverage.some(source => scannedLock(source.path) === lock && source.packages > 0))) throw new ApiError("OSV n’a identifié aucune dépendance dans un verrou non vide. Analyse incomplète.", 502);
     if (report.packages.some(item => item.ecosystem !== "npm" || !item.version || !valid(item.version))) throw new ApiError("OSV ne peut pas identifier précisément certaines dépendances. Une validation dédiée est nécessaire.", 502);
-    await inventory?.([...new Set(report.packages.map(item => item.name))]);
+    await inventory?.([...new Set(report.packages.map(item => item.name))], report.packages);
     return report.findings.map(finding => {
       const lock = finding.scope && scannedLock(finding.scope);
       if (!lock) throw new ApiError("OSV a renvoyé une alerte hors du périmètre analysé.", 502);

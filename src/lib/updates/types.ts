@@ -67,6 +67,7 @@ export type UpdateRun = {
   workflowRunId?: string;
 };
 export type UpdateState = {
+  automaticControls?: import("../automatic-control-state").AutomaticControl[];
   currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; error?: string }[];
   enabled: boolean;
   targets: UpdateTarget[];

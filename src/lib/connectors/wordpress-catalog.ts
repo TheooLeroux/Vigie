@@ -28,7 +28,7 @@ export async function catalogUpdate(
 ): Promise<UpdateInfo> {
   if (!/^[a-z0-9][a-z0-9_.-]{0,150}$/.test(slug) || !installed)
     return unknownUpdate();
-  const key = `${kind}:${slug}`,
+  const key = `${kind}:${slug}:hourly:1`,
     db = (await hostingStorage());
   const cached = (await db
     .prepare(
@@ -113,7 +113,7 @@ export async function catalogUpdate(
       ).run(
         key,
         JSON.stringify(answer),
-        new Date(Date.now() + 6 * 3600_000).toISOString(),
+        new Date(Date.now() + 3600_000).toISOString(),
       ));
     } catch {
       /* Unavailable catalogues must never turn into a green status. */

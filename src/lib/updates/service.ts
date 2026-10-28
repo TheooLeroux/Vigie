@@ -14,6 +14,7 @@ import { requestAgentInstallation } from "./wordpress-agent-setup";
 import { withHostingCredentials } from "../hosting-connections";
 import type { SourceSettings } from "./types";
 import { currentWordPressSecurity } from "./wordpress-current-security";
+import { readAutomaticControl } from "../automatic-control-storage";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -21,7 +22,7 @@ export function updatesEnabled() {
 export async function projectUpdates(projectId: string): Promise<UpdateState> {
   const targets = await updateTargets(projectId);
   const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
-  return { enabled: updatesEnabled(), targets, currentSecurity: await Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target))), runs: rows.map(row => {
+  return { enabled: updatesEnabled(), targets, automaticControls: (await Promise.all(targets.map(target => readAutomaticControl(target.id)))).filter(item => item !== null), currentSecurity: await Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))), runs: rows.map(row => {
     const run = JSON.parse(row.data) as UpdateRun;
     delete run.nodeReceipts;
     return run;

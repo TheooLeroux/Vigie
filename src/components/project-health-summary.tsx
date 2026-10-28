@@ -5,11 +5,15 @@ import type { ProjectDetail } from "@/lib/types";
 import type { UpdateState } from "@/lib/updates/types";
 import { wordpressSecurityVersions } from "@/lib/updates/wordpress-security-key";
 import { wordpressBlockingMessage } from "@/lib/updates/wordpress-blocking";
+import { automaticControlFresh, controlInterval, controlSource } from "@/lib/automatic-control-state";
 
 export function ProjectHealthSummary({ detail, updates, updatesUnavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; updatesUnavailable?: boolean }) {
   const health = projectHealth(detail, updates);
+  const controls = updates?.automaticControls || [];
+  const pendingControl = updates?.automaticControls !== undefined && updates.targets.some(target => !controls.some(control => control.targetId === target.id && automaticControlFresh(control) && controlSource(target, detail)?.identity === control.identity));
+  const lastControlAt = controls.map(control => control.checkedAt).filter((at): at is string => !!at).sort().at(-1);
   const wordpressBlocked = updates?.runs[0]?.stage === "failed" && updates.runs[0].results.some(result => result.checks?.some(check => wordpressBlockingMessage(check)));
-  const securityUnavailable = updates?.currentSecurity?.some(item => {
+  const securityUnavailable = pendingControl || updates?.currentSecurity?.some(item => {
     const target = updates.targets.find(target => target.id === item.targetId);
     const inventory = detail.hosting?.find(site => site.id === target?.remoteId && site.connectionId === target.connectionId)?.inventory;
     return item.error || !inventory || item.versions !== wordpressSecurityVersions(inventory);
@@ -29,6 +33,10 @@ export function ProjectHealthSummary({ detail, updates, updatesUnavailable = fal
         <summary>{security ? "Voir les alertes" : "Périmètre du contrôle"}</summary>
         {security && <ul>{health.security.map(item => <li key={item}>{item}</li>)}</ul>}
         <p>Les composants non analysés restent à vérifier.</p>
+        <p>Contrôle automatique toutes les heures et après détection d’un nouveau déploiement.</p>
+        {lastControlAt && <p>Dernier contrôle enregistré le {new Date(lastControlAt).toLocaleString("fr-FR")} ; prochain passage horaire prévu le {new Date(Date.parse(lastControlAt) + controlInterval).toLocaleString("fr-FR")}.</p>}
+        {pendingControl && <p>Un contrôle manque, a expiré ou a échoué. La reprise automatique est attendue.</p>}
+        {controls.flatMap(control => control.error ? [<p key={control.targetId}>{control.error}</p>] : control.warnings.map(warning => <p key={`${control.targetId}:${warning}`}>{warning}</p>))}
         {securityUnavailable && <p>Les anciens signalements restent visibles ; l’absence de faille n’est pas confirmée.</p>}
         {updatesUnavailable && <p>Les informations déjà connues restent affichées.</p>}
       </details>

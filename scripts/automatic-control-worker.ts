@@ -1,0 +1,19 @@
+import { appendFile } from "node:fs/promises";
+import { automaticControlsNeeded, reconcileAutomaticControls } from "../src/lib/automatic-controls";
+import { postgresPool } from "../src/lib/storage";
+
+async function main() {
+  if (!process.env.DATABASE_URL || !process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY) throw new Error("Configuration manquante.");
+  const provider = process.env.VIGIE_CONTROL_PROVIDER;
+  if (provider !== "o2switch" && provider !== "vercel" && provider !== "railway") throw new Error("Hébergeur non défini.");
+  const force = ["1", "true"].includes(process.env.VIGIE_CONTROL_FORCE || "");
+  if (process.argv.includes("--plan")) {
+    if (!process.env.GITHUB_OUTPUT) throw new Error("Sortie GitHub manquante.");
+    await appendFile(process.env.GITHUB_OUTPUT, `needed=${await automaticControlsNeeded(provider, force)}\n`);
+    return;
+  }
+  const result = await reconcileAutomaticControls({ provider, force });
+  console.log(JSON.stringify(result));
+  if (result.failed) process.exitCode = 1;
+}
+main().catch(() => { console.error("Contrôle automatique incomplet. Les résultats précédents restent datés et le prochain passage réessaiera."); process.exitCode = 1; }).finally(() => postgresPool().end());

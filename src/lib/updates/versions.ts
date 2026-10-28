@@ -44,6 +44,13 @@ export async function packageCatalog(name: string, transport: typeof fetch = fet
   return (Object.values(data.versions) as PackageVersion[]).filter(item => stableVersion(item.version) && !item.deprecated && compare(item.version, latest) <= 0).sort((first, second) => rcompare(first.version, second.version));
 }
 
+export async function latestPackageVersion(name: string, transport: typeof fetch = fetch) {
+  if (!/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name)) throw new ApiError("Nom de paquet invalide.");
+  const data = await metadata(name, transport);
+  if (!stableVersion(data.version) || data.deprecated) throw new ApiError("Dernière version stable non vérifiable.");
+  return data.version as string;
+}
+
 export async function verifiedPeerConflicts(conflicts: PeerConflict[], selected: Record<string, string>, transport: typeof fetch = fetch) {
   const verified: PeerConflict[] = [], catalogs = new Map<string, PackageVersion[]>();
   for (const conflict of conflicts) {

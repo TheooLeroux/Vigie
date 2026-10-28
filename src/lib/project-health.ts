@@ -4,6 +4,7 @@ import type { SoftwareRelease } from "./railway-types";
 import type { ProjectDetail, SiteInventory } from "./types";
 import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
+import { automaticControlFresh, controlSource } from "./automatic-control-state";
 
 export type ProjectHealth = {
   security: string[];
@@ -133,11 +134,25 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     if (observation.error || observation.warnings.length) incomplete = true;
     return observation.check ? [{ target, result: { targetId: target.id, name: target.name, checks: [observation.check], stage: "completed" as const, message: "Contrôle actuel", warnings: observation.warnings } }] : [];
   });
-  const reports = [...observations, ...history.flatMap(run => run.results.map(result => ({ target: run.targets.find(target => target.id === result.targetId), result })))];
-  for (const { target, result } of reports) {
+  const automaticIds = new Set((state?.automaticControls || []).map(control => control.targetId));
+  const automatic = (state?.automaticControls || []).flatMap(control => {
+    const target = state?.targets.find(target => target.id === control.targetId);
+    const matches = target && controlSource(target, detail)?.identity === control.identity;
+    if (!matches) { incomplete = true; return []; }
+    const fresh = automaticControlFresh(control);
+    if (!fresh) incomplete = true;
+    if (control.warnings.length) incomplete = true;
+    if (fresh) for (const [index, update] of control.updates.entries()) updates.set(`automatic:${target.id}:${index}`, update);
+    const checks = fresh ? control.checks : control.checks.filter(check => check.findings.length > 0);
+    return [{ target, automatic: true, result: { targetId: target.id, name: target.name, checks, warnings: control.warnings, stage: "completed" as const, message: "Contrôle automatique" } }];
+  });
+  if (state?.automaticControls && state.targets.some(target => !automaticIds.has(target.id))) incomplete = true;
+  const reports = [...automatic, ...observations.filter(item => !automaticIds.has(item.target.id)).map(item => ({ ...item, automatic: false })), ...history.flatMap(run => run.results.filter(result => !automaticIds.has(result.targetId)).map(result => ({ target: run.targets.find(target => target.id === result.targetId), result, automatic: false })))];
+  for (const { target, result, automatic } of reports) {
     if (!target) continue;
     let checks: UpdateCheck[] = [];
-    if (target.mode === "wordpress") {
+    if (automatic) checks = result.checks || [];
+    else if (target.mode === "wordpress") {
       const installation = detail.hosting?.find(item => item.id === target.remoteId && item.connectionId === target.connectionId);
       const inventory = installation?.inventory;
       const observation = state?.currentSecurity?.find(item => item.targetId === target.id && inventory && item.versions === wordpressSecurityVersions(inventory));

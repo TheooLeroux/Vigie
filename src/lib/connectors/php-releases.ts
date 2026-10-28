@@ -18,7 +18,7 @@ export async function enrichPhpRelease(
   const branch = php.version.match(/^(\d+\.\d+)\./)?.[1];
   if (!branch) return snapshot;
   const db = (await hostingStorage()),
-    key = "php:" + branch;
+    key = "php:" + branch + ":hourly:1";
   let metadata: {
     latestVersion: string;
     securityRelease: boolean;
@@ -77,7 +77,7 @@ export async function enrichPhpRelease(
       ).run(
         key,
         JSON.stringify(metadata),
-        new Date(Date.now() + 6 * 3600_000).toISOString(),
+        new Date(Date.now() + 3600_000).toISOString(),
       ));
     } catch {
       return snapshot;

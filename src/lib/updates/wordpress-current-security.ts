@@ -9,7 +9,7 @@ import type { UpdateState, UpdateTarget } from "./types";
 
 type Observation = NonNullable<UpdateState["currentSecurity"]>[number];
 const pending = new Map<string, Promise<Observation>>();
-export async function currentWordPressSecurity(target: UpdateTarget, dependencies: { site?: typeof hostingInstallation; transport?: typeof fetch } = {}): Promise<Observation> {
+export async function currentWordPressSecurity(target: UpdateTarget, dependencies: { site?: typeof hostingInstallation; transport?: typeof fetch; cacheOnly?: boolean; fresh?: boolean } = {}): Promise<Observation> {
   const site = await (dependencies.site || hostingInstallation)(target.remoteId), inventory = site.inventory;
   const versions = inventory ? wordpressSecurityVersions(inventory) : "";
   const unavailable = { targetId: target.id, versions, warnings: [], error: "Actualisez l’inventaire WordPress pour contrôler les versions actuelles." };
@@ -17,14 +17,15 @@ export async function currentWordPressSecurity(target: UpdateTarget, dependencie
   const key = "security:wp-current:1:" + createHash("sha256").update(JSON.stringify([target.id, target.projectId, target.connectionId, target.root, versions])).digest("hex");
   const db = await hostingStorage();
   const cached = await db.prepare("SELECT data FROM wordpress_catalog WHERE cache_key=? AND expires_at>?").get(key, new Date().toISOString()) as { data: string } | undefined;
-  if (cached) return JSON.parse(cached.data) as Observation;
+  if (cached && !dependencies.fresh) return JSON.parse(cached.data) as Observation;
+  if (dependencies.cacheOnly) return { ...unavailable, error: "Le contrôle automatique est attendu. Il s’exécute sans ouvrir cette fiche." };
   if (pending.has(key)) return pending.get(key)!;
   const task = (async () => {
     let result: Observation;
     try {
       const deadline = AbortSignal.timeout(60_000);
       const transport: typeof fetch = (input, options) => (dependencies.transport || fetch)(input, { ...options, signal: AbortSignal.any([deadline, ...(options?.signal ? [options.signal] : [])]) });
-      const scan = freeWordPressScanner(transport, { persistentCache: !dependencies.transport });
+      const scan = freeWordPressScanner(transport, { persistentCache: !dependencies.transport && !dependencies.fresh });
       const plan = wordpressPlanSchema.parse({ wordpress: { current: inventory.wordpress!.version, target: inventory.wordpress!.version, requiresPhp: "" }, php: inventory.php!.version, plugins: inventory.plugins.filter(item => !item.mustUse).map(item => ({ slug: item.slug, current: item.version || "", target: item.version || "", requiresPhp: "", requiresWordPress: "" })), themes: [] });
       const findings = await scan(await scan.prepare(plan), false);
       const order = ["critical", "high", "moderate", "low", "unknown"];

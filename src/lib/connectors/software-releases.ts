@@ -71,6 +71,7 @@ async function cached<T>(
   key: string,
   read: () => Promise<T>,
 ): Promise<T | null> {
+  key += ":hourly:1"; // Do not reuse six-hour entries created before hourly control.
   const db = (await storage()),
     row = (await db
       .prepare(
@@ -85,7 +86,7 @@ async function cached<T>(
     ).run(
       key,
       JSON.stringify(data),
-      new Date(Date.now() + 6 * 3600_000).toISOString(),
+      new Date(Date.now() + 3600_000).toISOString(),
     ));
     return data;
   } catch {

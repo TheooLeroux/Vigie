@@ -21,9 +21,14 @@ test("Contrôle WordPress en lecture seule : cache lié aux versions, aucun ordr
   assert.equal(calls, 2);
   assert.deepEqual(await currentWordPressSecurity(target, dependencies), JSON.parse(JSON.stringify(first)));
   assert.equal(calls, 2, "les sondages de l’interface ne rescannent pas les mêmes versions");
+  await currentWordPressSecurity(target, { ...dependencies, fresh: true });
+  assert.equal(calls, 4, "le contrôle horaire renouvelle les avis même sans changement de version");
   site.inventory!.plugins[0].version = "2";
+  const waiting = await currentWordPressSecurity(target, { ...dependencies, cacheOnly: true });
+  assert.ok(waiting.error);
+  assert.equal(calls, 4, "l’ouverture d’une fiche ne déclenche aucun scan distant");
   assert.equal((await currentWordPressSecurity(target, dependencies)).check?.findings.length, 0);
-  assert.equal(calls, 4, "une nouvelle version invalide le contrôle précédent");
+  assert.equal(calls, 6, "une nouvelle version invalide le contrôle précédent");
   assert.ok((await currentWordPressSecurity({ ...target, root: "/another" }, dependencies)).error);
   site.inventory!.plugins[0].version = "3";
   const failed = await currentWordPressSecurity(target, { ...dependencies, transport: (async () => { throw new Error("offline"); }) as typeof fetch });

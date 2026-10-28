@@ -145,7 +145,7 @@ export async function enrichVercelTechnologies(
     analyses.flatMap((a) => a.technologies.map((t) => t.name)),
   )) {
     if (!packages.has(name)) continue;
-    const key = `npm:public:${name}`;
+    const key = `npm:public:${name}:hourly:1`;
     let catalog: { version: string; checkedAt: string } | null = null;
     const row = (await db
       .prepare(
@@ -187,7 +187,7 @@ export async function enrichVercelTechnologies(
         ).run(
           key,
           JSON.stringify(catalog),
-          new Date(Date.now() + 6 * 3600_000).toISOString(),
+          new Date(Date.now() + 3600_000).toISOString(),
         ));
       } catch {
         /* A registry outage must not erase observed versions. */
