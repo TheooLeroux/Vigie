@@ -18,17 +18,25 @@ const deleteKey = `mutation NodeProbeCleanup($id:String!){sshPublicKeyDelete(id:
 // No application imports, application commands, or environment dump. Read the installed
 // interpreter AND the executable of each already-running Node process, without invoking
 // the application. Unset preload hooks before starting either probe interpreter.
+// Root in a container may lack CAP_SYS_PTRACE for a different UID. Retry a denied
+// /proc read under its owner; comm is not an interpreter identity (Node uses MainThread).
 export function dockerNodeProbe(nonce: string) {
   if (!/^[a-f0-9-]{36}$/.test(nonce)) throw new ApiError("Identifiant de sonde Node invalide.");
   return `const fs=require('node:fs'),cp=require('node:child_process');
 const env={...process.env};delete env.NODE_OPTIONS;delete env.NODE_PATH;
+function inspect(pid){const fs=require('node:fs'),cp=require('node:child_process');let exe;
+try{exe=fs.readlinkSync('/proc/'+pid+'/exe')}catch(e){if(e.code==='ENOENT'||e.code==='ESRCH')return null;throw e}
+if(!/\\/node(?:js)?(?: \\(deleted\\))?$/.test(exe))return null;
+const env={...process.env};delete env.NODE_OPTIONS;delete env.NODE_PATH;
+return {exe,version:cp.execFileSync('/proc/'+pid+'/exe',['--version'],{env,timeout:3000,encoding:'utf8',maxBuffer:1024}).trim().replace(/^v/,'')};}
 const running=[],seen=new Set();const pids=fs.readdirSync('/proc').filter(p=>/^\\d+$/.test(p));
 if(pids.length>4096)throw Error('Too many processes');
-for(const pid of pids){if(Number(pid)===process.pid)continue;let exe;
-try{exe=fs.readlinkSync('/proc/'+pid+'/exe')}catch(e){if(e.code==='ENOENT')continue;
-if(e.code==='EACCES'){const comm=fs.readFileSync('/proc/'+pid+'/comm','utf8').trim();if(!/^node(?:js)?(?:\\s|$)/.test(comm))continue}throw e}
-if(!/\\/node(?:js)?(?: \\(deleted\\))?$/.test(exe)||seen.has(exe))continue;
-seen.add(exe);running.push(cp.execFileSync('/proc/'+pid+'/exe',['--version'],{env,timeout:3000,encoding:'utf8',maxBuffer:1024}).trim().replace(/^v/,''));}
+for(const pid of pids){if(Number(pid)===process.pid)continue;let result;
+try{result=inspect(pid)}catch(e){if(e.code!=='EACCES'||process.getuid()!==0)throw e;
+let owner;try{owner=fs.statSync('/proc/'+pid)}catch(e){if(e.code==='ENOENT')continue;throw e}
+if(owner.uid===0)throw e;
+result=JSON.parse(cp.execFileSync(process.execPath,['-e','console.log(JSON.stringify(('+inspect.toString()+')(process.argv[1])))',pid],{env,uid:owner.uid,gid:owner.gid,timeout:5000,encoding:'utf8',maxBuffer:2048}));}
+if(!result||seen.has(result.exe))continue;seen.add(result.exe);running.push(result.version);}
 console.log(JSON.stringify({nonce:'${nonce}',deployment:process.env.RAILWAY_DEPLOYMENT_ID,service:process.env.RAILWAY_SERVICE_ID,environment:process.env.RAILWAY_ENVIRONMENT_ID,node:process.versions.node,running}));`;
 }
 
@@ -36,8 +44,11 @@ export function parseDockerNodeProbe(output: string, nonce: string, target: Upda
   if (Buffer.byteLength(output) > 4096) throw new ApiError("Réponse de la sonde Node invalide.", 422);
   let parsed: unknown;
   try { parsed = JSON.parse(output.trim()); } catch { throw new ApiError("Aucune attestation Node reçue du conteneur actif.", 422); }
-  const result = z.object({ nonce: z.literal(nonce), deployment: z.literal(deploymentId), service: z.literal(target.remoteId), environment: z.literal(target.environmentId), node: version, running: z.array(version).min(1).max(128) }).safeParse(parsed);
-  if (!result.success) throw new ApiError("La sonde Node ne correspond pas au déploiement attendu ou ne prouve aucun processus Node applicatif actif.", 422);
+  const identity = z.object({ nonce: z.literal(nonce), deployment: z.literal(deploymentId), service: z.literal(target.remoteId), environment: z.literal(target.environmentId) });
+  if (!identity.safeParse(parsed).success) throw new ApiError("L’identité renvoyée par la sonde Node ne correspond pas au service, à l’environnement ou au déploiement attendu.", 422);
+  const result = identity.extend({ node: version, running: z.array(version).max(128) }).safeParse(parsed);
+  if (!result.success) throw new ApiError("Les versions renvoyées par la sonde Node sont invalides.", 422);
+  if (!result.data.running.length) throw new ApiError("Aucun processus Node applicatif actif n’a pu être attesté dans le conteneur.", 422);
   return { node: result.data.node, running: result.data.running };
 }
 

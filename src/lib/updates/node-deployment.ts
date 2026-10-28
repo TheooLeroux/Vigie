@@ -93,7 +93,8 @@ export async function preflightNodeRuntime(target: UpdateTarget, deploymentId: s
     const observed = [...new Set(proof.instances.flatMap(instance => [instance.node, ...instance.running]))];
     return { ...base, status: "passed", message: `Lecture du runtime accessible ; Node ${observed.join(", ")} actuellement observé. Le correctif cible ${expected} sera contrôlé dans le nouveau déploiement avant de conclure au succès.` };
   } catch (error) {
-    return { ...base, status: "blocked", message: `Vérification du runtime indisponible avant publication : ${error instanceof ApiError ? error.message : "accès au conteneur non confirmé"}. Mise à jour arrêtée avant les installations et la publication.` };
+    const reason = (error instanceof ApiError ? error.message : "accès au conteneur non confirmé").replace(/[.\s]+$/, "");
+    return { ...base, status: "blocked", message: `Vérification du runtime indisponible avant publication : ${reason}. Mise à jour arrêtée avant les installations et la publication.` };
   }
 }
 
