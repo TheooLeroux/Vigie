@@ -6,6 +6,13 @@ import { claimAutomaticControl, readAutomaticControl, reconcileAutomaticControls
 import { healthCheck, healthFixture, healthUpdates } from "./project-health-fixture";
 import { projectHealth } from "../src/lib/project-health";
 import type { UpdateTarget } from "../src/lib/updates/types";
+import { randomBytes, randomUUID } from "node:crypto";
+import { createProject } from "../src/lib/db";
+import { createProjectSchema } from "../src/lib/validation";
+import { applyVercelSnapshot, linkVercelProject, saveVercelConnection } from "../src/lib/vercel";
+import { observedProjectDetail } from "../src/lib/project-observations";
+import { updateTargets } from "../src/lib/updates/targets";
+import type { VercelProject } from "../src/lib/vercel-types";
 
 function fixture() {
   const detail = healthFixture(), target = healthUpdates().runs[0].targets[0];
@@ -115,4 +122,28 @@ test("Source du contrôle : refuser des instances avec des commits différents o
   service.activeDeployments[0].evidence!.rootDirectory = "/backend";
   detail.railway![0].observedAt = new Date(Date.now() - 16 * 60_000).toISOString();
   assert.equal(controlSource(target, detail), null, "un relevé hébergeur périmé ne confirme pas le commit courant");
+});
+
+test("Contrôle réel depuis la base : les observations hébergeur sont chargées sans assemblage fictif", async () => {
+  process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
+  const project = await createProject("live", createProjectSchema.parse({ name: "Observed fixture", url: "https://observed.example.test" }));
+  const connection = await saveVercelConnection({ name: "Observed fixture", teamId: `team_${randomUUID().replaceAll("-", "")}`, secret: "unit-test-only" });
+  const at = new Date().toISOString(), commit = "c".repeat(40);
+  const remote: VercelProject = { id: `prj_${randomUUID().replaceAll("-", "")}`, name: project.name, teamId: connection.teamId, teamSlug: "qa", teamName: "QA", framework: "nextjs", nodeBranch: "24.x", rootDirectory: null, repository: "qa/observed", productionBranch: "main", domains: [], excluded: false, clientSuggestion: null, latest: null, production: { id: "deployed", state: "READY", target: "production", createdAt: at, url: project.url, framework: "nextjs", nodeBranch: "24.x", repository: "qa/observed", branch: "main", commit, regions: [] } };
+  await applyVercelSnapshot(connection.id, [remote]);
+  await linkVercelProject(connection.id, remote.id, project.id);
+  const detail = await observedProjectDetail(project.id, "live");
+  const target = (await updateTargets(project.id))[0];
+  assert.equal(detail.vercel?.[0].production?.commit, commit);
+  assert.equal(controlSource(target, detail)?.commit, commit);
+  let scanned = false;
+  const result = await reconcileAutomaticControls({ provider: "vercel" }, {
+    projects: async () => [project], detail: observedProjectDetail, targets: updateTargets,
+    scan: async (_target, source) => { assert.equal(source.commit, commit); scanned = true; return { checks: [], updates: [], warnings: [] }; },
+    read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log: async () => {},
+  });
+  assert.equal(scanned, true);
+  assert.equal(result.checked, 1);
+  assert.equal(result.failed, 0);
+  assert.equal((await readAutomaticControl(target.id))?.error, undefined);
 });

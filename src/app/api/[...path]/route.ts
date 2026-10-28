@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { observedProjectDetail } from "@/lib/project-observations";
 import {
   vercelState,
   saveVercelConnection,
@@ -53,7 +54,6 @@ import {
   createProject,
   requireProject,
   workspaceData,
-  projectDetail,
   saveInventory,
   log,
   createClient,
@@ -187,12 +187,7 @@ async function handleRequest(request: Request, context: Context) {
       if (root === "workspace" && path.length === 1)
         return Response.json((await workspaceData(workspace)));
       if (root === "projects" && id && path.length === 2)
-        return Response.json({
-          ...(await projectDetail(id, workspace)),
-          hosting: (await projectHostingInstallations(id)),
-          railway: (await railwayState()).projects.filter((p) => p.projectId === id),
-          vercel: (await vercelState()).projects.filter((p) => p.projectId === id),
-        });
+        return Response.json(await observedProjectDetail(id, workspace));
       if (root === "export" && path.length === 1) {
         const data = (await workspaceData(workspace));
         const projects = data.projects.map((p) => {
