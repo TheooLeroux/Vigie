@@ -16,7 +16,6 @@ import {
   CheckCheck,
   ChevronDown,
   ChevronRight,
-  CircleHelp,
   Database,
   Globe2,
   LayoutGrid,
@@ -63,6 +62,7 @@ import { VercelInventoryPanel } from "./vercel-panel";
 import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
 import { ProjectUpdates } from "./project-updates";
 import { ProjectHealthSummary } from "./project-health-summary";
+import { ProjectListActions } from "./project-list-actions";
 import type { UpdateState } from "@/lib/updates/types";
 
 type View = "sites" | "clients" | "connections" | "backup" | "activity";
@@ -463,10 +463,8 @@ export function WorkspaceApp({
               </th>
               <th>Hébergement</th>
               {!compact && <th>Client</th>}
-              <th>
-                Inventaire <CircleHelp size={12} />
-              </th>
-              <th>Dernière revue</th>
+              <th>Nbr de failles</th>
+              <th>Mise à jour</th>
             </tr>
           </thead>
           <tbody>
@@ -514,25 +512,11 @@ export function WorkspaceApp({
                       )}
                     </td>
                   )}
-                  <td>
-                    <Status project={p} data={data!} />
-                  </td>
-                  <td>
-                    <span
-                      className={`review-date ${p.reviewedAt ? "" : "subtle"}`}
-                    >
-                      {p.reviewedAt ? (
-                        <>
-                          <CheckCheck size={13} />
-                          {formatDate(p.reviewedAt, true)}
-                        </>
-                      ) : (
-                        <>
-                          <span className="small-dash">—</span>À relire
-                        </>
-                      )}
-                    </span>
-                  </td>
+                  <ProjectListActions
+                    project={p}
+                    request={api}
+                    onOpen={() => openProject(p.id)}
+                  />
                 </tr>
               );
             })}
