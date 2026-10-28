@@ -82,8 +82,8 @@ test("Contrôle autonome : exécution sans interface, conservation des résultat
 test("Contrôle autonome : un déploiement qui change pendant le scan ne reçoit pas le rapport précédent", async () => {
   const { detail, target } = fixture(); target.id = "changed-during-scan";
   let written: AutomaticControl | undefined;
-  const result = await reconcileAutomaticControls({}, {
-    projects: async () => [detail.project], detail: async () => detail, targets: async () => [target],
+  const result = await reconcileAutomaticControls({ projectId: detail.project.id }, {
+    projects: async () => [detail.project, { ...detail.project, id: "another-project" }], detail: async () => detail, targets: async () => [target],
     scan: async () => { detail.railway![0].services[0].activeDeployments[0].id = "new"; return { checks: [], updates: [], warnings: [] }; },
     read: async () => null, write: async control => { written = control; }, claim: claimAutomaticControl, log: async () => {},
   });

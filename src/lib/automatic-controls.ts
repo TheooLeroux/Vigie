@@ -11,8 +11,8 @@ import { mapConcurrent } from "./updates/planning";
 import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
-export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false) {
-  for (const project of (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active")) {
+export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string) {
+  for (const project of (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active" && (!projectId || project.id === projectId))) {
     const detail = await observedProjectDetail(project.id, "live");
     for (const target of (await updateTargets(project.id)).filter(target => target.provider === provider)) {
       if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force)) return true;
@@ -28,9 +28,9 @@ async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof 
   return { checks: [observation.check], updates: [], warnings: observation.warnings };
 }
 
-export async function reconcileAutomaticControls(options: { force?: boolean; provider?: UpdateTarget["provider"] } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
+export async function reconcileAutomaticControls(options: { force?: boolean; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
   const result = { checked: 0, failed: 0, deferred: 0 };
-  await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active"), 3, async project => {
+  await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId)), 3, async project => {
     try {
       const detail = await dependencies.detail(project.id, "live");
       for (const target of (await dependencies.targets(project.id)).filter(target => !options.provider || target.provider === options.provider)) {
@@ -53,6 +53,12 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
             await dependencies.write({ targetId: target.id, identity, attemptedAt, checkedAt: new Date().toISOString(), ...observation });
             result.checked++;
           } catch (error) {
+            if (!(error instanceof ApiError)) {
+              // Do not log arbitrary exception messages, response bodies or secrets.
+              const kind = error instanceof Error && /^[A-Za-z]{1,60}$/.test(error.name) ? error.name : "UnknownError";
+              const frames = error instanceof Error ? error.stack?.split("\n").filter(line => /^\s+at /.test(line)).slice(0, 6) : [];
+              console.error(JSON.stringify({ targetId: target.id, kind, frames }));
+            }
             const message = error instanceof ApiError ? error.message : "Le contrôle automatique n’a pas abouti. Nouvelle tentative au prochain passage ; consultez les accès et l’inventaire du projet.";
             await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), targetId: target.id, identity, attemptedAt, error: message });
             result.failed++;
