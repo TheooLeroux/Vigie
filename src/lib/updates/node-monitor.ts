@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gt, valid } from "semver";
@@ -8,6 +8,7 @@ import { scanNodeSources, securityCheck } from "./security";
 import { latestPackageVersion } from "./versions";
 import { mapConcurrent, withPlanningSession } from "./planning";
 import type { UpdateTarget } from "./types";
+import { workspaceLockCovers } from "./workspace-monitor";
 
 const locks = ["npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
 export async function scanCurrentNode(target: UpdateTarget, commit: string | null, dependencies = { github: githubRequest, scan: scanNodeSources, latest: latestPackageVersion }) {
@@ -22,35 +23,59 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
   // GitHub redirects directory paths ending in '/'. Keep the exact commit query
   // and avoid that redirect instead of relaxing the no-redirect credential policy.
   const path = target.root ? target.root.split("/").map(encodeURIComponent).join("/") : "";
-  const filePrefix = path ? path + "/" : "";
+  async function sourceFile(directory: string, name: string) {
+    const encoded = directory ? directory.split("/").map(encodeURIComponent).join("/") + "/" : "";
+    let file = await dependencies.github(`${prefix}${encoded}${name}?ref=${commit}`, token);
+    if (file.type === "file" && file.encoding === "none" && /^[a-f0-9]{40}$/.test(file.sha || "") && Number.isInteger(file.size) && file.size <= 6_000_000) {
+      const blob = await dependencies.github(`/repos/${repository}/git/blobs/${file.sha}`, token);
+      if (blob.sha !== file.sha || blob.size !== file.size) throw new ApiError("Le verrou GitHub ne correspond pas au commit observé.");
+      file = { ...blob, type: "file" };
+    }
+    if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string" || !Number.isInteger(file.size) || file.size > 6_000_000) throw new ApiError("Sources trop volumineuses ou non vérifiables.");
+    const bytes = Buffer.from(file.content, "base64");
+    if (bytes.length !== file.size) throw new ApiError("Sources incomplètes.");
+    return bytes;
+  }
   const entries = await dependencies.github(`${prefix}${path}?ref=${commit}`, token);
   if (!Array.isArray(entries)) throw new ApiError("Répertoire source non vérifiable.");
-  const lock = locks.find(name => entries.some(entry => entry.name === name && entry.type === "file"));
-  if (!lock || !entries.some(entry => entry.name === "package.json" && entry.type === "file")) {
+  let lock = locks.find(name => entries.some(entry => entry.name === name && entry.type === "file"));
+  if (!entries.some(entry => entry.name === "package.json" && entry.type === "file")) {
     const known = ["package.json", ...locks, "requirements.txt", "pyproject.toml", "uv.lock", "Pipfile.lock", "composer.json", "composer.lock", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock"];
     const detected = entries.filter(entry => entry.type === "file" && known.includes(entry.name)).map(entry => entry.name);
     throw new ApiError(`Manifest ou verrou absent : analyse incomplète. Répertoire : ${target.root || "racine"}. Fichiers de dépendances détectés : ${detected.join(", ") || "aucun"}.`);
   }
+  const manifestBytes = await sourceFile(target.root, "package.json");
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  let lockBytes = lock ? await sourceFile(target.root, lock) : undefined;
+  let shared = false;
+  if (!lock) {
+    let parent = target.root;
+    for (let depth = 0; parent && depth < 20; depth++) {
+      parent = parent.includes("/") ? parent.slice(0, parent.lastIndexOf("/")) : "";
+      const directory = parent.split("/").map(encodeURIComponent).join("/");
+      const files = await dependencies.github(`${prefix}${directory}?ref=${commit}`, token);
+      if (!Array.isArray(files)) throw new ApiError("Répertoire de workspace non vérifiable.");
+      const candidate = locks.find(name => files.some(file => file.type === "file" && file.name === name));
+      if (!candidate || !files.some(file => file.type === "file" && file.name === "package.json")) continue;
+      const bytes = await sourceFile(parent, candidate);
+      const relative = parent ? target.root.slice(parent.length + 1) : target.root;
+      const parentManifest = candidate === "yarn.lock" ? JSON.parse((await sourceFile(parent, "package.json")).toString("utf8")) : undefined;
+      if (!workspaceLockCovers(candidate, bytes.toString("utf8"), relative, manifest, parentManifest)) continue;
+      lock = candidate; lockBytes = bytes; shared = true; break;
+    }
+  }
+  if (!lock || !lockBytes) throw new ApiError("Aucun verrou de dépendances ne couvre ce service, y compris dans les workspaces parents. Analyse incomplète.");
   const folder = await mkdtemp(join(tmpdir(), "vigie-monitor-"));
   try {
-    for (const name of ["package.json", lock]) {
-      let file = await dependencies.github(`${prefix}${filePrefix}${name}?ref=${commit}`, token);
-      // The Contents API omits content above 1 MB. Git blobs still provide a
-      // bounded base64 response for larger locks, bound to the exact same SHA.
-      if (file.type === "file" && file.encoding === "none" && /^[a-f0-9]{40}$/.test(file.sha || "") && Number.isInteger(file.size) && file.size <= 6_000_000) {
-        const blob = await dependencies.github(`/repos/${repository}/git/blobs/${file.sha}`, token);
-        if (blob.sha !== file.sha || blob.size !== file.size) throw new ApiError("Le verrou GitHub ne correspond pas au commit observé.");
-        file = { ...blob, type: "file" };
-      }
-      if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string" || !Number.isInteger(file.size) || file.size > 6_000_000) throw new ApiError("Sources trop volumineuses ou non vérifiables.");
-      const bytes = Buffer.from(file.content, "base64");
-      if (bytes.length !== file.size) throw new ApiError("Sources incomplètes.");
-      await writeFile(join(folder, name), bytes);
-    }
-    const manifest = JSON.parse(await readFile(join(folder, "package.json"), "utf8"));
+    await writeFile(join(folder, "package.json"), manifestBytes);
+    await writeFile(join(folder, lock), lockBytes);
     let packages: { name: string; version?: string }[] = [];
     const findings = await dependencies.scan(folder, [""], ["package.json", lock], undefined, async (_names, inventory) => { packages = inventory || []; });
     const warnings = ["Analyse des dépendances verrouillées du commit déployé ; l’image système, les secrets et le code applicatif ne sont pas analysés."];
+    if (shared) {
+      warnings.push("Analyse du verrou partagé du dépôt, qui référence ce workspace. Les alertes couvrent aussi d’autres services ; leur applicabilité à ce service doit être confirmée. Les versions disponibles de ses dépendances ne sont pas isolées par ce contrôle.");
+      return { checks: [securityCheck("OSV", "before", "Verrou partagé du dépôt · " + target.root, findings.map(finding => ({ ...finding, scope: target.root, kind: "unconfirmed" as const, explanation: "Signalement dans le verrou partagé du dépôt ; applicabilité à ce service à confirmer." })))], updates: [], warnings };
+    }
     const names = [...new Set(["dependencies", "devDependencies", "optionalDependencies"].flatMap(section => Object.keys(manifest[section] || {})))];
     if (names.length > 250) throw new ApiError("Trop de dépendances directes pour ce contrôle.");
     const deadline = AbortSignal.timeout(60_000);

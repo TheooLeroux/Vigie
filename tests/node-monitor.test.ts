@@ -45,5 +45,5 @@ test("Sonde Node : analyse en lecture seule du commit déployé, sans exécuter 
   await assert.rejects(scanCurrentNode({ ...target, root: "../escape" }, commit, dependencies), /Répertoire source invalide/);
   await assert.rejects(scanCurrentNode({ ...target, repository: "example/../escape" }, commit, dependencies), /accès GitHub en lecture/);
   await assert.rejects(scanCurrentNode({ ...target, mode: "archive", repository: null }, commit, dependencies), /ne sont pas reliées/);
-  await assert.rejects(scanCurrentNode(target, commit, { ...dependencies, github: async () => [{ name: "package.json", type: "file" }, { name: "package-lock.json", type: "symlink" }] }), /verrou absent/);
+  await assert.rejects(scanCurrentNode(target, commit, { ...dependencies, github: async path => path.includes("/package.json?") ? { type: "file", encoding: "base64", content: Buffer.from(manifest).toString("base64"), size: Buffer.byteLength(manifest) } : path.includes("/backend?") ? [{ name: "package.json", type: "file" }, { name: "package-lock.json", type: "symlink" }] : [] }), /Aucun verrou/);
 });

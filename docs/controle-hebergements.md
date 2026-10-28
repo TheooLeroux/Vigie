@@ -20,6 +20,8 @@ Pour activer ce comportement en production, publier ces fichiers et le workflow 
 
 La surveillance des applications Node utilise les droits de lecture GitHub déjà accordés au jeton pour le dépôt identifié par l’hébergeur. La liste des dépôts autorisés à publier une mise à jour ne bloque pas ces lectures et reste exigée pour toute écriture. Une image externe (par exemple PostgreSQL) ou un service sans dépôt identifié ne reçoit pas de résultat npm : le rapport indique ce périmètre manquant.
 
+Lorsqu’un service utilise un verrou partagé dans un répertoire parent du dépôt, la sonde recherche les parents au même commit. Elle exige que le verrou pnpm/npm référence ce workspace et ses contraintes de dépendances, ou que le manifeste Yarn le déclare. L’analyse couvre alors le verrou partagé : les alertes sont signalées avec une réserve sur leur applicabilité au seul service, et les mises à jour de ses dépendances ne sont pas déduites des versions des autres workspaces.
+
 ## o2switch et WordPress
 
 Chaque passage recherche les installations sur les comptes configurés, y compris celles précédemment marquées absentes. Une remise en ligne au même emplacement conserve ainsi le rattachement et les clés. Un répertoire ou un domaine différent doit d’abord être découvert et rattaché correctement. La recherche ne crée aucune fiche de projet.
