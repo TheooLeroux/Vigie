@@ -12,13 +12,13 @@
     "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts"
   },
   "engines": {
-    "node": ">=24.14.0 <25"
+    "node": "24.22.1"
   },
   "dependencies": {
-    "better-auth": "1.7.12",
-    "lucide-react": "1.61.0",
-    "next": "16.4.2",
-    "pg": "^8.23.1",
+    "better-auth": "1.7.14",
+    "lucide-react": "1.63.0",
+    "next": "16.4.3",
+    "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "semver": "7.8.5",
@@ -27,11 +27,11 @@
   },
   "devDependencies": {
     "@types/node": "24.19.2",
-    "@types/pg": "^8.23.1",
+    "@types/pg": "8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@types/semver": "7.8.0",
     "tsx": "4.23.15",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   }
 }
