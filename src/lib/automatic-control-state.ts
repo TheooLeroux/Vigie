@@ -1,5 +1,5 @@
 import type { ProjectDetail } from "./types";
-import type { UpdateCheck, UpdateTarget } from "./updates/types";
+import type { UpdateCheck, UpdateTarget, UpdateState } from "./updates/types";
 import { railwayRuntimeDeployments } from "./railway-status";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 
@@ -57,4 +57,11 @@ export function automaticControlDue(previous: AutomaticControl | null, identity:
   // Retry failures after five minutes, independently of the hourly success cadence.
   const age = now - Date.parse(previous.attemptedAt);
   return previous.error ? !Number.isFinite(age) || age < 0 || age >= 5 * 60_000 : !automaticControlFresh(previous, now);
+}
+
+export function hasVerifiedSecurityControl(detail: ProjectDetail, state: UpdateState) {
+  return state.automaticControls?.some(control => {
+    const target = state.targets.find(target => target.id === control.targetId);
+    return target && automaticControlFresh(control) && controlSource(target, detail)?.identity === control.identity && control.checks.some(check => ["OSV", "WPScan", "WPVulnerability", "Trivy"].includes(check.tool));
+  }) || false;
 }

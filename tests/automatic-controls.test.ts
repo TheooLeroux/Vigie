@@ -1,7 +1,7 @@
 import "./auth-fixture";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { automaticControlDue, automaticControlFresh, controlInterval, controlSource, type AutomaticControl } from "../src/lib/automatic-control-state";
+import { automaticControlDue, automaticControlFresh, controlInterval, controlSource, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
 import { claimAutomaticControl, readAutomaticControl, reconcileAutomaticControls, writeAutomaticControl } from "../src/lib/automatic-controls";
 import { healthCheck, healthFixture, healthUpdates } from "./project-health-fixture";
 import { projectHealth } from "../src/lib/project-health";
@@ -109,6 +109,20 @@ test("Santé : alertes et versions automatiques liées au déploiement actuel, e
   detail.railway![0].services[0].activeDeployments[0].id = "redeployed-same-commit";
   assert.equal(projectHealth(detail, state).security.length, 0);
   assert.equal(projectHealth(detail, state).incomplete, true);
+});
+
+test("Couverture partielle : un service externe ne masque pas un contrôle npm réussi, sans inventer une couverture complète", () => {
+  const { detail, target, report } = fixture();
+  report.checks[0].findings = [];
+  const external = { ...target, id: "external", repository: null, mode: "archive" as const };
+  const state = { enabled: false, targets: [target, external], runs: [], automaticControls: [report, {...report, targetId: external.id, checks: [], error: "Image externe non analysée"}] };
+  assert.equal(hasVerifiedSecurityControl(detail, state), true);
+  assert.equal(projectHealth(detail, state).incomplete, true);
+  state.automaticControls = state.automaticControls.slice(1);
+  assert.equal(hasVerifiedSecurityControl(detail, state), false, "un service externe inconnu ne produit pas de faux zéro");
+  state.automaticControls = [report];
+  detail.railway![0].services[0].activeDeployments[0].id = "new";
+  assert.equal(hasVerifiedSecurityControl(detail, state), false, "un ancien déploiement n’autorise pas l’affichage d’un zéro partiel");
 });
 
 test("Source du contrôle : refuser des instances avec des commits différents ou une racine différente", () => {

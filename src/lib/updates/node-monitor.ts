@@ -19,7 +19,10 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
   if (target.root && (target.root.split("/").some(part => !part || part === "." || part === "..") || /[\\\x00-\x1f]/.test(target.root))) throw new ApiError("Répertoire source invalide.");
   const repository = target.repository, token = githubUpdateToken(repository);
   const prefix = `/repos/${repository}/contents/`;
-  const path = target.root ? target.root.split("/").map(encodeURIComponent).join("/") + "/" : "";
+  // GitHub redirects directory paths ending in '/'. Keep the exact commit query
+  // and avoid that redirect instead of relaxing the no-redirect credential policy.
+  const path = target.root ? target.root.split("/").map(encodeURIComponent).join("/") : "";
+  const filePrefix = path ? path + "/" : "";
   const entries = await dependencies.github(`${prefix}${path}?ref=${commit}`, token);
   if (!Array.isArray(entries)) throw new ApiError("Répertoire source non vérifiable.");
   const lock = locks.find(name => entries.some(entry => entry.name === name && entry.type === "file"));
@@ -27,7 +30,7 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
   const folder = await mkdtemp(join(tmpdir(), "vigie-monitor-"));
   try {
     for (const name of ["package.json", lock]) {
-      let file = await dependencies.github(`${prefix}${path}${name}?ref=${commit}`, token);
+      let file = await dependencies.github(`${prefix}${filePrefix}${name}?ref=${commit}`, token);
       // The Contents API omits content above 1 MB. Git blobs still provide a
       // bounded base64 response for larger locks, bound to the exact same SHA.
       if (file.type === "file" && file.encoding === "none" && /^[a-f0-9]{40}$/.test(file.sha || "") && Number.isInteger(file.size) && file.size <= 6_000_000) {

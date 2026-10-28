@@ -17,7 +17,8 @@ test("Sonde Node : analyse en lecture seule du commit déployé, sans exécuter 
   const dependencies = {
     github: async (path: string, _token: string, method = "GET") => {
       assert.equal(method, "GET"); assert.ok(path.endsWith(`?ref=${commit}`)); calls.push(path);
-      if (path.includes(`/backend/?ref=`)) return [{ name: "package.json", type: "file" }, { name: "package-lock.json", type: "file" }];
+      assert.ok(!path.includes("/backend/?"), "GitHub renvoie une redirection pour un répertoire terminé par / ; le commit ne doit pas être perdu dans cette redirection");
+      if (path.includes(`/backend?ref=`)) return [{ name: "package.json", type: "file" }, { name: "package-lock.json", type: "file" }];
       const content = path.includes("/package.json?") ? manifest : lock;
       return { type: "file", encoding: "base64", content: Buffer.from(content).toString("base64"), size: Buffer.byteLength(content) };
     },

@@ -6,7 +6,7 @@ import { projectHealth } from "@/lib/project-health";
 import type { Project, ProjectDetail } from "@/lib/types";
 import { activeUpdateStages, type UpdateState } from "@/lib/updates/types";
 import { wordpressSecurityVersions } from "@/lib/updates/wordpress-security-key";
-import { automaticControlFresh, controlSource } from "@/lib/automatic-control-state";
+import { automaticControlFresh, controlSource, hasVerifiedSecurityControl } from "@/lib/automatic-control-state";
 
 type Request = (path: string, method?: string, payload?: unknown) => Promise<any>;
 
@@ -56,6 +56,7 @@ export function ProjectListActions({ project, request, onOpen }: {
     return item.error || !inventory || item.versions !== wordpressSecurityVersions(inventory);
   });
   const known = !!health?.securityKnown && !securityUnavailable;
+  const partial = !known && !!detail && !!updates && hasVerifiedSecurityControl(detail, updates);
   const active = !!updates?.runs[0] && activeUpdateStages.includes(updates.runs[0].stage);
   const attention = updates?.runs[0]?.stage === "attention";
   const available = updates?.targets.some(target => !target.unavailable);
@@ -67,6 +68,7 @@ export function ProjectListActions({ project, request, onOpen }: {
   const securityTitle = count
     ? `${count} signalement(s) de sécurité dans les relevés ou contrôles applicables.${!known || health?.incomplete ? " Certains contrôles sont incomplets ou indisponibles." : ""}`
     : known ? "Aucun signalement connu sur le périmètre contrôlé."
+    : partial ? `Aucun signalement connu sur les composants analysés. Contrôle partiel : ${controlError || "certains services restent à contrôler."}`
     : controlError || (controlsPending ? "L’analyse automatique est en attente ou doit être renouvelée. Cette liste actualise les résultats automatiquement." : "Les contrôles disponibles ne permettent pas de confirmer l’absence de faille.");
   const unknownLabel = !updates ? "Contrôle indisponible" : controlError ? "Contrôle en échec" : controlsPending ? updates.automaticControls?.length ? "À actualiser" : "Analyse en attente" : "Non vérifiable";
   const SecurityIcon = count ? ShieldAlert : known ? ShieldCheck : CircleHelp;
@@ -76,7 +78,7 @@ export function ProjectListActions({ project, request, onOpen }: {
       {loading ? <span className="subtle" role="status"><Loader2 size={14} className="spin" aria-label="Chargement des contrôles" /></span> :
         <span className={`badge ${count ? "warning" : known ? "sage" : "neutral"}`} title={securityTitle}>
           <SecurityIcon size={13} aria-hidden="true" />
-          {count || known ? <>{count}{(!known || health?.incomplete) && <span aria-label="Contrôles incomplets">*</span>}</> : unknownLabel}
+          {count || known || partial ? <>{count}{(!known || health?.incomplete) && <span aria-label="Contrôles incomplets">*</span>}</> : unknownLabel}
         </span>}
     </td>
     <td>
