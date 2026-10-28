@@ -28,23 +28,23 @@ function va_open(array $envelope, string $key): array {
 }
 function va_uuid($value): bool { return is_string($value) && (bool)preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/D', $value); }
 function va_version($value): bool { return is_string($value) && strlen($value) <= 80 && (bool)preg_match('/^\d+(?:\.\d+){0,7}$/D', $value); }
-function va_run(array $args, int $timeout = 180): string {
+function va_run(array $args, int $timeout = 180, bool $captureOutput = true): string {
     $pipes = [];
-    $process = proc_open($args, [['pipe','r'],['pipe','w'],['pipe','w']], $pipes, null, null, ['bypass_shell' => true]);
+    $process = proc_open($args, [['pipe','r'], $captureOutput ? ['pipe','w'] : ['file','/dev/null','w'], ['pipe','w']], $pipes, null, null, ['bypass_shell' => true]);
     if (!is_resource($process)) { throw new RuntimeException('process_unavailable'); }
-    fclose($pipes[0]); stream_set_blocking($pipes[1], false); stream_set_blocking($pipes[2], false);
+    fclose($pipes[0]); if ($captureOutput) { stream_set_blocking($pipes[1], false); } stream_set_blocking($pipes[2], false);
     $output = ''; $start = time(); $exit = -1;
     try {
         do {
-            $output .= stream_get_contents($pipes[1]);
+            if ($captureOutput) { $output .= stream_get_contents($pipes[1]); }
             stream_get_contents($pipes[2]); // Never expose raw logs, which may contain site secrets.
             if (strlen($output) > 524288 || time() - $start > $timeout) { proc_terminate($process, 9); throw new RuntimeException('process_limit'); }
             $status = proc_get_status($process);
             if (!$status['running']) { $exit = $status['exitcode']; break; }
             usleep(50000);
         } while (true);
-        $output .= stream_get_contents($pipes[1]);
-    } finally { fclose($pipes[1]); fclose($pipes[2]); $closed = proc_close($process); }
+        if ($captureOutput) { $output .= stream_get_contents($pipes[1]); }
+    } finally { if ($captureOutput) { fclose($pipes[1]); } fclose($pipes[2]); $closed = proc_close($process); }
     if ($exit !== 0 && $closed !== 0) { throw new RuntimeException('command_failed'); }
     return trim($output);
 }
@@ -109,7 +109,8 @@ function va_backup(array $config, string $run): array {
         va_wp($config, ['db', 'check']);
         va_wp($config, ['db', 'export', $folder.'/database.sql', '--single-transaction', '--quick', '--add-drop-table'], 300);
         va_run(['/bin/tar', '-czf', $folder.'/files.tar.gz', '--exclude=./.maintenance', '-C', $config['root'], '.'], 300);
-        va_run(['/bin/tar', '-tzf', $folder.'/files.tar.gz'], 120);
+        // Validate every archive entry and the exit status without buffering a potentially huge file list.
+        va_run(['/bin/tar', '-tzf', $folder.'/files.tar.gz'], 120, false);
         if (!is_file($folder.'/database.sql') || filesize($folder.'/database.sql') === 0) { throw new RuntimeException('empty_database_backup'); }
         $manifest = ['root' => $config['root'], 'runId' => $run, 'createdAt' => time(), 'files' => hash_file('sha256', $folder.'/files.tar.gz'), 'database' => hash_file('sha256', $folder.'/database.sql')];
         va_save($folder.'/manifest.json', va_envelope($manifest, $config['secret']));

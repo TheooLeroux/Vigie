@@ -88,7 +88,11 @@ wp --path=${root} option update siteurl ${url}
     }
     check("signed requests for another site or expired requests rejected");
     await assert.rejects(op(randomUUID(), "backup", { webPhp: "0.0.0" }), /php_mismatch/); check("PHP mismatch rejected before backup");
+    // Production archives can list more than the command-output cap, even when the archive is valid.
+    await exec(["php", "-r", '$dir=$argv[1]."/wp-content/archive-regression"; mkdir($dir); for($i=0;$i<7000;$i++){touch($dir."/".str_pad((string)$i,90,"x"));}', root]);
     const saved = await op(run, "backup", { webPhp: php }); assert.equal(saved.backup, `${directory}/backups/${run}`); check("files and SQL backup verified");
+    assert.ok(Number((await shell(`tar -tzf '${directory}/backups/${run}/files.tar.gz' | wc -c`)).trim()) > 524288);
+    check("archive verification streams a file list larger than the output cap");
     const updated = agentPlan((await op(run, "update", { plan, webPhp: php })).plan); report.after = updated;
     assert.equal(updated.wordpress.current, plan.wordpress.target); assert.notEqual(updated.wordpress.current, "6.8.3");
     assert.equal(updated.plugins.find(p=>p.slug==='akismet')?.current, plan.plugins.find(p=>p.slug==='akismet')?.target); check("core and extensions updated to exact plan");
