@@ -90,6 +90,8 @@ Le nouveau parcours est intégré à chaque fiche projet : **Tout mettre à jour
 
 La migration `004-updates.sql` ajoute le suivi durable, les verrous d’exécution et les sources chiffrées. Le module est désactivé par défaut : appliquer la migration, configurer l’exécuteur et réaliser un pilote avant l’activation. L’ancienne migration `003-maintenance.sql` et ses traces sont conservées sans réutiliser les anciens jobs ni leurs verrous. Les jetons dédiés existants peuvent être réutilisés par compatibilité, sans rotation ni élargissement automatique de leurs droits.
 
+Lorsqu’aucune proposition saine ne peut être validée, le suivi affiche l’[arrêt de la mise à jour et sa raison](docs/arret-mise-a-jour.md), les composants concernés et les précautions requises si des opérations ont déjà pu commencer.
+
 ## Vérifications
 
 Vercel est disponible dans **Connexions**, avec découverte de tous les projets, filtre par client et ajout au parc sur choix explicite. L’ajout crée la fiche et son association client en un clic ; la découverte seule ne crée rien. Les deux projets « À virer » restent exclus et ne sont pas modifiés. Voir [le fonctionnement et les limites du connecteur Vercel](docs/connecteur-vercel.md).

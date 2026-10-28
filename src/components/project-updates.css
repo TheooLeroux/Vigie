@@ -3,3 +3,7 @@
 .updates-security-report{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
 .updates-security-report p{margin-top:10px;line-height:1.7}
 .updates-security-report a{display:inline-block;margin-top:8px;text-decoration:underline}
+.updates-progress>div{min-width:0;overflow-wrap:anywhere}
+.updates-progress>svg{flex-shrink:0}
+.updates-progress ul{padding-left:18px;margin-top:6px}
+.updates-progress li{font-size:12px;line-height:1.7;margin-top:6px}

@@ -46,7 +46,7 @@ export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["pha
   // Every reported vulnerability, including low/unknown and unpatched issues,
   // excludes a candidate. Neither old versions nor missing fixes waive this gate.
   const blockers = phase === "before" ? [] : findings;
-  const check: UpdateCheck = { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Recherche d’une autre combinaison sans faille signalée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
+  const check: UpdateCheck = { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Cette proposition ne peut pas être publiée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
   check.message = wordpressBlockingMessage(check) || check.message;
   return check;
 }
