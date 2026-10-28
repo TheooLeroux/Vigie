@@ -17,10 +17,12 @@ const before = (version="24.21.0"): UpdateCheck => healthCheck({tool:"Node",phas
 const release = async()=>({...healthRelease,state:"available" as const,securityUpdate:true});
 
 test("Vercel géré : les validations ciblent exactement le runtime mesuré et conservent le correctif attendu",async()=>{
- const plan=await nodeValidationPlan([target],[before()],"24.22.1",release);
+ const measured={...before(),checkedAt:"2026-10-28T15:00:00.000Z"};
+ const plan=await nodeValidationPlan([target],[measured],"24.22.1",release);
  assert.equal(plan.version,"24.21.0");
  const managed=plan.managed.get(target.id)!;
  assert.equal(managed.updatePending,true);assert.equal(managed.securityUpdate,true);
+ assert.equal(managed.checkedAt,measured.checkedAt,"la date du runtime est celle de la mesure, pas du cache du catalogue");
  assert.match(managedNodeMessage(managed),/Correctif de sécurité 24.22.1 en attente/);
  const current=await nodeValidationPlan([target],[before("24.22.1")],"24.22.1",release);
  assert.equal(current.managed.get(target.id)!.updatePending,false);

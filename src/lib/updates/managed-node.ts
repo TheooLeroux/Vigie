@@ -19,7 +19,7 @@ export async function nodeValidationPlan(targets: UpdateTarget[], checks: (Updat
   if (observed.length) {
     const info = await release(version);
     if (info.supported !== true || !info.checkedAt || info.state === "unknown") throw new ApiError("Le support de la version Node fournie par Vercel n’a pas pu être confirmé.", 422);
-    for (const target of targets.filter(target => target.provider === "vercel")) managed.set(target.id, { provider: "vercel", version, latestLts, updatePending: gt(latestLts, version), securityUpdate: info.latestVersion === latestLts ? info.securityUpdate : null, checkedAt: info.checkedAt });
+    for (const [index, target] of targets.entries()) if (target.provider === "vercel") managed.set(target.id, { provider: "vercel", version, latestLts, updatePending: gt(latestLts, version), securityUpdate: info.latestVersion === latestLts ? info.securityUpdate : null, checkedAt: checks[index]!.checkedAt });
   }
   return { version, managed };
 }
