@@ -66,6 +66,13 @@ import { ProjectListActions } from "./project-list-actions";
 import type { UpdateState } from "@/lib/updates/types";
 
 type View = "sites" | "clients" | "connections" | "backup" | "activity";
+const projectTabs = [
+  { id: "overview", label: "Vue d’ensemble" },
+  { id: "technical", label: "Technique" },
+  { id: "information", label: "Informations" },
+  { id: "history", label: "Historique" },
+] as const;
+type ProjectTab = (typeof projectTabs)[number]["id"];
 type Dialog =
   | "project"
   | "manualProject"
@@ -190,6 +197,7 @@ export function WorkspaceApp({
     [incompleteOnly, setIncompleteOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null),
     [detail, setDetail] = useState<ProjectDetail | null>(null);
+  const [projectTab, setProjectTab] = useState<ProjectTab>("overview");
   const [dialog, setDialog] = useState<Dialog>(null),
     [editService, setEditService] = useState<Service | undefined>(),
     [mobileNav, setMobileNav] = useState(false),
@@ -323,6 +331,7 @@ export function WorkspaceApp({
       window.history.replaceState({}, "", `/?client=${encodeURIComponent(id)}`);
   }
   function openProject(id: string) {
+    setProjectTab("overview");
     setSelected(id);
     setView("sites");
     setError("");
@@ -588,26 +597,33 @@ export function WorkspaceApp({
             </button>
           </div>
         </div>
-        <div className="detail-meta">
-          <Status project={p} data={data!} />
-          <span>
-            <ShieldCheck size={14} />
-            {p.criticality === "critical"
-              ? "Criticité élevée"
-              : p.criticality === "important"
-                ? "Projet important"
-                : "Criticité standard"}
-          </span>
-          {p.tags.map((t) => (
-            <span className="plain-tag" key={t}>
-              {t}
-            </span>
+        <div className="project-tabs" role="tablist" aria-label="Rubriques du projet">
+          {projectTabs.map((tab, index) => (
+            <button
+              key={tab.id}
+              id={`project-tab-${tab.id}`}
+              role="tab"
+              aria-selected={projectTab === tab.id}
+              aria-controls={`project-panel-${tab.id}`}
+              tabIndex={projectTab === tab.id ? 0 : -1}
+              onClick={() => setProjectTab(tab.id)}
+              onKeyDown={(event) => {
+                const next = event.key === "ArrowRight" ? (index + 1) % projectTabs.length
+                  : event.key === "ArrowLeft" ? (index + projectTabs.length - 1) % projectTabs.length
+                  : event.key === "Home" ? 0 : event.key === "End" ? projectTabs.length - 1 : null;
+                if (next === null) return;
+                event.preventDefault();
+                setProjectTab(projectTabs[next].id);
+                document.getElementById(`project-tab-${projectTabs[next].id}`)?.focus();
+              }}
+            >{tab.label}</button>
           ))}
         </div>
-        <div className="project-content">
+        <div className="project-content project-tab-panel" id="project-panel-overview" role="tabpanel" aria-labelledby="project-tab-overview" hidden={projectTab !== "overview"} tabIndex={0}>
           <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
-          {p.description && <p className="project-intro">{p.description}</p>}
           <ProjectUpdates key={p.id} projectId={p.id} request={api} onComplete={refresh} onState={onProjectUpdateState} />
+        </div>
+        <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
           <section
             className="project-monitoring"
             id="project-technical"
@@ -708,7 +724,18 @@ export function WorkspaceApp({
               </div>
             </details>
           )}
-          <details className="panel project-section" open={!connected}>
+        </div>
+        <div className="project-content project-tab-panel" id="project-panel-information" role="tabpanel" aria-labelledby="project-tab-information" hidden={projectTab !== "information"} tabIndex={0}>
+          <section className="panel project-information">
+            <h2>À propos du projet</h2>
+            <p className="project-intro">{p.description || "Aucune description renseignée."}</p>
+            <div className="detail-meta">
+              <Status project={p} data={data!} />
+              <span><ShieldCheck size={14} />{p.criticality === "critical" ? "Criticité élevée" : p.criticality === "important" ? "Projet important" : "Criticité standard"}</span>
+              {p.tags.map(tag => <span className="plain-tag" key={tag}>{tag}</span>)}
+            </div>
+          </section>
+          <details className="panel project-section">
             <summary>
               Environnements & services{" "}
               <span>{detail.services.length} service(s)</span>
@@ -826,17 +853,13 @@ export function WorkspaceApp({
               Marquer comme relue
             </button>
           </section>
-          <details className="project-section project-history">
-            <summary>
-              Historique du projet{" "}
-              <span>{detail.activity.length} action(s)</span>
-            </summary>
+        </div>
+        <div className="project-content project-tab-panel" id="project-panel-history" role="tabpanel" aria-labelledby="project-tab-history" hidden={projectTab !== "history"} tabIndex={0}>
             <ActivityPanel
               items={detail.activity}
               onProject={openProject}
               scoped
             />
-          </details>
         </div>
       </>
     );

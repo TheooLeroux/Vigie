@@ -18,7 +18,7 @@ test("Résumé projet : correctif de sécurité et mise à jour du déploiement 
   assert.match(html, /Mises à jour disponibles/);
   assert.match(html, /correctif de sécurité manquant/);
   assert.match(html, /24.21.0 → 24.22.1/);
-  assert.match(html, /href="#project-updates"/);
+  assert.match(html, /<summary>Voir les composants concernés<\/summary>/);
 });
 
 test("Résumé projet : une dernière tentative échouée ne remplace pas les versions actives", () => {
@@ -39,7 +39,8 @@ test("Résumé projet : candidats rejetés exclus, réserves acceptées conserv�
   assert.equal(projectHealth(detail, current).security.length, 1);
   assert.match(projectHealth(detail, current).security[0], /CVE-2026-12345/);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: current }));
-  assert.match(html, /Voir les contrôles/);
+  assert.match(html, /<summary>Voir les alertes<\/summary>/);
+  assert.match(html, /CVE-2026-12345/);
   assert.equal(projectHealth(detail, healthUpdates([healthCheck({ findings: [{ ...healthCheck().findings[0], scope: "another-service" }] })])).security.length, 0);
   detail.railway![0].services[0].activeDeployments[0].evidence!.imageDigest = "sha256:" + "c".repeat(64);
   assert.equal(projectHealth(detail, current).security.length, 0, "un rapport d’une autre image n’est pas applicable");

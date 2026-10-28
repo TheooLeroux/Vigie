@@ -42,6 +42,40 @@
   gap: 20px;
   min-width: 0;
 }
+.project-tabs {
+  display: flex;
+  gap: 28px;
+  margin: 28px 0 24px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.project-tabs > button {
+  flex-shrink: 0;
+  padding: 14px 2px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.project-tabs > button:hover { color: var(--ink); }
+.project-tabs > button[aria-selected="true"] {
+  color: var(--green);
+  border-bottom-color: var(--green);
+}
+.project-tabs > button:focus-visible,
+.health-details > summary:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+.project-tab-panel[hidden] { display: none; }
+.project-information { padding: 24px; }
+.project-information h2 { font-size: 16px; margin-bottom: 14px; }
+.project-information .detail-meta { margin: 20px 0 0; flex-wrap: wrap; }
+.health-details { width: 100%; margin-top: auto; font-size: 12px; }
+.health-details > summary { padding: 6px 0; cursor: pointer; color: var(--text); }
+.health-details[open] > summary { margin-bottom: 8px; }
+.health-details p { margin-top: 10px; color: var(--muted); }
 .project-health-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -575,6 +609,9 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
   }
 }
 @media (max-width: 650px) {
+  .project-tabs { gap: 18px; margin: 22px 0 20px; }
+  .project-tabs > button { font-size: 12px; }
+  .project-information { padding: 20px 17px; }
   .discovery-item {
     flex-direction: column;
     align-items: stretch;
