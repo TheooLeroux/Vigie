@@ -75,7 +75,15 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     if (project.connectionError || project.missingSince || !project.production) incomplete = true;
     const deployment = project.production;
     if (!deployment) continue;
-    addRelease(`vercel:${project.id}:node`, `${project.name} · Node.js`, deployment.nodeBranch || "version inconnue", deployment.nodeRelease || undefined);
+    const managed = history.flatMap(run => run.results.map(result => ({ run, result }))).find(({ run, result }) => {
+      const target = run.targets.find(target => target.id === result.targetId);
+      const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after" && check.status === "passed")?.nodeEvidence;
+      return result.stage === "completed" && target?.provider === "vercel" && target.remoteId === project.id && target.connectionId === project.connectionId && result.managedNode && proof?.source === "vercel-function" && proof.projectId === project.id && proof.version === result.managedNode.version && proof.deploymentId === deployment.id && !!proof.commit && proof.commit === deployment.commit;
+    })?.result.managedNode;
+    const nodeKey = `vercel:${project.id}:node`;
+    const release = managed ? { ...deployment.nodeRelease, state: managed.updatePending ? "available" as const : "current" as const, latestVersion: managed.latestLts, latestLts: managed.latestLts, latestStable: deployment.nodeRelease?.latestStable || managed.latestLts, supported: true, supportEndsAt: deployment.nodeRelease?.supportEndsAt || null, securityUpdate: managed.securityUpdate, checkedAt: managed.checkedAt, source: "https://nodejs.org/dist/index.json" } : deployment.nodeRelease || undefined;
+    addRelease(nodeKey, `${project.name} · Node.js`, managed?.version || deployment.nodeBranch || "version inconnue", release);
+    if (managed?.updatePending && updates.has(nodeKey)) manualUpdates.set(nodeKey, { label: updates.get(nodeKey)!, reason: "Runtime géré par Vercel : correctif en attente chez l’hébergeur. Les dépendances sont validées avec la version mesurée ; le runtime reste à actualiser." });
     for (const technology of deployment.analysis?.technologies || []) {
       if (technology.update === "available") {
         versionsKnown = true;

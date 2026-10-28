@@ -106,7 +106,7 @@ test("Vercel : une application externe peut utiliser seulement sa clé dérivée
 test("Vercel : sonde requise avant publication, une ancienne version reste admissible uniquement à ce précontrôle",async()=>{
  const deps=readers();
  const ready=await preflightNodeRuntime(target,reference.deploymentId,"99.0.0",(t,r)=>readVercelRuntime(t,r,deps));
- assert.equal(ready?.status,"passed");assert.match(ready!.message,/contrôlé après déploiement/);
+ assert.equal(ready?.status,"passed");assert.match(ready!.message,/contrôlée après déploiement/);assert.equal(ready?.nodeEvidence?.version,process.versions.node);
  const blocked=await preflightNodeRuntime(target,reference.deploymentId,"99.0.0",async()=>{throw Error("not installed")});
  assert.equal(blocked?.status,"blocked");assert.match(blocked!.message,/Aucun changement publié/);
 });

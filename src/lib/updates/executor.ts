@@ -28,6 +28,7 @@ import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } f
 import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
+import { nodeValidationPlan, managedNodeMessage } from "./managed-node";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -74,10 +75,24 @@ async function downloadGitArchive(repository: string, sha: string, destination: 
 async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: UpdateResult[], progress: Progress) {
   const representative = targets[0];
   if (representative.mode === "git" && new Set(targets.map(target => target.branch)).size !== 1) throw new ApiError("Ce dépôt est déployé depuis plusieurs branches. Séparez leurs mises à jour.");
-  const version = await latestNode();
+  const latestLts = await latestNode();
+  const runtimeChecks: (UpdateCheck | null)[] = [];
   for (const [index, target] of targets.entries()) {
-    results[index].previousDeploymentId = await providerPreflight(target, version);
+    results[index].previousDeploymentId = await providerPreflight(target, latestLts);
     await checkPublicSite(target.url!);
+    const check = results[index].previousDeploymentId ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
+    runtimeChecks.push(check);
+    if (check) {
+      results[index].checks ||= []; results[index].checks.push(check);
+      await progress("checking", check.message);
+      requireSecurityPass(check);
+    }
+  }
+  const plan = await nodeValidationPlan(targets, runtimeChecks, latestLts);
+  const version = plan.version;
+  for (const [index, target] of targets.entries()) {
+    const managed = plan.managed.get(target.id);
+    if (managed) { results[index].managedNode = managed; if (managed.updatePending) results[index].warnings.push(managedNodeMessage(managed)); }
   }
   const temporary = await mkdtemp(join(tmpdir(), "vigie-update-"));
   try {
@@ -139,12 +154,6 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       for (const result of selected) { result.checks ||= []; result.checks.push(check); }
       await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
       requireSecurityPass(check);
-    }
-    for (const [index, target] of targets.entries()) {
-      if (!results[index].previousDeploymentId) continue;
-      await progress("checking", "Vérification préalable de l’accès au runtime déployé.");
-      const check = await preflightNodeRuntime(target, results[index].previousDeploymentId!, version);
-      if (check) await record(check, [results[index]]);
     }
     await progress("checking", "Analyse de sécurité des dépendances actuelles.");
     const baselineScan = await nodeScan(names);
@@ -316,7 +325,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         await verifyNode(index, result.previousDeploymentId);
         await checkPublicSite(targets[index].url!);
         result.stage = "completed";
-        result.message = "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
+        result.message = result.managedNode?.updatePending ? "Dépendances validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés.";
       });
       await rememberValidation();
       return;
@@ -327,6 +336,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       if (!current || current.unavailable || JSON.stringify(current) !== JSON.stringify(target)) throw new ApiError("La configuration du projet a changé pendant les tests. Publication annulée.");
       const currentDeployment = await providerPreflight(target, version);
       if (currentDeployment !== results[index].previousDeploymentId) throw new ApiError("Un autre déploiement a eu lieu pendant les tests. Publication annulée pour ne pas l’écraser.");
+      if (target.provider === "vercel") {
+        const runtime = await preflightNodeRuntime(target, currentDeployment!, latestLts);
+        if (!runtime || runtime.status !== "passed" || runtime.nodeEvidence?.version !== version) throw new ApiError("Le runtime Vercel a changé pendant les validations. Relancez pour tester sa nouvelle version ; aucun changement publié.", 409);
+      }
     }
     await progress("publishing", "Vérifications réussies. Publication de la nouvelle version.");
     for (const result of results) result.stage = "publishing";
@@ -365,7 +378,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await verifyNode(index, result.deploymentId);
       await checkPublicSite(target.url!);
       result.stage = "completed";
-      result.message = "Mise à jour déployée et contrôle HTTPS réussi.";
+      result.message = result.managedNode?.updatePending ? "Dépendances déployées et validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Mise à jour déployée et contrôle HTTPS réussi.";
     });
     await rememberValidation();
   } finally { await rm(temporary, { recursive: true, force: true }); }
@@ -462,6 +475,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       run.stage = "completed";
       const manualCount = run.results.reduce((count, result) => count + (result.manualUpdates?.length || 0), 0);
       run.message = manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
+      const pendingNodes = run.results.filter(result => result.managedNode?.updatePending).length;
+      if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
       await log("live", "updates.completed", run.message, run.projectId);
     });
   } catch (error) {

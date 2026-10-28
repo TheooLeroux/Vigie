@@ -89,7 +89,7 @@ export async function preflightNodeRuntime(target: UpdateTarget, deploymentId: s
     const base = { tool: "Node" as const, phase: "before" as const, scope: target.root || "racine", checkedAt: new Date().toISOString(), findings: [] };
     try {
       const proof = await vercelProbe(target, { deploymentId });
-      return { ...base, status: "passed", message: `Sonde Vercel qualifiée sur le déploiement actuel : Node ${proof.node} mesuré. Le correctif cible ${expected} sera contrôlé après déploiement.` };
+      return { ...base, status: "passed", nodeEvidence: { version: proof.node, deploymentId: proof.deploymentId, source: "vercel-function", usage: "runtime", projectId: proof.projectId, commit: proof.commit, region: proof.region }, message: `Sonde Vercel qualifiée sur le déploiement actuel : Node ${proof.node} mesuré. La version réellement testée sera contrôlée après déploiement ; dernière LTS publiée ${expected}.` };
     } catch (error) { return { ...base, status: "blocked", message: `Sonde Vercel non qualifiée avant publication : ${error instanceof ApiError ? error.message : "preuve absente ou inexploitable"}. Aucun changement publié.` }; }
   }
   if (target.provider !== "railway") return null;

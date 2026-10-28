@@ -191,6 +191,20 @@ test("Mises à jour : une réponse de lancement perdue ne remplace pas le résul
   });
   assert.equal(result.stage, "completed");
 });
+
+test("Vercel : dépendances validées avec réserve Node explicite libèrent le verrou sans annoncer un site entièrement corrigé",async()=>{
+  const {project}=await fixture();
+  const run=await startProjectUpdate({projectId:project.id},async()=>{});
+  await executeUpdate(run.id,async(_run,_targets,results)=>{
+    results[0].stage="completed";
+    results[0].managedNode={provider:"vercel",version:"24.21.0",latestLts:"24.22.1",updatePending:true,securityUpdate:true,checkedAt:new Date().toISOString()};
+  },undefined,noRefresh);
+  const result=(await readUpdateRun(run.id))!;
+  assert.equal(result.stage,"completed");
+  assert.match(result.message,/dépendances terminée avec réserves/);
+  assert.match(result.message,/pas déclaré entièrement corrigé/);
+  assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length,0);
+});
 test("Mises à jour : les sources sans Git sont configurables, chiffrées et téléchargeables sans exposer les clés", async () => {
   const { project, target } = await fixture("archive");
   assert.match(target.unavailable!, /sources/);

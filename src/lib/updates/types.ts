@@ -42,6 +42,7 @@ export type UpdateCheck = {
   wordpressRetained?: { package: string; version: string }[];
 };
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
+export type ManagedNode = { provider: "vercel"; version: string; latestLts: string; updatePending: boolean; securityUpdate: boolean | null; checkedAt: string };
 export type UpdateResult = {
   targetId: string;
   name: string;
@@ -55,6 +56,7 @@ export type UpdateResult = {
   warnings: string[];
   checks?: UpdateCheck[];
   manualUpdates?: WordPressManualUpdate[];
+  managedNode?: ManagedNode;
 };
 export type UpdateRun = {
   nodeReceipts?: import("./node-current").NodeValidationReceipt[];

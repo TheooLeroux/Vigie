@@ -222,6 +222,10 @@ export async function nodeBranchInfo(
   // A major branch is not an observed patch version. Never manufacture a missing-patch warning.
   return { ...release, state: "unknown", securityUpdate: null };
 }
+export async function nodeVersionInfo(current: string, transport: typeof fetch = fetch): Promise<SoftwareRelease> {
+  if (!version(current)) return { ...unknown };
+  return nodeRelease(current, await nodeCatalog(transport));
+}
 export async function enrichRailwayReleases(
   projects: RailwayProject[],
   transport: typeof fetch = fetch,

@@ -36,6 +36,13 @@ export function WordPressManualUpdates({ run, observations, targets = [] }: { ru
     </li>))}</ul>
   </div>;
 }
+export function ManagedNodeNotice({ run }: { run?: UpdateRun }) {
+  const pending = run?.results.filter(result => result.managedNode?.updatePending) || [];
+  if (!pending.length) return null;
+  return <div className="updates-note" role="status"><strong>Correctif Node en attente chez Vercel</strong>
+    {pending.map(result => <p key={result.targetId}>{result.name} : dernière version mesurée <strong>Node {result.managedNode!.version}</strong>. {result.managedNode!.securityUpdate ? "Correctif de sécurité" : "Version LTS"} attendu : <strong>{result.managedNode!.latestLts}</strong>. {result.stage === "completed" ? "Les dépendances ont été validées avec la version mesurée. " : ""}La mise à jour du runtime dépend de Vercel et n’est pas confirmée. Relevé du {formatDate(result.managedNode!.checkedAt)}.</p>)}
+  </div>;
+}
 export function UpdateProgress({ run }: { run: UpdateRun }) {
   const active = activeUpdateStages.includes(run.stage);
   const delayed = active && Date.now() - Date.parse(run.updatedAt) > 10 * 60_000;
@@ -115,6 +122,7 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
     {state && <UpdateReadiness state={state} />}
     {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
+    <ManagedNodeNotice run={latest} />
     <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />
     {!!state?.currentSecurity?.length && <details className="updates-details"><summary>Rapports de sécurité</summary>
       {state.currentSecurity.map(observation => <details className="updates-security-report" key={observation.targetId}><summary>{state.targets.find(target => target.id === observation.targetId)?.name || "Service"}{observation.check ? ` · ${observation.check.findings.length} signalement(s)` : " · indisponible"}</summary>{observation.error && <p role="status">{observation.error}</p>}{observation.check && <><p>{formatDate(observation.check.checkedAt)} · Ce contrôle ne lance aucune mise à jour. Les rapports des exécutions précédentes restent dans l’historique.</p>{observation.check.findings.map(finding => <FindingDetails key={finding.id} finding={finding} />)}{!observation.check.findings.length && <p>Aucune vulnérabilité connue dans le périmètre contrôlé.</p>}</>}{observation.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>)}

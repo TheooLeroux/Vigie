@@ -127,6 +127,11 @@ test("Résumé projet : Vercel distingue la branche Node du correctif exact et l
   detail.vercel![0].production!.commit=sha;
   state.runs[0].results[0].checks=[healthCheck({status:"passed",findings:[],scope:""}),healthCheck({tool:"Node",phase:"after",status:"passed",findings:[],nodeEvidence:{version:"24.22.1",deploymentId:"deployment",source:"vercel-function",usage:"runtime",projectId:"vercel",commit:sha,region:"fra1"}})];
   assert.equal(projectHealth(detail,state).securityKnown,true,"le scan accepté reste lié au déploiement Vercel attesté");
+  state.runs[0].results[0].managedNode={provider:"vercel",version:"24.22.1",latestLts:"24.22.2",updatePending:true,securityUpdate:true,checkedAt:healthAt};
+  const managedHealth=projectHealth(detail,state);
+  assert.equal(managedHealth.security.length,1,"le correctif de sécurité Node reste signalé");
+  assert.ok(managedHealth.manualUpdates.some(item=>item.reason.includes("Runtime géré par Vercel")));
+  assert.ok(managedHealth.updates.some(item=>item.includes("24.22.1 → 24.22.2")));
   detail.vercel![0].production!.commit="b".repeat(40);
   assert.equal(projectHealth(detail,state).securityKnown,false,"un nouveau commit ne réutilise pas la preuve précédente");
 });
