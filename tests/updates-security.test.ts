@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseOsv, parseTrivy, requireSecurityPass, scanDockerImage, scanNodeSources, securityCheck, severity } from "../src/lib/updates/security";
+import { parseOsv, parseTrivy, requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, securityCheck, severity } from "../src/lib/updates/security";
 import { checkWordPressRequirements, compareWordPressVersions, parseWordPressPlan, wordPressScanner, wordpressPlanSchema, wordpressPlanScript, wordpressVulnerabilities } from "../src/lib/updates/wordpress-security";
 import { wordpressUpdateScript } from "../src/lib/updates/wordpress";
 import { runCommand } from "../src/lib/updates/process";
@@ -12,20 +12,45 @@ import { dockerRuntimeBase } from "../src/lib/updates/dockerfile";
 import type { SecurityFinding } from "../src/lib/updates/types";
 
 const finding = (severity: SecurityFinding["severity"] = "high", id = "GHSA-aaaa-bbbb-cccc"): SecurityFinding => ({ id, aliases: ["CVE-2026-12345"], package: "library", version: "1.0.0", severity });
+test("Objectif zéro faille : toutes les sévérités préexistantes sont bloquantes dans la candidate et après installation", () => {
+  for (const severity of ["low", "moderate", "high", "critical", "unknown"] as const) for (const tool of ["OSV", "Trivy", "WPScan"] as const) {
+    const before = finding(severity);
+    assert.equal(securityCheck(tool, "before", "fixture", [before]).status, "warning");
+    for (const phase of ["candidate", "after"] as const) {
+      const check = securityCheck(tool, phase, "fixture", [before], [before]);
+      assert.equal(check.status, "blocked");
+      assert.deepEqual(check.blockers, [before]);
+      assert.throws(() => requireSecurityPass(check), /non résolue/);
+    }
+  }
+});
+test("Objectif zéro faille : un ancien warning ne peut terminer un traitement ; les essais rejetés ne contaminent pas un contrôle final propre", () => {
+  const original = { targetId: "fixture", name: "App", stage: "completed" as const, message: "done", warnings: [], checks: [securityCheck("OSV", "before", "lock", [finding("low")]), { ...securityCheck("OSV", "candidate", "lock", [finding("low")]), status: "warning" as const }] };
+  assert.throws(() => requireZeroFinalFindings([original]), /non résolue/);
+  assert.equal(original.stage, "failed");
+  const clean = { ...original, stage: "completed" as const, checks: [...original.checks, securityCheck("OSV", "candidate", "lock", [])] };
+  assert.doesNotThrow(() => requireZeroFinalFindings([clean]));
+  const published = { ...original, stage: "completed" as const, deploymentId: "deployment" };
+  assert.throws(() => requireZeroFinalFindings([published]), /non résolue/);
+  assert.equal(published.stage, "attention");
+  const multiple = [{ ...original, stage: "completed" as const }, { ...published, stage: "completed" as const }];
+  assert.throws(() => requireZeroFinalFindings(multiple), /non résolue/);
+  assert.deepEqual(multiple.map(result => result.stage), ["failed", "attention"], "aucun autre service vulnérable ne doit rester marqué terminé");
+});
 test("Sécurité : distinction des alertes préexistantes, nouvelles, aggravées, inconnues et malveillantes", () => {
   const old = finding();
   assert.equal(securityCheck("OSV", "before", "lock", [old]).status, "warning");
-  assert.equal(securityCheck("OSV", "candidate", "lock", [old], [old]).status, "warning");
+  assert.equal(securityCheck("OSV", "candidate", "lock", [old], [old]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [old]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [{ ...old, scope: "frontend" }], [{ ...old, scope: "backend" }]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [old], [finding("low")]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [finding("critical")], [finding("critical")]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [finding("unknown")]).status, "blocked");
-  assert.equal(securityCheck("OSV", "candidate", "lock", [finding("unknown")], [finding("unknown")]).status, "warning");
+  assert.equal(securityCheck("OSV", "candidate", "lock", [finding("unknown")], [finding("unknown")]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", [finding("low", "MAL-2026-123")], [finding("low", "MAL-2026-123")]).status, "blocked");
   assert.equal(securityCheck("OSV", "candidate", "lock", []).status, "passed");
   const alias = { ...old, id: "CVE-2026-12345", aliases: [] };
-  assert.equal(securityCheck("Trivy", "candidate", "image", [alias], [old]).status, "warning");
+  assert.equal(securityCheck("Trivy", "candidate", "image", [alias], [old]).status, "blocked");
   assert.throws(() => requireSecurityPass(securityCheck("OSV", "candidate", "lock", [old])), /Publication arrêtée/);
 });
 test("OSV : sévérité des groupes et conservation des alertes sans score", () => {

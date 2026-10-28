@@ -6,7 +6,7 @@ import { valid } from "semver";
 import { ApiError } from "../http";
 import { runCommand } from "./process";
 import { createHash } from "node:crypto";
-import type { SecurityFinding, UpdateCheck } from "./types";
+import type { SecurityFinding, UpdateCheck, UpdateResult } from "./types";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().regex(/^\d+\.\d+\.\d+$/)).max(200).optional() });
@@ -40,16 +40,36 @@ export function parseTrivy(raw: string, baseline = false) {
   if (report.Metadata.OS.Eosl) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
   return findings;
 }
-export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["phase"], scope: string, findings: SecurityFinding[], before: SecurityFinding[] = []): UpdateCheck {
-  const matches = (entry: SecurityFinding, previous: SecurityFinding) => entry.scope === previous.scope && entry.package === previous.package && [entry.id, ...entry.aliases].some(id => id === previous.id || previous.aliases.includes(id)) && (entry.severity === "unknown" ? previous.severity === "unknown" : ["high", "critical"].includes(previous.severity));
-  const blockers = phase === "before" ? [] : findings.filter(entry => [entry.id, ...entry.aliases].some(id => id.startsWith("MAL-")) || entry.severity === "critical" || ["high", "unknown"].includes(entry.severity) && !before.some(previous => matches(entry, previous)));
-  return { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? "Publication arrêtée : composant malveillant, faille critique ou nouvelle faille élevée/non évaluée." : findings.length ? `${findings.length} alerte(s) connue(s), conservée(s) dans le suivi ; ce contrôle ne certifie pas l’absence de faille.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
+export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["phase"], scope: string, findings: SecurityFinding[], _before: SecurityFinding[] = []): UpdateCheck {
+  // The baseline describes what must be repaired; it is never an allowlist.
+  // Every reported vulnerability, including low/unknown and unpatched issues,
+  // excludes a candidate. Neither old versions nor missing fixes waive this gate.
+  const blockers = phase === "before" ? [] : findings;
+  return { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Recherche d’une autre combinaison sans faille signalée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
 }
 export class SecurityPolicyError extends ApiError {
   constructor(readonly check: UpdateCheck) { super(`${check.tool} : ${check.message}`, 422); }
 }
 export function requireSecurityPass(check: UpdateCheck) {
   if (check.status === "blocked") throw new SecurityPolicyError(check);
+}
+export function requireZeroFinalFindings(results: UpdateResult[]) {
+  let unresolved: UpdateCheck | undefined;
+  for (const result of results) {
+    const latest = new Map<UpdateCheck["tool"], UpdateCheck>();
+    for (const check of result.checks || []) {
+      if (!["OSV", "Trivy", "WPScan"].includes(check.tool)) continue;
+      const previous = latest.get(check.tool);
+      if (!previous || check.phase !== "before" || previous.phase === "before") latest.set(check.tool, check);
+    }
+    for (const check of latest.values()) if (check.findings.length || check.status === "blocked") {
+      const failure = check.findings.length ? securityCheck(check.tool, "after", check.scope, check.findings) : check;
+      result.stage = result.commit || result.deploymentId || result.backup ? "attention" : "failed";
+      result.message = failure.message;
+      unresolved ||= failure;
+    }
+  }
+  if (unresolved) throw new SecurityPolicyError(unresolved);
 }
 function scannerEnvironment(temporary: string): NodeJS.ProcessEnv {
   return { NODE_ENV: "production", PATH: process.env.PATH, HOME: temporary, TMPDIR: temporary, ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}) };

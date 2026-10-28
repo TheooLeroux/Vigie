@@ -14,6 +14,8 @@ export type ProjectHealth = {
   running: boolean;
   attention: boolean;
   securityFromScan: boolean;
+  securityFixes: string[];
+  securitySearchIncomplete: boolean;
 };
 
 function installedWordPressFinding(inventory: SiteInventory, finding: SecurityFinding) {
@@ -30,9 +32,11 @@ const isWordPressSecurityCheck = (check: UpdateCheck) => check.tool === "WPScan"
 export function projectHealth(detail: ProjectDetail, state?: UpdateState | null): ProjectHealth {
   const security = new Map<string, string>(), updates = new Map<string, string>();
   const manualUpdates = new Map<string, { label: string; reason: string }>();
+  const fixes = new Map<string, { label: string; versions: Set<string> }>();
   let securityKnown = false, versionsKnown = false, incomplete = false;
   let securityFromScan = false;
-  const latest = state?.runs.find(run => run.projectId === detail.project.id);
+  const history = state?.runs.filter(run => run.projectId === detail.project.id) || [];
+  const latest = history[0];
   const addRelease = (id: string, name: string, version: string, release?: SoftwareRelease) => {
     if (!release) { incomplete = true; return; }
     if (release.securityUpdate !== null || release.supported === false) securityKnown = true;
@@ -119,8 +123,9 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       if (release.updateAvailable && release.securityRelease) security.set(`${installation.id}:php-security`, `PHP ${php.version} : publication de sécurité disponible.`);
     }
   }
-  for (const result of latest?.results || []) {
-    const target = latest!.targets.find(target => target.id === result.targetId);
+  const scanned = new Set<string>();
+  for (const run of history) for (const result of run.results) {
+    const target = run.targets.find(target => target.id === result.targetId);
     if (!target) continue;
     let checks: UpdateCheck[] = [];
     if (target.mode === "wordpress") {
@@ -142,6 +147,9 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       });
     }
     for (const check of checks) {
+      const scanKey = `${target.id}:${check.tool}`;
+      if (scanned.has(scanKey)) continue;
+      scanned.add(scanKey);
       securityKnown = true;
       for (const finding of check.findings) {
         if (finding.scope !== undefined && finding.scope !== target.root) continue;
@@ -149,8 +157,15 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         const severity = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
         security.set(`${target.id}:${finding.package}:${finding.version}:${id}`, `${result.name} · ${finding.package} ${finding.version} : ${id} (sévérité ${severity}).`);
         securityFromScan = true;
+        if (finding.fixedVersions?.length) {
+          const key = `${target.id}:${finding.package}:${finding.version}`;
+          const fix = fixes.get(key) || { label: `${result.name} · ${finding.package} ${finding.version}`, versions: new Set<string>() };
+          finding.fixedVersions.forEach(version => fix.versions.add(version));
+          fixes.set(key, fix);
+        }
       }
     }
   }
-  return { security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
+  const securitySearchIncomplete = !!latest && ["failed", "attention"].includes(latest.stage) && latest.results.some(result => result.checks?.some(check => check.status === "blocked" && ["OSV", "Trivy", "WPScan"].includes(check.tool)));
+  return { security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fix => `${fix.label} : correctifs référencés ${[...fix.versions].join(", ")} ; compatibilité à valider.`), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
 }

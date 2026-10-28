@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createNodeRemediator, dependencyRange, npmCoordinationCandidates, npmGraph, npmIndirectVersionsChanged, seedNpmIndirectVersions, validateNpmProposal } from "../src/lib/updates/remediation";
 import { requireSecurityPass, securityCheck, SecurityPolicyError, parseOsv } from "../src/lib/updates/security";
 import type { SecurityFinding } from "../src/lib/updates/types";
-import type { PackageVersion } from "../src/lib/updates/versions";
+import { compatibleVersions, type PackageVersion } from "../src/lib/updates/versions";
 import { runCommand, IndirectValidationError } from "../src/lib/updates/process";
 
 const alert: SecurityFinding = { id: "GHSA-test-test-test", aliases: [], package: "indirect", version: "1.1.0", severity: "critical", scope: "", fixedVersions: ["2.1.2"] };
@@ -214,10 +214,30 @@ test("Remédiation : un même parent doit corriger toutes les alertes ensemble, 
     const decision = await createNodeRemediator(registry(parents, ["2.2.0"], { other }), noPatch)(current.folder, [""], ["package.json", "package-lock.json"], alerts, "24.14.0", current.originals, tried);
     assert.equal(decision.kind, "parents");
     if (decision.kind === "parents") assert.deepEqual(decision.constraints.get(""), { parent: "2.5.0" });
-    assert.ok(tried.has(":parent@2.5.0") && !tried.has(":parent@4.0.0") && !tried.has(":parent@3.0.0"));
+    assert.ok(!tried.has(":parent@2.5.0") && !tried.has(":parent@4.0.0") && !tried.has(":parent@3.0.0"), "une version seulement proposée ne doit pas être marquée comme déjà testée");
     const incompatible = parents.filter(item => item.version !== "2.5.0"), rejected = new Set<string>();
     await assert.rejects(createNodeRemediator(registry(incompatible, ["2.2.0"], { other }), noPatch)(current.folder, [""], ["package.json", "package-lock.json"], alerts, "24.14.0", current.originals, rejected), /indirect.*other.*compatible avec toutes ces alertes/);
     assert.ok(![...rejected].some(item => item.startsWith(":parent@")));
+  } finally { await rm(current.folder, { recursive: true, force: true }); }
+});
+test("Objectif sécurité puis récence : les parents sûrs se coordonnent par leurs pairs au lieu de figer le premier", async () => {
+  const current = await fixture();
+  const data = JSON.parse(current.content);
+  data.packages[""].dependencies.consumer = "1.0.0";
+  data.packages["node_modules/consumer"] = { version: "1.0.0", peerDependencies: { parent: "^2" } };
+  await writeFile(join(current.folder, "package-lock.json"), JSON.stringify(data));
+  const manifest = { dependencies: { parent: "2.0.0", consumer: "1.0.0" } };
+  await writeFile(join(current.folder, "package.json"), JSON.stringify(manifest));
+  current.originals.set("package.json", JSON.stringify({ dependencies: { parent: "^1.0.0", consumer: "^1.0.0" } }));
+  const transport = registry([{ version: "4.0.0", dependencies: { indirect: "^1" } }, { version: "3.0.0", dependencies: { indirect: "^2" } }, { version: "2.0.0", dependencies: { indirect: "^2" } }], ["2.2.0"], { consumer: [{ version: "1.0.0", peerDependencies: { parent: "^2" } }] });
+  try {
+    const decision = await createNodeRemediator(transport, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set());
+    assert.equal(decision.kind, "parents");
+    if (decision.kind !== "parents") return;
+    assert.equal(decision.constraints.get("")?.parent, "3.0.0 || 2.0.0");
+    const selected = await compatibleVersions(manifest, "24.14.0", transport, {}, decision.constraints.get(""));
+    assert.equal(selected.versions.parent, "2.0.0", "la version 3 sûre individuellement n’est pas compatible avec le pair ; la version 4 récente est vulnérable");
+    assert.equal(selected.versions.consumer, "1.0.0");
   } finally { await rm(current.folder, { recursive: true, force: true }); }
 });
 test("Remédiation : absence de parent compatible expliquée, aucun override ou suppression d’alerte", async () => {
@@ -263,7 +283,7 @@ test("Remédiation : une nouvelle chaîne ne fait pas oublier le parent qui réi
   try {
     const first = await repair(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, tried);
     assert.equal(first.kind, "parents");
-    if (first.kind === "parents") assert.equal(first.constraints.get("")?.parent, "3.0.0");
+    if (first.kind === "parents") assert.equal(first.constraints.get("")?.parent, "3.0.0 || 2.0.0");
     const nextLock = JSON.parse(lock("3.0.0"));
     nextLock.packages["node_modules/parent"].dependencies = { bridge: "^1" };
     nextLock.packages["node_modules/bridge"] = { version: "1.0.0", dependencies: { indirect: "^1" } };
@@ -291,10 +311,10 @@ test("Remédiation : registre ou service OSV indisponible ne deviennent pas une 
     await assert.rejects(createNodeRemediator(offline, noPatch)(current.folder, [""], ["package.json", "package-lock.json"], [alert], "24.14.0", current.originals, new Set()), /OSV est injoignable.*indirect.*deux tentatives/);
   } finally { await rm(current.folder, { recursive: true, force: true }); }
 });
-test("Sécurité : l’erreur garde les seules alertes bloquantes et les versions corrigées pour la boucle", () => {
+test("Sécurité : toutes les alertes et leurs versions corrigées alimentent la boucle", () => {
   const low = { ...alert, id: "GHSA-low-low-low", severity: "low" as const };
   const check = securityCheck("OSV", "candidate", "lock", [alert, low]);
-  assert.throws(() => requireSecurityPass(check), error => error instanceof SecurityPolicyError && error.check.blockers?.length === 1);
+  assert.throws(() => requireSecurityPass(check), error => error instanceof SecurityPolicyError && error.check.blockers?.length === 2);
   const report = parseOsv(JSON.stringify({ results: [{ source: { path: "/tmp/package-lock.json" }, packages: [{ package: { name: "indirect", version: "1.1.0", ecosystem: "npm" }, vulnerabilities: [{ id: alert.id, affected: [{ package: { name: "indirect", ecosystem: "npm" }, ranges: [{ events: [{ introduced: "0" }, { fixed: "2.1.2" }] }] }] }] }] }] }));
   assert.deepEqual(report.findings[0].fixedVersions, ["2.1.2"]);
 });

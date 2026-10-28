@@ -44,6 +44,23 @@ test("Résumé projet : candidats rejetés exclus, réserves acceptées conserv�
   detail.railway![0].services[0].activeDeployments[0].evidence!.imageDigest = "sha256:" + "c".repeat(64);
   assert.equal(projectHealth(detail, current).security.length, 0, "un rapport d’une autre image n’est pas applicable");
 });
+test("Objectif sécurité : des correctifs restants ne donnent jamais aucune mise à jour signalée", () => {
+  const detail = healthFixture();
+  const accepted = healthUpdates([healthCheck({ findings: [{ ...healthCheck().findings[0], fixedVersions: ["2.0.3"] }] })]);
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: accepted }));
+  assert.match(html, /Correctifs de sécurité à valider/);
+  assert.match(html, /2.0.3/);
+  assert.doesNotMatch(html, /Aucune mise à jour signalée/);
+  const unresolved = healthUpdates([healthCheck()]);
+  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: unresolved })), /Sécurité non résolue/);
+  const failed = healthUpdates([healthCheck({ status: "blocked" })]);
+  failed.runs[0].id = "new-search";
+  failed.runs[0].stage = "failed";
+  failed.runs[0].results[0].stage = "failed";
+  failed.runs.push(...accepted.runs);
+  assert.equal(projectHealth(detail, failed).security.length, 1, "un essai récent rejeté ne doit pas effacer les alertes du déploiement encore actif");
+  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: failed })), /Combinaison sûre non validée/);
+});
 
 test("Résumé projet : inventaire en retard après publication ne réannonce pas l’ancien Node vulnérable", () => {
   const detail = healthFixture(), deployment = detail.railway![0].services[0].activeDeployments[0];

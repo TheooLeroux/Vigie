@@ -11,7 +11,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const hex = z.string().regex(/^[a-f0-9]{64}$/);
 const receiptSchema = z.object({
-  schema: z.literal(1), validatedAt: z.string().datetime(), sourceHash: hex, targetsHash: hex, policyHash: hex,
+  schema: z.literal(2), validatedAt: z.string().datetime(), sourceHash: hex, targetsHash: hex, policyHash: hex,
   nodeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   catalogs: z.array(z.object({ url: z.string().max(500), accept: z.string().max(100), etag: z.string().max(210).optional(), modified: z.string().max(100).optional(), hash: hex.optional() })).max(2500),
   images: z.array(z.object({ image: z.string().max(100), digest })).min(1).max(120),
@@ -46,6 +46,7 @@ export function reusableNodeReceipt(raw: unknown, key: NodeCurrentKey, now = Dat
   const parsed = receiptSchema.safeParse(raw);
   if (!parsed.success) return null;
   const receipt = parsed.data, age = now - Date.parse(receipt.validatedAt);
+  if (receipt.securityHash !== nodeSecurityHash([]) || receipt.imageSecurity.some(image => image.hash !== nodeSecurityHash([]))) return null;
   if (age < 0 || age > 24 * 60 * 60_000 || Object.entries(key).some(([name, value]) => receipt[name as keyof NodeCurrentKey] !== value)) return null;
   if (new Set(receipt.deployments.map(item => item.targetId)).size !== receipt.deployments.length || new Set(receipt.validations.map(item => item.targetId)).size !== receipt.validations.length) return null;
   if (receipt.deployments.some(item => !receipt.validations.some(validation => validation.targetId === item.targetId))) return null;
@@ -70,10 +71,10 @@ export async function checkCurrentNodeConfiguration(receipt: NodeValidationRecei
   sources: () => Promise<void>;
   catalogs: () => Promise<boolean>;
 }) {
-  if (nodeSecurityHash(actions.baseline) !== receipt.securityHash) return false;
+  if (actions.baseline.length || receipt.securityHash !== nodeSecurityHash([]) || receipt.imageSecurity.some(image => image.hash !== nodeSecurityHash([]))) return false;
   try {
     if (!await actions.images()) return false;
-    if (nodeSecurityHash(await actions.finalScan()) !== receipt.securityHash) return false;
+    if ((await actions.finalScan()).length) return false;
     await actions.sources();
     return await actions.catalogs();
   } catch { return false; }
@@ -104,6 +105,6 @@ export function nodeReceiptValidations(targets: UpdateTarget[], checks: (UpdateC
 }
 
 export function nodeReceiptDraft(key: NodeCurrentKey, catalogs: NodeCatalogEntry[], rest: Omit<NodeValidationReceipt, keyof NodeCurrentKey | "schema" | "catalogs">) {
-  const parsed = receiptSchema.safeParse({ schema: 1, ...key, catalogs, ...rest });
-  return parsed.success ? parsed.data : null;
+  const parsed = receiptSchema.safeParse({ schema: 2, ...key, catalogs, ...rest });
+  return parsed.success && parsed.data.securityHash === nodeSecurityHash([]) && parsed.data.imageSecurity.every(image => image.hash === nodeSecurityHash([])) ? parsed.data : null;
 }

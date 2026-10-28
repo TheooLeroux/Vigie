@@ -29,6 +29,9 @@ test("Configuration actuelle : preuve récente exacte, source entière, cible et
   assert.equal(reusableNodeReceipt(saved, key, startedAt + 24 * 60 * 60_000 + 1), null);
   assert.equal(reusableNodeReceipt(saved, key, startedAt - 1), null);
   assert.equal(reusableNodeReceipt({}, key, startedAt), null);
+  assert.equal(reusableNodeReceipt({ ...saved, schema: 1 }, key, startedAt), null, "un ancien objectif tolérant des failles ne doit pas fournir de raccourci");
+  assert.equal(reusableNodeReceipt({ ...saved, securityHash: nodeSecurityHash([changed]) }, key, startedAt), null);
+  assert.equal(reusableNodeReceipt({ ...saved, imageSecurity: [{ root: "backend", hash: nodeSecurityHash([changed]) }] }, key, startedAt), null);
   assert.equal(reusableNodeReceipt({ ...saved, validations: [] }, key, startedAt), null);
   assert.equal(reusableNodeReceipt({ ...saved, deployments: [...saved.deployments, ...saved.deployments] }, key, startedAt), null);
   const files = [{ path: "backend/package-lock.json", hash: sha }, { path: "shared/code.js", hash: sha }];

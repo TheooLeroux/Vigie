@@ -320,14 +320,15 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
           return false;
         }
         const candidates = (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, 40);
-        let chosen: PackageVersion | undefined;
+        const admissible: PackageVersion[] = [];
         for (const candidate of candidates) {
           if (tried.has(`${root}:${direct}@${candidate.version}`)) continue;
           let supported = true;
           for (const route of related) if (!await supports(route.graph, route.path, 0, candidate, route.fixed)) { supported = false; break; }
-          if (supported) { chosen = candidate; break; }
+          if (supported) admissible.push(candidate);
+          if (admissible.length >= 8) break;
         }
-        if (!chosen) {
+        if (!admissible.length) {
           const details = [...new Set(related.map(({ graph: source, path, fixed, alert }) => {
             const chain = path.map(location => { const item = source.nodes.get(location)!; return `${item.name || packageName(location)}@${item.version}`; }).join(" → ");
             const fixes = fixed.slice(0, 3).map(item => item.version).join(", ") || alert.fixedVersions?.join(", ") || "aucun correctif stable vérifié";
@@ -336,12 +337,14 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
           throw new ApiError(`${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé dans la recherche bornée (40 versions par paquet). Aucun override ni contrôle désactivé.`, 422);
         }
         const selected = constraints.get(root) || {};
-        constraints.set(root, { ...selected, [direct]: chosen.version });
-        messages.push(`${root || "racine"} : ${direct} ${chosen.version} proposé pour corriger les chaînes de ${[...new Set(related.map(item => item.alert.package))].join(", ")}.${installed && compare(chosen.version, installed) < 0 ? " Version antérieure, dans la plage initialement déclarée ; tous les contrôles restent obligatoires." : ""}`);
+        constraints.set(root, { ...selected, [direct]: admissible.map(item => item.version).join(" || ") });
+        messages.push(`${root || "racine"} : ${direct}, versions admissibles ${admissible.map(item => item.version).join(", ")}, pour corriger les chaînes de ${[...new Set(related.map(item => item.alert.package))].join(", ")}. Choix coordonné des versions les plus récentes compatibles avec les autres parents et leurs pairs ; tous les contrôles restent obligatoires.`);
+        if (installed && admissible.some(item => compare(item.version, installed) < 0)) messages.push(`${root || "racine"} : Version antérieure envisagée uniquement dans la plage initialement déclarée, après les versions admissibles plus récentes.`);
       }
     }
     if (!constraints.size) throw new ApiError("Aucune proposition de correction de dépendance n’a pu être établie.");
-    for (const [root, packages] of constraints) for (const [name, version] of Object.entries(packages)) tried.add(`${root}:${name}@${version}`);
+    // Do not reject the head of a domain before the peer solver has actually
+    // selected it. Multiple individually safe parents may require coordination.
     return { kind: "parents", constraints, messages };
   };
 }

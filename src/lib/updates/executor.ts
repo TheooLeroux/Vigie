@@ -21,7 +21,7 @@ import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } fr
 import { executeLocalWordPress } from "./wordpress-agent-execution";
 import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
 import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, versionOnlyDockerfile } from "./dockerfile";
-import { requireSecurityPass, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck } from "./security";
+import { requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck } from "./security";
 import { nodeCatalogState } from "./node-catalog-state";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
@@ -446,6 +446,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
         if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
         else await executeGroup(run, targets, results, progress);
       }
+      requireZeroFinalFindings(run.results);
       run.stage = "completed";
       run.message = run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       await log("live", "updates.completed", run.message, run.projectId);

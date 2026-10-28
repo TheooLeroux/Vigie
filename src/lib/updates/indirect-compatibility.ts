@@ -23,9 +23,9 @@ async function screenedVersions(name: string, versions: PackageVersion[], transp
   if (content.length > 4_000_000) throw new ApiError("La réponse OSV des versions indirectes est trop volumineuse.", 502);
   const parsed = z.object({ results: z.array(z.object({ vulns: z.array(z.object({ id: z.string() })).optional(), next_page_token: z.string().optional() }).passthrough()) }).parse(JSON.parse(content));
   if (parsed.results.length !== versions.length || parsed.results.some(item => item.next_page_token || "error" in item)) throw new ApiError("La vérification OSV des versions indirectes est incomplète.", 502);
-  // Batch IDs do not encode severity. The full lock scan applies the security
-  // policy before any scripts; only known malicious releases are discarded here.
-  return versions.filter((_, index) => !parsed.results[index].vulns?.some(item => item.id.startsWith("MAL-")));
+  // Screen every advisory before spending the installation/test budget; the
+  // complete graph is still freshly scanned before any project scripts run.
+  return versions.filter((_, index) => !parsed.results[index].vulns?.length);
 }
 
 export async function searchIndirectCompatibility(original: string, failed: string, names: string[], node: string, evaluate: (candidate: IndirectCandidate) => Promise<IndirectEvaluation>, transport: typeof fetch = fetch, notify: (message: string) => Promise<void> = async () => {}, budget = 6, attempted: () => void = () => {}, targets: string[] = []) {
@@ -49,14 +49,11 @@ export async function searchIndirectCompatibility(original: string, failed: stri
   const ordered = [...new Set(names)].sort((a, b) => { const first = delta(a), second = delta(b); return second[0] - first[0] || second[1] - first[1] || second[2] - first[2] || a.localeCompare(b); });
   const plans = await Promise.all(ordered.slice(0, 6).map(async name => {
     const locations = [...graph.nodes].filter(([path, item]) => path && !direct.has(path) && (!targets.length || targets.includes(path)) && nameOf(path, item) === name && stableVersion(item.version) && incoming.has(path));
-    const branches = new Set<string>();
     const domain = (await packageCatalog(name, transport)).filter(item => {
       if (!item.dist?.tarball || !item.dist.integrity || item.engines?.node && (!validRange(item.engines.node) || !satisfies(node, item.engines.node))) return false;
       let publicArtifact = false;
       try { const url = new URL(item.dist.tarball); publicArtifact = url.origin === "https://registry.npmjs.org" && !url.username && !url.password && /^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+$/.test(item.dist.integrity); } catch {}
-      const branch = `${major(item.version)}.${minor(item.version)}`;
-      const usable = publicArtifact && !branches.has(branch) && locations.some(([path, current]) => compare(item.version, current.version!) < 0 && (fixedIncoming.get(path) || []).every(range => { const declared = dependencyRange(range); return declared && satisfies(item.version, declared); }));
-      if (usable) branches.add(branch);
+      const usable = publicArtifact && locations.some(([path, current]) => compare(item.version, current.version!) < 0 && (fixedIncoming.get(path) || []).every(range => { const declared = dependencyRange(range); return declared && satisfies(item.version, declared); }));
       return usable;
     }).slice(0, 40).filter(item => !!seedNpmCoordinatedVersion(original, failed, name, item, targets));
     const newest = locations.map(([, item]) => item.version!).sort((a, b) => compare(b, a))[0], oldest = domain.at(-1)?.version;
@@ -67,12 +64,14 @@ export async function searchIndirectCompatibility(original: string, failed: stri
   let attempts = 0;
   for (const { name, domain } of plans) {
     const versions = await screenedVersions(name, domain, transport);
-    let ceiling: string | null = null, best: (IndirectCandidate & { lock: string }) | null = null;
+    let best: (IndirectCandidate & { lock: string }) | null = null;
     const tried = new Set<string>();
     while (attempts < budget) {
-      const remaining = versions.filter(item => !tried.has(item.version) && (!ceiling || compare(item.version, ceiling) < 0) && (!best || compare(item.version, best.version) > 0));
+      const remaining = versions.filter(item => !tried.has(item.version));
       if (!remaining.length) break;
-      const selected = remaining[Math.floor((remaining.length - 1) / 2)], seed = seedNpmCoordinatedVersion(original, failed, name, selected, targets)!;
+      // Compatibility is not monotonic across releases. Never discard all newer
+      // versions because a middle release failed. Inspect the highest safe one.
+      const selected = remaining[0], seed = seedNpmCoordinatedVersion(original, failed, name, selected, targets)!;
       const candidate = { name, version: selected.version, ...seed };
       tried.add(selected.version);
       attempts++;
@@ -81,8 +80,7 @@ export async function searchIndirectCompatibility(original: string, failed: stri
       const companions = seed.coordinated.map(path => `${packages[path].name || nameOf(path, packages[path])} ${packages[path].version}`);
       await notify(`${name} ${selected.version}${companions.length ? " avec " + companions.join(", ") : ""} : essai indirect dans les plages actuelles ; installation stricte, scan et validation obligatoires (${attempts}/${budget}).`);
       const result = await evaluate(candidate);
-      if (result.kind === "valid") best = { ...candidate, lock: result.lock };
-      else if (result.kind === "incompatible") ceiling = selected.version;
+      if (result.kind === "valid") { best = { ...candidate, lock: result.lock }; break; }
     }
     if (best) {
       await notify(`${name} ${best.version} : meilleure version validée parmi les essais indirects ; vérification finale de ce verrou.`);

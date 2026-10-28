@@ -220,6 +220,7 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
       return result;
     }
     warnings.push(...upgraded.warnings);
+    for (const name of Object.keys(remediation.constraints.get(root) || {})) if (upgraded.versions[name]) remediation.tried.add(`${root}:${name}@${upgraded.versions[name]}`);
     const content = JSON.stringify(upgraded.manifest, null, 2) + "\n";
     await remember(path);
     await remember(prefix + manager.lock);

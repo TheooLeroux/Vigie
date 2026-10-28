@@ -103,6 +103,22 @@ test("Mises à jour : un seul exécuteur, échec avant publication sans toucher 
   assert.equal((await readUpdateRun(run.id))?.stage, "failed");
   assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
 });
+test("Objectif zéro faille : le garde final refuse un résultat terminé avec alerte, avant ou après publication", async () => {
+  for (const published of [false, true]) {
+    const { project } = await fixture();
+    const run = await startProjectUpdate({ projectId: project.id }, async () => {});
+    await executeUpdate(run.id, async (_run, _targets, results) => {
+      const result = results[0];
+      result.stage = "completed";
+      if (published) result.deploymentId = "published-fixture";
+      result.checks = [{ tool: "OSV", phase: "candidate", scope: "fixture", checkedAt: new Date().toISOString(), status: "warning", message: "Ancien comportement permissif", findings: [{ id: "GHSA-existing-low", aliases: [], package: "library", version: "1.0.0", severity: "low" }] }];
+    }, undefined, noRefresh);
+    const saved = await readUpdateRun(run.id);
+    assert.equal(saved?.stage, published ? "attention" : "failed");
+    assert.equal(saved?.results[0].stage, published ? "attention" : "failed");
+    assert.match(saved!.message, /non résolue/);
+  }
+});
 test("Mises à jour : une installation des scanners en échec est enregistrée et libère le verrou", async () => {
   const { project } = await fixture();
   const run = await startProjectUpdate({ projectId: project.id }, async () => {});

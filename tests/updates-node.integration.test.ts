@@ -106,7 +106,8 @@ test("Docker réel : la boucle sécurité recherche une autre proposition si les
       resolved: async () => {
         const next = JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["is-number"];
         scanned.push(next);
-        requireSecurityPass(securityCheck("OSV", "candidate", "fixture", next === "7.0.0" ? [{ id: "GHSA-fixture-security", aliases: [], package: "is-number", version: next, severity: "critical", scope: "" }] : []));
+        const existing = { id: "GHSA-fixture-security", aliases: [], package: "is-number", version: next, severity: "low" as const, scope: "" };
+        requireSecurityPass(securityCheck("OSV", "candidate", "fixture", next === "7.0.0" ? [existing] : [], [existing]));
       },
       image: async () => {}, validated: async () => {}, remediating: async message => { messages.push(message); },
     });
