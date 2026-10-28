@@ -14,7 +14,7 @@ import { database, transaction } from "../db";
 import { isPostgres } from "../storage";
 
 export const agentProtocol = "vigie-local-v1" as const;
-export type LocalAgentSettings = { protocol: typeof agentProtocol; directory: string; secret: string; phpBinary: string; wpBinary: string; environment: "production" | "staging"; ready: boolean; bundleVersion?: string; fileHashes?: Record<string, string>; previousFileHashes?: Record<string, string>; previousPhpBinary?: string };
+export type LocalAgentSettings = { protocol: typeof agentProtocol; directory: string; secret: string; phpBinary: string; wpBinary: string; environment: "production" | "staging"; ready: boolean; lastVerifiedAt?: string; bundleVersion?: string; fileHashes?: Record<string, string>; previousFileHashes?: Record<string, string>; previousPhpBinary?: string };
 export type AgentOperation = "inspect" | "backup" | "update" | "restore";
 export function agentDirectory(root: string, username: string) {
   if (!/^[a-zA-Z0-9_-]{1,32}$/.test(username) || !root.startsWith(`/home/${username}/`) || posix.normalize(root) !== root || /[\x00-\x1f]/.test(root)) throw new ApiError("Répertoire WordPress non autorisé.");

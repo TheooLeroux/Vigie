@@ -32,7 +32,7 @@ export async function runWordPressWebCheck(input: z.infer<typeof wordpressWebChe
   return { ok: true as const, installationId: site.id, observedAt: fresh.observedAt };
 }
 
-/** Read-only checks go through Vigie when o2switch filters hosted runner IPs. */
+/** Web checks and managed observer recovery go through Vigie when runner IPs are filtered. */
 export async function refreshWordPressWeb(target: Pick<UpdateTarget, "remoteId" | "connectionId" | "url">, action: z.infer<typeof wordpressWebCheckBody>["action"]) {
   const origin = process.env.VIGIE_WORDPRESS_CONTROL_URL;
   if (!origin) {

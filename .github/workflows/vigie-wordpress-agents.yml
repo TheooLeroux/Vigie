@@ -18,15 +18,21 @@ on:
       - 'connectors/wordpress/**'
       - 'src/lib/updates/wordpress-agent*.ts'
       - 'scripts/wordpress-agent-worker.ts'
+      - 'scripts/hosting-control-worker.ts'
+      - 'src/lib/hosting-controls.ts'
+      - 'src/lib/hosting-inventory.ts'
+      - 'src/lib/updates/targets.ts'
+      - 'src/lib/vercel.ts'
+      - 'src/lib/railway.ts'
   schedule:
-    - cron: '17 * * * *'
+    - cron: '2-59/5 * * * *'
 permissions:
   contents: read
-concurrency:
-  group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
-  cancel-in-progress: false
 jobs:
   install:
+    concurrency:
+      group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
+      cancel-in-progress: false
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     environment: vigie-maintenance
     runs-on: ubuntu-latest
@@ -40,6 +46,15 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Retrouver les installations après une remise en ligne
+        id: discovery
+        if: inputs.installation_id == ''
+        continue-on-error: true
+        run: node --import tsx scripts/hosting-control-worker.ts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_CONTROL_PROVIDER: o2switch
       - name: Installer et vérifier les agents sans mettre à jour les sites
         run: node --import tsx scripts/wordpress-agent-worker.ts
         env:
@@ -48,3 +63,33 @@ jobs:
           VIGIE_AGENT_INSTALLATION_ID: ${{ inputs.installation_id }}
           VIGIE_AGENT_REQUEST_ID: ${{ inputs.request_id }}
           VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app
+      - name: Signaler une découverte incomplète après avoir contrôlé les agents connus
+        if: always() && steps.discovery.outcome == 'failure'
+        run: exit 1
+  providers:
+    concurrency:
+      group: hosting-control-${{ matrix.provider }}
+      cancel-in-progress: false
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == ''
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [vercel, railway]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Vérifier les accès et retrouver les déploiements actuels
+        run: node --import tsx scripts/hosting-control-worker.ts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_CONTROL_PROVIDER: ${{ matrix.provider }}

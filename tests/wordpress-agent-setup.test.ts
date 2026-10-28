@@ -8,7 +8,9 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
 import { applyDiscoverySnapshot, hostingDiscovery, hostingInstallation } from "../src/lib/hosting-discovery";
 import { hostingStorage } from "../src/lib/hosting-storage";
-import { processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations } from "../src/lib/updates/wordpress-agent-setup";
+import { processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations, agentControlHealthy } from "../src/lib/updates/wordpress-agent-setup";
+import { signAgentPayload } from "../src/lib/updates/wordpress-agent";
+import { updateTargets } from "../src/lib/updates/targets";
 import { readUpdateSource, writeUpdateSource, updateStorage } from "../src/lib/updates/storage";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
@@ -126,4 +128,66 @@ test("Installation automatique : un agent arrêté est réparé par le contrôle
   assert.equal((await readUpdateSource(f.targetId))!.settings.agentInstallation!.state, "ready");
   await reconcileAgentInstallations({ ...deps, healthy: async () => true });
   assert.equal(repairs, 1);
+});
+
+test("Contrôle agent : battement seul insuffisant, PHP, domaine, signature et inspection récente requis", async () => {
+  const f = await fixture(); await requestAgentInstallation(f.site.id, async () => {});
+  await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
+  const settings = (await readUpdateSource(f.targetId))!.settings.localAgent!;
+  const site = await hostingInstallation(f.site.id);
+  const now = Math.floor(Date.now() / 1000);
+  const heartbeat = { protocol: "vigie-local-v1", root: site.documentRoot, php: "8.2.35", time: now };
+  const readiness = { ...heartbeat, ready: true, eligibility: { home: `https://${site.domains[0]}`, multisite: false, fileModsDisabled: false } };
+  const data = new Map<string, string>();
+  const files = { read: async (name: string) => data.get(name) || null };
+  const save = (name: string, value: unknown, key = settings.secret) => data.set(name, JSON.stringify(signAgentPayload(value, key)));
+  save("heartbeat.json", heartbeat);
+  assert.equal(await agentControlHealthy(site, settings, files), false);
+  save("readiness.json", readiness);
+  assert.equal(await agentControlHealthy(site, settings, files), true);
+  for (const value of [
+    { ...readiness, time: now - 601 }, { ...readiness, ready: false },
+    { ...readiness, php: "8.3.1" }, { ...readiness, root: "/home/other/site" },
+    { ...readiness, eligibility: { ...readiness.eligibility, home: "https://other.example.test" } },
+  ]) {
+    save("readiness.json", value);
+    assert.equal(await agentControlHealthy(site, settings, files), false);
+  }
+  save("readiness.json", readiness, "0".repeat(64));
+  assert.equal(await agentControlHealthy(site, settings, files), false);
+  save("readiness.json", readiness);
+  save("heartbeat.json", { ...heartbeat, time: now - 181 });
+  assert.equal(await agentControlHealthy(site, settings, files), false);
+});
+
+test("Contrôle agent : état prêt expiré bloqué, réparation invalide immédiatement la disponibilité", async () => {
+  const f = await fixture(); await requestAgentInstallation(f.site.id, async () => {});
+  await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
+  const source = (await readUpdateSource(f.targetId))!;
+  await writeUpdateSource(f.targetId, f.project.id, { ...source.settings, localAgent: { ...source.settings.localAgent!, lastVerifiedAt: new Date(Date.now() - 16 * 60_000).toISOString() } });
+  assert.match((await updateTargets(f.project.id))[0].unavailable || "", /expiré/);
+  await requestAgentInstallation(f.site.id, async () => {}, true);
+  const queued = (await readUpdateSource(f.targetId))!.settings;
+  assert.equal(queued.localAgent!.ready, false);
+  assert.equal(queued.localAgent!.secret, source.settings.localAgent!.secret);
+  assert.equal(queued.agentInstallation!.state, "queued");
+});
+
+test("Contrôle du parc : les agents sains sont vérifiés avant d’attendre une réparation lente", async () => {
+  const broken = await fixture(), healthy = await fixture();
+  for (const f of [broken, healthy]) {
+    await requestAgentInstallation(f.site.id, async () => {});
+    await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
+  }
+  const events: string[] = [];
+  await reconcileAgentInstallations({
+    prepare: hostingInstallation,
+    healthy: async site => {
+      if (site.id === healthy.site.id) events.push("healthy checked");
+      return site.id !== broken.site.id;
+    },
+    provision: async target => { if (target.remoteId === broken.site.id) events.push("broken repaired"); },
+  });
+  assert.deepEqual(events, ["healthy checked", "broken repaired"]);
+  assert.ok((await readUpdateSource(healthy.targetId))!.settings.localAgent!.lastVerifiedAt);
 });

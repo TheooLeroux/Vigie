@@ -29,6 +29,12 @@ PHP_INI_SCAN_DIR=/tmp/cli-extra php84 /tmp/vigie/bootstrap.php /tmp/vigie/config
 test -f /tmp/vigie/heartbeat.json
 PHP_INI_SCAN_DIR=/tmp/cli-extra php84 -r '$v=json_decode(base64_decode(json_decode(file_get_contents("/tmp/vigie/readiness.json"),true)["payload"]),true);if(!$v["ready"])exit(5);'
 cat /tmp/cli-proof.json
+# An unchanged config must not keep a once-successful WordPress probe forever.
+printf '<?php exit(7);' > /tmp/vigie/wp.php
+php84 -r 'touch("/tmp/vigie/config.json", time()-600); touch("/tmp/vigie/readiness.json", time()-301);'
+PHP_INI_SCAN_DIR=/tmp/cli-extra php84 /tmp/vigie/bootstrap.php /tmp/vigie/config.json
+PHP_INI_SCAN_DIR=/tmp/cli-extra php84 -r '$v=json_decode(base64_decode(json_decode(file_get_contents("/tmp/vigie/readiness.json"),true)["payload"]),true);if($v["ready"]||$v["time"]<time()-10)exit(6);'
+printf '%s' '${fixture}' | base64 -d > /tmp/vigie/wp.php
 rm /tmp/vigie/readiness.json
 PHP_INI_SCAN_DIR=/tmp/cli-extra:/etc/php84/conf.d php84 /tmp/vigie/bootstrap.php /tmp/vigie/config.json
 PHP_INI_SCAN_DIR=/tmp/cli-extra php84 -r '$v=json_decode(base64_decode(json_decode(file_get_contents("/tmp/vigie/readiness.json"),true)["payload"]),true);if(!$v["ready"])exit(5);'

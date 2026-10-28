@@ -44,7 +44,7 @@ async function writeInventory(id: string, inventory: SiteInventory) {
 }
 async function assertCurrent(original: HostingInstallationView) {
   const current = (await hostingInstallation(original.id));
-  if (current.missingSince || current.documentRoot !== original.documentRoot)
+  if (current.missingSince || current.ignored || current.documentRoot !== original.documentRoot || current.connectionId !== original.connectionId || current.project?.id !== original.project?.id || (original.project?.lifecycle === "active" && current.project?.lifecycle !== "active"))
     throw new ApiError(
       "L’installation a changé pendant la collecte. Relancez la synchronisation.",
       409,
@@ -120,22 +120,23 @@ export async function collectHostingInventories(
           let snapshot: SiteInventory;
           try {
             const observer = (await observerRow(item.id));
-            snapshot = observer
-              ? await collectObserver(
-                  (await inventoryUrl(item)),
-                  item.documentRoot,
-                  openConnectorSecret(
-                    observer.secret_cipher,
-                    observerContext(item),
-                  ),
-                  transport,
-                  resolveDns,
-                )
-              : await collectWordPressFiles(
-                  client,
-                  item.documentRoot,
-                  catalogTransport,
-                );
+            if (observer) {
+              try {
+                snapshot = await collectObserver(await inventoryUrl(item), item.documentRoot,
+                  openConnectorSecret(observer.secret_cipher, observerContext(item)), transport, resolveDns);
+              } catch (error) {
+                // A database registration does not prove that a restored site still has our file.
+                // Repair only linked active sites; ownership/hash checks still apply before writing.
+                if (!item.project || item.project.lifecycle !== "active") throw error;
+                const repaired = await installObserverOnAccount(await observerPlan(item.id), item, transport, resolveDns);
+                snapshot = repaired.installation.inventory!;
+              }
+            } else if (item.project?.lifecycle === "active") {
+              const installed = await installObserverOnAccount(await observerPlan(item.id), item, transport, resolveDns);
+              snapshot = installed.installation.inventory!;
+            } else {
+              snapshot = await collectWordPressFiles(client, item.documentRoot, catalogTransport);
+            }
             snapshot = await enrichPhpRelease(snapshot, catalogTransport);
             (await transaction(async () => {
               (await assertCurrent(item));
@@ -245,10 +246,9 @@ export async function provisionLinkedObservers(
   for (const site of (await hostingDiscovery(connectionId)).installations.filter(
     (i) =>
       i.kind === "wordpress" &&
-      i.project &&
+      i.project?.lifecycle === "active" &&
       !i.ignored &&
-      !i.missingSince &&
-      !i.observerConfigured,
+      !i.missingSince,
   )) {
     try {
       await installObserver(site.id, true, transport, resolveDns);
@@ -263,7 +263,7 @@ export async function provisionLinkedObservers(
       });
     }
   }
-  for (const site of (await hostingDiscovery(connectionId)).installations.filter(i => i.kind === "wordpress" && i.project && !i.ignored && !i.missingSince)) await enqueueLocalAgent(site.id);
+  for (const site of (await hostingDiscovery(connectionId)).installations.filter(i => i.kind === "wordpress" && i.project?.lifecycle === "active" && !i.ignored && !i.missingSince)) await enqueueLocalAgent(site.id);
   return { discovery: (await hostingDiscovery(connectionId)), issues };
 }
 export async function provisionLinkedObserver(
@@ -274,11 +274,11 @@ export async function provisionLinkedObserver(
   const item = (await hostingInstallation(id));
   if (
     item.kind !== "wordpress" ||
-    !item.project ||
+    item.project?.lifecycle !== "active" ||
+    item.ignored ||
     item.missingSince
   )
     return;
-  if (item.observerConfigured) { await enqueueLocalAgent(id); return; }
   try {
     await installObserver(id, true, transport, resolveDns);
   } catch (error) {
@@ -308,7 +308,7 @@ export async function observerPlan(id: string) {
     source,
   };
 }
-// This is the only remote write path. It runs only after explicit installation confirmation.
+// Remote writes are limited to the confirmed installation and authorized automatic repair paths.
 export async function installObserver(
   id: string,
   confirmed: boolean,
@@ -325,7 +325,20 @@ export async function installObserver(
     throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
   running.add(item.connectionId);
   try {
-    return await withHostingCredentials(item.connectionId, async (input) => {
+    return await installObserverOnAccount(plan, item, transport, resolveDns);
+  } finally {
+    running.delete(item.connectionId);
+  }
+}
+// Caller owns the account collection lock; never reacquire it during a repair.
+async function installObserverOnAccount(
+  plan: Awaited<ReturnType<typeof observerPlan>>,
+  item: HostingInstallationView,
+  transport: typeof fetch,
+  resolveDns: typeof lookup,
+) {
+  const id = item.id;
+  return withHostingCredentials(item.connectionId, async (input) => {
       const root = posix.normalize(item.documentRoot);
       if (!root.startsWith(`/home/${input.username}/`) || root.includes("\0"))
         throw new ApiError("Répertoire hors du compte o2switch.");
@@ -341,6 +354,8 @@ export async function installObserver(
       const files = mu ? await client.list(dir) : [];
       const existing = files.find((f) => f.file === observerFile);
       let row = (await observerRow(id));
+      if (existing && existing.type !== "file")
+        throw new ApiError("Le connecteur existant n’est pas un fichier utilisable.", 409);
       if (existing && !row)
         throw new ApiError(
           "Un fichier vigie-observer.php existe déjà. Il ne sera pas écrasé.",
@@ -381,6 +396,9 @@ export async function installObserver(
             }),
           ));
       }));
+      const owner = await observerRow(id);
+      if (!owner || openConnectorSecret(owner.secret_cipher, observerContext(item)) !== secret)
+        throw new ApiError("Une autre installation du connecteur est en cours. Le prochain contrôle réessaiera.", 409);
       const authorization =
         input.authMode === "token"
           ? `cpanel ${input.username}:${input.secret}`
@@ -488,7 +506,4 @@ export async function installObserver(
         discovery: (await hostingDiscovery(item.connectionId)),
       };
     });
-  } finally {
-    running.delete(item.connectionId);
-  }
 }

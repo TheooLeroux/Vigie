@@ -1,3 +1,4 @@
+import { hostingControlIssue } from "../hosting-controls";
 import { vercelState } from "../vercel";
 import { railwayState } from "../railway";
 import { projectHostingInstallations } from "../hosting-discovery";
@@ -22,19 +23,21 @@ export async function updateTargets(projectId: string): Promise<UpdateTarget[]> 
   const configured = new Set((await (await updateStorage()).prepare("SELECT target_id FROM update_sources WHERE project_id=?").all(projectId) as { target_id: string }[]).map(row => row.target_id));
   const targets: UpdateTarget[] = [];
   for (const item of vercel.projects.filter(item => item.projectId === projectId && !item.excluded)) {
-    targets.push({ id: `vercel:${item.connectionId}:${item.id}`, projectId, name: item.name, provider: "vercel", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: item.repository, branch: item.productionBranch || item.production?.branch || null, root: sourceRoot(item.rootDirectory), url: item.domains.find(domain => domain.environment === "production" && !domain.redirect)?.name ? `https://${item.domains.find(domain => domain.environment === "production" && !domain.redirect)!.name}/` : project.url || null, mode: item.repository ? "git" : "archive", configured: item.configured, unavailable: item.missingSince ? "Projet non retrouvé chez Vercel." : null });
+    targets.push({ id: `vercel:${item.connectionId}:${item.id}`, projectId, name: item.name, provider: "vercel", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: item.repository, branch: item.productionBranch || item.production?.branch || null, root: sourceRoot(item.rootDirectory), url: item.domains.find(domain => domain.environment === "production" && !domain.redirect)?.name ? `https://${item.domains.find(domain => domain.environment === "production" && !domain.redirect)!.name}/` : project.url || null, mode: item.repository ? "git" : "archive", configured: item.configured, unavailable: hostingControlIssue("Vercel", item) || (item.missingSince ? "Projet non retrouvé chez Vercel." : null) });
   }
   for (const item of railway.projects.filter(item => item.projectId === projectId)) {
     for (const service of item.services.filter(service => service.environmentName.toLowerCase() === "production")) {
       const evidence = service.activeDeployments[0]?.evidence;
-      targets.push({ id: `railway:${item.connectionId}:${service.id}:${service.environmentId}`, projectId, name: service.name, provider: "railway", builder: service.builder, connectionId: item.connectionId, remoteId: service.id, environmentId: service.environmentId, repository: service.repository, branch: evidence?.branch || null, root: sourceRoot(service.rootDirectory), url: service.domains[0] ? `https://${service.domains[0]}${service.healthcheckPath || "/"}` : null, mode: service.repository ? "git" : "archive", configured: item.configured, unavailable: item.missingSince ? "Projet non retrouvé chez Railway." : service.image ? "Image externe : hors du périmètre Node et dépendances." : !["RAILPACK", "DOCKERFILE"].includes(service.builder) ? "Construction personnalisée : une adaptation est nécessaire." : null });
+      targets.push({ id: `railway:${item.connectionId}:${service.id}:${service.environmentId}`, projectId, name: service.name, provider: "railway", builder: service.builder, connectionId: item.connectionId, remoteId: service.id, environmentId: service.environmentId, repository: service.repository, branch: evidence?.branch || null, root: sourceRoot(service.rootDirectory), url: service.domains[0] ? `https://${service.domains[0]}${service.healthcheckPath || "/"}` : null, mode: service.repository ? "git" : "archive", configured: item.configured, unavailable: hostingControlIssue("Railway", item) || (item.missingSince ? "Projet non retrouvé chez Railway." : service.image ? "Image externe : hors du périmètre Node et dépendances." : !["RAILPACK", "DOCKERFILE"].includes(service.builder) ? "Construction personnalisée : une adaptation est nécessaire." : null) });
     }
   }
   for (const item of hosting.filter(item => item.kind === "wordpress")) {
     const source = await readUpdateSource(`wordpress:${item.id}`);
     const agent = source?.settings.localAgent;
     const setup = source?.settings.agentInstallation;
-    const setupMessage = setup?.state === "queued" ? setup.error || "L’installation automatique de l’agent est en attente." : setup?.state === "installing" ? "L’agent local s’installe automatiquement. Son démarrage est en cours de vérification." : setup?.state === "failed" ? setup.error || "L’installation automatique de l’agent sera réessayée." : agent && agent.bundleVersion !== wordpressAgentPackageVersion ? "L’agent passe automatiquement au parcours gratuit WordPress et extensions." : null;
+    const verifiedAt = agent?.lastVerifiedAt || setup?.requestedAt;
+    const controlExpired = !!agent?.ready && (!verifiedAt || !Number.isFinite(Date.parse(verifiedAt)) || Math.abs(Date.now() - Date.parse(verifiedAt)) > 15 * 60_000);
+    const setupMessage = setup?.state === "queued" ? setup.error || "L’installation automatique de l’agent est en attente." : setup?.state === "installing" ? "L’agent local s’installe automatiquement. Son démarrage est en cours de vérification." : setup?.state === "failed" ? setup.error || "L’installation automatique de l’agent sera réessayée." : controlExpired ? "Le contrôle de l’agent a expiré. La vérification et la réparation automatiques sont attendues." : agent && agent.bundleVersion !== wordpressAgentPackageVersion ? "L’agent est en attente de mise à niveau automatique." : null;
     let url = item.domains[0] ? `https://${item.domains[0]}/` : null;
     try {
       const home = new URL(item.inventory?.site?.home || "");

@@ -38,6 +38,10 @@ Les étapes et URL exactes sont dans [docs/connexion-google.md](docs/connexion-g
 
 L’aide, l’indicateur « Local », les paramètres, le répertoire d’accès, les ressources et les imports ne sont plus proposés dans l’interface. Les anciennes données restent conservées. Les outils d’administration et leurs API restent disponibles pour les usages documentés ci-dessous ; les exports CSV/JSON ne constituent pas une sauvegarde complète.
 
+## Contrôle automatique des hébergements
+
+Le [contrôle des hébergements](docs/controle-hebergements.md) vérifie périodiquement o2switch, Vercel et Railway. Après une remise en ligne, le connecteur WordPress manquant est recréé avec sa clé existante ; l’agent et le chargement réel de WordPress sont vérifiés avant de rendre la maintenance disponible. Vercel et Railway sont relus par leurs API. Le workflow demande un passage toutes les cinq minutes, avec reprise des erreurs et conservation des dernières observations.
+
 ## Connexions o2switch
 
 Le menu **Connexions** contient les deux comptes du fichier source. Chaque compte accepte un jeton API cPanel (méthode privilégiée) ou un mot de passe cPanel. Le bouton **Synchroniser les sites** lit les domaines et leurs répertoires, reconnaît WordPress, Dolibarr, les sites HTML et les exports Next.js. Il relève les versions WordPress et Dolibarr dans leurs fichiers de version. Les comptes utilisent les deux jetons dédiés autorisés séparément par l’utilisateur ; ils expirent le 20 janvier 2027 à midi (Paris).
@@ -54,7 +58,7 @@ Les fiches affichent WordPress et PHP web, extensions/thèmes installés et acti
 
 Les secrets sont chiffrés en AES-256-GCM avec une clé indépendante `VIGIE_CONNECTOR_ENCRYPTION_KEY` (32 octets en hexadécimal), définie dans le `.env.local` privé. Ils ne sont renvoyés ni au navigateur ni dans les exports/journaux. Conserver cette clé séparément des sauvegardes SQLite ; sans elle, il faut saisir de nouveaux jetons. Ne pas la régénérer à chaque démarrage. Le bouton de déconnexion retire le secret local, mais ne révoque pas le jeton chez o2switch.
 
-La recherche affiche la date du relevé et les erreurs. Un échec garde le dernier relevé réussi avec sa date ; une lecture de répertoire en échec conserve la précédente version observée. L’enregistrement d’un nouveau secret lance une recherche ; les recherches suivantes sont manuelles. « Synchroniser les sites » recherche, rattache, installe les connecteurs manquants puis collecte les informations. « Actualiser » dans une fiche ne relève que ce site. Le connecteur d’inventaire reste en lecture seule ; le parcours de mise à jour utilise un accès SSH distinct, une sauvegarde préalable et WP-CLI. Aucune mise à jour périodique n’est lancée automatiquement.
+La recherche affiche la date du relevé et les erreurs. Un échec garde le dernier relevé réussi avec sa date ; une lecture de répertoire en échec conserve la précédente version observée. L’enregistrement d’un nouveau secret lance une recherche ; les recherches suivantes sont manuelles ou effectuées par le contrôle automatique des hébergements. « Synchroniser les sites » recherche, rattache, installe les connecteurs manquants puis collecte les informations. « Actualiser » dans une fiche ne relève que ce site. Le connecteur d’inventaire reste en lecture seule ; le parcours de mise à jour utilise un accès SSH distinct, une sauvegarde préalable et WP-CLI. Aucune mise à jour périodique n’est lancée automatiquement.
 
 La procédure de création du jeton est documentée par [o2switch](https://faq.o2switch.fr/cpanel/securite/token-api-cpanel/) ; le jeton possède les droits du compte cPanel. Vigie l'utilise pour les lectures et le dépôt contrôlé de son propre connecteur.
 
@@ -62,7 +66,7 @@ Les sites du fichier ne précisent pas leurs propriétaires clients : ils resten
 
 Le script d’administration `npx tsx --env-file=.env.local scripts/discover-o2switch.ts` lance la même recherche et le même rapprochement que l’interface sur les comptes configurés. Il ne crée pas les projets proposés. Une sauvegarde SQLite cohérente a été créée dans `.data/backups/` avant le premier rattachement réel.
 
-`npx tsx --env-file=.env.local scripts/collect-o2switch.ts` collecte les inventaires sans installer de connecteur. Son option d'administration `--install-observers-confirmed` installe/vérifie les connecteurs sur les WordPress rattachés ; elle n'est à utiliser qu'avec une autorisation explicite. Une sauvegarde cohérente a été créée avant le premier dépôt. Les scripts n'affichent aucune clé.
+`npx tsx --env-file=.env.local scripts/collect-o2switch.ts` collecte les inventaires et répare automatiquement le connecteur d’inventaire des WordPress rattachés actifs si nécessaire, sans installer l’agent de maintenance. Son option d'administration `--install-observers-confirmed` installe/vérifie les connecteurs sur les WordPress rattachés ; elle n'est à utiliser qu'avec une autorisation explicite. Une sauvegarde cohérente a été créée avant le premier dépôt. Les scripts n'affichent aucune clé.
 
 ## Relire le fichier source
 

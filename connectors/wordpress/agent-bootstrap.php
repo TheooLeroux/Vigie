@@ -18,7 +18,7 @@ try {
     if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) { exit(0); }
     try {
         $path = __DIR__ . '/readiness.json';
-        if (!is_file($path) || filemtime($path) < filemtime(__DIR__ . '/config.json')) {
+        if (!is_file($path) || time() - filemtime($path) >= 300 || filemtime($path) < filemtime(__DIR__ . '/config.json')) {
             $result = ['protocol' => 'vigie-local-v1', 'root' => $config['root'], 'php' => PHP_VERSION, 'ready' => false];
             try {
                 va_wp($config, ['core', 'is-installed']);

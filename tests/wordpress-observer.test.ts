@@ -38,6 +38,7 @@ import {
   observerPlan,
   provisionLinkedObservers,
   provisionLinkedObserver,
+  collectHostingInventories,
 } from "../src/lib/hosting-inventory";
 import { hostingStorage } from "../src/lib/hosting-storage";
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
@@ -550,6 +551,24 @@ test("installation : dépôt unique vérifié, secret propre au site chiffré, p
   );
   await installObserver(item.id, true, transport, dns);
   assert.equal(uploads, 1, "Une seconde liaison ne redépose pas le fichier");
+  // A restored WordPress can lose the entire MU-plugin directory while the DB
+  // still records the observer. The next collection repairs it with the same key.
+  directory = false;
+  uploaded = "";
+  await (await hostingStorage()).prepare("UPDATE hosting_site_inventories SET data=json_set(data,'$.lastAttemptAt',?) WHERE installation_id=?").run(new Date(0).toISOString(), item.id);
+  const repaired = await collectHostingInventories(host.id, transport, transport, item.id, dns);
+  assert.equal(repaired.success, 1);
+  assert.equal(repaired.failed, 0);
+  assert.equal(uploads, 2);
+  assert.equal(writes, 4);
+  assert.equal(uploaded.match(/\$vigie_observer_key = '([a-f0-9]{64})'/)![1], key);
+  const managed = uploaded;
+  uploaded += "\n// unknown remote change";
+  const conflict = await provisionLinkedObservers(host.id, transport, dns);
+  assert.equal(conflict.issues.length, 1);
+  assert.equal(uploads, 2, "Un fichier modifié ne doit pas être remplacé par la réparation");
+  assert.match(uploaded, /unknown remote change/);
+  uploaded = managed;
   (await (await hostingStorage())
     .prepare("DELETE FROM hosting_observers WHERE installation_id=?")
     .run(item.id));
@@ -557,5 +576,5 @@ test("installation : dépôt unique vérifié, secret propre au site chiffré, p
     installObserver(item.id, true, transport, dns),
     /ne sera pas écrasé/,
   );
-  assert.equal(uploads, 1);
+  assert.equal(uploads, 2);
 });
