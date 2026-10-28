@@ -37,7 +37,7 @@ export type UpdateCheck = {
   status: "passed" | "warning" | "blocked";
   message: string;
   findings: SecurityFinding[];
-  nodeEvidence?: { version: string; deploymentId: string; imageDigest: string; source: "container" | "railpack"; usage: "runtime" | "build"; instances?: string[] };
+  nodeEvidence?: { version: string; deploymentId: string; imageDigest?: string; source: "container" | "railpack" | "vercel-function"; usage: "runtime" | "build"; instances?: string[]; projectId?: string; commit?: string | null; region?: string };
   blockers?: SecurityFinding[];
   wordpressRetained?: { package: string; version: string }[];
 };

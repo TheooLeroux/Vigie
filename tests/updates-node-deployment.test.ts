@@ -75,7 +75,7 @@ test("Node déployé : Docker sans attestation et Vercel limité à une majeure 
   assert.equal(deployedNodeCheck({ ...target, builder: "DOCKERFILE" }, reference, expected, [docker]).status, "blocked");
   const check = await verifyDeployedNode({ ...target, provider: "vercel" }, reference, expected, { railway: async () => { throw Error("wrong provider"); }, vercel: async () => ({ nodeVersion: "24.x", targets: { production: { id } } }) });
   assert.equal(check.status, "blocked");
-  assert.match(check.message, /Vercel.*attestation/);
+  assert.match(check.message, /Vercel/);
 });
 
 test("Node déployé : le lecteur vérifie l’instance active, pas simplement le dernier build", async () => {

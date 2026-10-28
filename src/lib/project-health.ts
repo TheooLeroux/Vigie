@@ -179,7 +179,8 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after" && check.status === "passed")?.nodeEvidence;
       const project = detail.railway?.find(project => project.connectionId === target.connectionId);
       const service = project?.services.find(service => service.id === target.remoteId && service.environmentId === target.environmentId);
-      const bound = proof && service && railwayRuntimeDeployments(service).some(deployment => deployment.id === proof.deploymentId && deployment.evidence?.imageDigest === proof.imageDigest);
+      const vercel = detail.vercel?.find(project => project.id === target.remoteId && project.connectionId === target.connectionId)?.production;
+      const bound = proof && (target.provider === "vercel" ? proof.source === "vercel-function" && proof.projectId === target.remoteId && proof.deploymentId === vercel?.id && !!proof.commit && proof.commit === vercel.commit && vercel.state === "READY" : service && railwayRuntimeDeployments(service).some(deployment => deployment.id === proof.deploymentId && deployment.evidence?.imageDigest === proof.imageDigest));
       if (bound) checks = ["OSV", "Trivy"].flatMap(tool => {
         const check = result.checks?.findLast(check => check.tool === tool && check.phase === "candidate");
         return check && check.status !== "blocked" ? [check] : [];

@@ -294,7 +294,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const images = [...new Map([validationBase, ...[...imageReferences.values()].flatMap(value => value || [])].map(image => [image.image, image])).values()];
         const deployments = targets.flatMap((target, index) => {
           const proof = results[index].checks?.findLast(check => check.tool === "Node" && check.phase === "after" && check.status === "passed")?.nodeEvidence;
-          return proof ? [{ targetId: target.id, deploymentId: proof.deploymentId, imageDigest: proof.imageDigest, source: proof.source, usage: proof.usage }] : [];
+          return proof && proof.source !== "vercel-function" && proof.imageDigest ? [{ targetId: target.id, deploymentId: proof.deploymentId, imageDigest: proof.imageDigest, source: proof.source, usage: proof.usage }] : [];
         });
         const validations = nodeReceiptValidations(targets, results.map(result => result.checks));
         if (deployments.length !== targets.length || validations.length !== targets.length) return;

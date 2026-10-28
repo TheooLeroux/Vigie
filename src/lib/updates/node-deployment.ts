@@ -4,6 +4,7 @@ import { readRailwayInstance, vercelUpdateRequest } from "./providers";
 import { ApiError } from "../http";
 import type { UpdateCheck, UpdateResult, UpdateStage, UpdateTarget } from "./types";
 import { readDockerNode, type DockerNodeProof } from "./docker-node";
+import { readVercelRuntime } from "./vercel-runtime";
 
 export type NodeDeploymentReference = { deploymentId: string; commit?: string };
 type ActiveDeployment = { id: string; status: string; meta?: unknown };
@@ -41,7 +42,7 @@ export function deployedNodeCheck(target: UpdateTarget, reference: NodeDeploymen
   return { ...base, status: "passed", nodeEvidence: { version: expected, deploymentId: reference.deploymentId, imageDigest: evidence.imageDigest, source: "railpack", usage: evidence.staticSite ? "build" : "runtime" }, message: `Node ${expected} confirmé par le manifeste de construction de l’image active ${reference.deploymentId} (${evidence.staticSite ? "construction du site statique, sans runtime Node attesté" : "runtime déclaré"}). Cette attestation hébergeur n’est pas une commande exécutée dans le conteneur.` };
 }
 
-export async function verifyDeployedNode(target: UpdateTarget, reference: NodeDeploymentReference, expected: string, readers: { railway: typeof readRailwayInstance; vercel: typeof vercelUpdateRequest; runtime?: typeof readDockerNode } = { railway: readRailwayInstance, vercel: vercelUpdateRequest }): Promise<UpdateCheck> {
+export async function verifyDeployedNode(target: UpdateTarget, reference: NodeDeploymentReference, expected: string, readers: { railway: typeof readRailwayInstance; vercel: typeof vercelUpdateRequest; runtime?: typeof readDockerNode; vercelRuntime?: typeof readVercelRuntime } = { railway: readRailwayInstance, vercel: vercelUpdateRequest }): Promise<UpdateCheck> {
   if (target.provider === "railway") {
     const { serviceInstance } = await readers.railway(target);
     if ((serviceInstance.rootDirectory || "").replace(/^\/+|\/+$/g, "") !== target.root.replace(/^\/+|\/+$/g, "")) return deployedNodeCheck(target, reference, expected, []);
@@ -66,8 +67,12 @@ export async function verifyDeployedNode(target: UpdateTarget, reference: NodeDe
     }
   }
   if (target.provider !== "vercel") return deployedNodeCheck(target, reference, expected, []);
-  const project = await readers.vercel(target, `/v9/projects/${target.remoteId}`);
-  return { tool: "Node", phase: "after", scope: target.root || "racine", checkedAt: new Date().toISOString(), status: "blocked", findings: [], message: project.targets?.production?.id !== reference.deploymentId ? "Le déploiement Vercel actif a changé. Version Node non confirmée." : `Node ${expected} attendu : Vercel ne fournit pas ici d’attestation du correctif Node effectivement exécuté. Une configuration de branche majeure ne permet pas de valider cette mise à jour.` };
+  const base = { tool: "Node" as const, phase: "after" as const, scope: target.root || "racine", checkedAt: new Date().toISOString(), findings: [] };
+  try {
+    const proof = await (readers.vercelRuntime || readVercelRuntime)(target, reference, { vercel: readers.vercel });
+    if (!stableVersion(expected) || proof.node !== expected) throw new ApiError(`Node ${expected} testé, Node ${proof.node} observé dans la fonction Vercel. Le correctif exécuté diffère ; validation non confirmée.`, 422);
+    return { ...base, status: "passed", nodeEvidence: { version: proof.node, deploymentId: proof.deploymentId, source: "vercel-function", usage: "runtime", projectId: proof.projectId, commit: proof.commit, region: proof.region }, message: `Node ${proof.node} mesuré par la sonde signée de la fonction Vercel (${proof.region}), liée au projet, au commit et au déploiement actif ${proof.deploymentId}. Le build, les fonctions Edge et toutes les répliques ne sont pas attestés par cette mesure.` };
+  } catch (error) { return { ...base, status: "blocked", message: `Node ${expected} non confirmé sur Vercel : ${error instanceof ApiError ? error.message : "preuve de runtime absente ou inexploitable"}` }; }
 }
 
 export async function confirmDeployedNode(target: UpdateTarget, result: UpdateResult, reference: NodeDeploymentReference, expected: string, progress: (stage: UpdateStage, message: string) => Promise<void>, verify = verifyDeployedNode) {
@@ -79,7 +84,14 @@ export async function confirmDeployedNode(target: UpdateTarget, result: UpdateRe
   if (check.status !== "passed") throw new ApiError(check.message, 422);
 }
 
-export async function preflightNodeRuntime(target: UpdateTarget, deploymentId: string, expected: string): Promise<UpdateCheck | null> {
+export async function preflightNodeRuntime(target: UpdateTarget, deploymentId: string, expected: string, vercelProbe = readVercelRuntime): Promise<UpdateCheck | null> {
+  if (target.provider === "vercel") {
+    const base = { tool: "Node" as const, phase: "before" as const, scope: target.root || "racine", checkedAt: new Date().toISOString(), findings: [] };
+    try {
+      const proof = await vercelProbe(target, { deploymentId });
+      return { ...base, status: "passed", message: `Sonde Vercel qualifiée sur le déploiement actuel : Node ${proof.node} mesuré. Le correctif cible ${expected} sera contrôlé après déploiement.` };
+    } catch (error) { return { ...base, status: "blocked", message: `Sonde Vercel non qualifiée avant publication : ${error instanceof ApiError ? error.message : "preuve absente ou inexploitable"}. Aucun changement publié.` }; }
+  }
   if (target.provider !== "railway") return null;
   const base = { tool: "Node" as const, phase: "before" as const, scope: target.root || "racine", checkedAt: new Date().toISOString(), findings: [] };
   try {
