@@ -18,6 +18,8 @@ test("Contrôle WordPress en lecture seule : cache lié aux versions, aucun ordr
   }) as typeof fetch };
   const first = await currentWordPressSecurity(target, dependencies);
   assert.equal(first.check?.findings.length, 1);
+  assert.equal(first.securityCoverage?.packages, 2);
+  assert.deepEqual(first.securityCoverage?.limitations, []);
   assert.equal(calls, 2);
   assert.deepEqual(await currentWordPressSecurity(target, dependencies), JSON.parse(JSON.stringify(first)));
   assert.equal(calls, 2, "les sondages de l’interface ne rescannent pas les mêmes versions");
@@ -34,6 +36,7 @@ test("Contrôle WordPress en lecture seule : cache lié aux versions, aucun ordr
   assert.equal(early.error, undefined, "les versions relevées par le connecteur signé restent analysables sans chargement complet de WordPress");
   assert.equal(early.check?.findings.length, 0);
   assert.ok(early.warnings.some(warning => warning.includes("mode de secours")));
+  assert.ok(early.securityCoverage?.limitations.some(warning => warning.includes("Inventaire de secours")));
   assert.equal(calls, 8);
   assert.equal((await currentWordPressSecurity(target, { ...dependencies, cacheOnly: true })).warnings.some(warning => warning.includes("mode de secours")), true);
   assert.ok((await currentWordPressSecurity({ ...target, root: "/another" }, dependencies)).error);
@@ -54,6 +57,7 @@ test("Contrôle en lecture seule : interventions manuelles avant exécution et m
   }) as typeof fetch };
   const observation = await currentWordPressSecurity(target, dependencies);
   assert.equal(observation.check?.findings.length, 1, "la vulnérabilité publique reste visible");
+  assert.ok(observation.securityCoverage?.limitations.some(warning => warning.includes("private")));
   assert.deepEqual(observation.manualUpdates?.map(item => item.package), ["plugins/private", "themes/parent"]);
   assert.equal(observation.manualUpdates?.[0].target, "2");
   assert.deepEqual((await currentWordPressSecurity(target, { ...dependencies, cacheOnly: true })).manualUpdates, observation.manualUpdates);

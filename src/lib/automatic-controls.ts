@@ -4,12 +4,14 @@ import type { Project } from "./types";
 import { ApiError } from "./http";
 import { updateTargets } from "./updates/targets";
 import { currentWordPressSecurity } from "./updates/wordpress-current-security";
-import { scanCurrentNode } from "./updates/node-monitor";
+import { scanCurrentDependencies } from "./updates/source-monitor";
 import { automaticControlDue, controlSource } from "./automatic-control-state";
 import type { UpdateTarget } from "./updates/types";
 import { mapConcurrent } from "./updates/planning";
 import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 import { CoverageLimit, SourceQualificationError } from "./updates/capabilities";
+import type { AutomaticControl } from "./automatic-control-state";
+import { scanDeployedImage } from "./updates/image-monitor";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string) {
@@ -22,11 +24,12 @@ export async function automaticControlsNeeded(provider: UpdateTarget["provider"]
   return false;
 }
 
-async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>) {
-  if (target.mode !== "wordpress") return scanCurrentNode(target, source.commit);
+async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage">> {
+  if (source.image) return scanDeployedImage(source.image);
+  if (target.mode !== "wordpress") return scanCurrentDependencies(target, source.commit);
   const observation = await currentWordPressSecurity(target, { fresh: true });
   if (observation.error || !observation.check) throw new ApiError(observation.error || "Inventaire ou contrôle de sécurité WordPress indisponible.");
-  return { checks: [observation.check], updates: [], warnings: observation.warnings };
+  return { checks: [observation.check], updates: [], warnings: observation.warnings, securityCoverage: observation.securityCoverage };
 }
 
 export async function reconcileAutomaticControls(options: { force?: boolean; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
@@ -44,7 +47,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
           if (!automaticControlDue(previous, identity, Date.now(), options.force)) continue;
           const attemptedAt = new Date().toISOString();
           try {
-            if (target.mode !== "wordpress" && !target.repository) throw new CoverageLimit(target.capability?.reason || "Sources GitHub non disponibles ; couverture des dépendances limitée.");
+            if (target.mode !== "wordpress" && !target.repository && !source?.image) throw new CoverageLimit(["database", "network", "image"].includes(target.capability?.family || "") ? "Image externe : une image publique accessible et une empreinte identique sur les déploiements actifs sont nécessaires au contrôle." : "Sources GitHub non disponibles ; relier un dépôt ou un inventaire vérifiable au déploiement.");
             if (!source) throw new ApiError("Le relevé de l’hébergeur ou l’inventaire actuel est manquant, périmé ou non vérifiable.");
             const observation = await dependencies.scan(target, source);
             // A deployment or inventory may change while the scanner is running.

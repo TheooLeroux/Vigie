@@ -10,6 +10,8 @@ import { mapConcurrent, withPlanningSession } from "./planning";
 import type { UpdateTarget } from "./types";
 import { workspaceLockCovers } from "./workspace-monitor";
 import { qualifySources, SourceQualificationError, CoverageLimit } from "./capabilities";
+import { npmDependencyUsage } from "./dependency-usage";
+import type { SecurityCoverageDetails } from "../automatic-control-state";
 
 const locks = ["npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
 export async function scanCurrentNode(target: UpdateTarget, commit: string | null, dependencies = { github: githubRequest, scan: scanNodeSources, latest: latestPackageVersion }) {
@@ -79,9 +81,10 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
     let packages: { name: string; version?: string }[] = [];
     const findings = await dependencies.scan(folder, [""], ["package.json", lock], undefined, async (_names, inventory) => { packages = inventory || []; });
     const warnings = ["Analyse des dépendances verrouillées du commit déployé ; l’image système, les secrets et le code applicatif ne sont pas analysés."];
-    if (shared) {
+    if (shared || sourceQualification.sharedLock) {
       warnings.push("Analyse du verrou partagé du dépôt, qui référence ce workspace. Les alertes couvrent aussi d’autres services ; leur applicabilité à ce service doit être confirmée. Les versions disponibles de ses dépendances ne sont pas isolées par ce contrôle.");
-      return { sourceQualification, checks: [securityCheck("OSV", "before", "Verrou partagé du dépôt · " + target.root, findings.map(finding => ({ ...finding, scope: target.root, kind: "unconfirmed" as const, explanation: "Signalement dans le verrou partagé du dépôt ; applicabilité à ce service à confirmer." })))], updates: [], warnings };
+      const securityCoverage: SecurityCoverageDetails = { scope: "dependencies", packages: packages.length, limitations: [warnings[1]] };
+      return { sourceQualification, checks: [securityCheck("OSV", "before", "Verrou partagé du dépôt · " + target.root, findings.map(finding => ({ ...finding, scope: target.root, kind: "unconfirmed" as const, explanation: "Signalement dans le verrou partagé du dépôt ; applicabilité à ce service à confirmer." })))], updates: [], warnings, securityCoverage };
     }
     const names = [...new Set(["dependencies", "devDependencies", "optionalDependencies"].flatMap(section => Object.keys(manifest[section] || {})))];
     if (names.length > 250) throw new ApiError("Trop de dépendances directes pour ce contrôle.");
@@ -95,6 +98,8 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
         return installed.filter(version => gt(latest, version)).map(version => `${target.name} · ${name} ${version} → ${latest} : version stable disponible, compatibilité à valider.`);
       } catch { warnings.push(`${name} : catalogue des mises à jour indisponible.`); return []; }
     }));
-    return { sourceQualification, checks: [securityCheck("OSV", "before", target.root || "racine", findings.map(finding => ({ ...finding, scope: target.root })))], updates: updates.flat(), warnings };
+    const securityCoverage: SecurityCoverageDetails = { scope: "dependencies", packages: packages.length, limitations: [] };
+    const npmLock = lock === "package-lock.json" || lock === "npm-shrinkwrap.json" ? lockBytes.toString("utf8") : "";
+    return { sourceQualification, checks: [securityCheck("OSV", "before", target.root || "racine", findings.map(finding => ({ ...finding, scope: target.root, usage: npmDependencyUsage(npmLock, finding.package, finding.version) })))], updates: updates.flat(), warnings, securityCoverage };
   } finally { await rm(folder, { recursive: true, force: true }); }
 }

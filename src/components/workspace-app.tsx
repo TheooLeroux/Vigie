@@ -487,7 +487,7 @@ export function WorkspaceApp({
               </th>
               <th>Hébergement</th>
               {!compact && <th>Client</th>}
-              <th>Nbr de failles</th>
+              <th>Failles connues</th>
               <th>Mise à jour</th>
             </tr>
           </thead>

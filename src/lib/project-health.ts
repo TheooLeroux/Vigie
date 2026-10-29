@@ -7,6 +7,8 @@ import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
 
 export type ProjectHealth = {
+  securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding }[];
+  securityOtherAlerts: string[];
   security: string[];
   updates: string[];
   manualUpdates: { label: string; reason: string }[];
@@ -34,6 +36,7 @@ const isWordPressSecurityCheck = (check: UpdateCheck) => check.tool === "WPScan"
 // deployed site; accepted Node scans must match its active image identity.
 export function projectHealth(detail: ProjectDetail, state?: UpdateState | null): ProjectHealth {
   const security = new Map<string, string>(), updates = new Map<string, string>();
+  const securityEvidence: ProjectHealth["securityEvidence"] = [];
   const manualUpdates = new Map<string, { label: string; reason: string }>();
   const fixes = new Map<string, { label: string; versions: Set<string>; manual?: boolean }>();
   let securityKnown = false, versionsKnown = false, incomplete = false;
@@ -152,6 +155,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       if (release.updateAvailable && release.securityRelease) security.set(`${installation.id}:php-security`, `PHP ${php.version} : publication de sécurité disponible.`);
     }
   }
+  const securityOtherAlerts = [...security.values()];
   const scanned = new Set<string>();
   const observations = (state?.currentSecurity || []).flatMap(observation => {
     const target = state?.targets.find(target => target.id === observation.targetId);
@@ -208,6 +212,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       securityKnown = true;
       for (const finding of check.findings) {
         if (finding.scope !== undefined && finding.scope !== target.root) continue;
+        securityEvidence.push({ targetId: target.id, name: result.name, tool: check.tool, checkedAt: check.checkedAt, finding });
         const id = [...finding.aliases, finding.id].sort()[0];
         const severity = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
         const inventory = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId)?.inventory;
@@ -231,5 +236,5 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
   }
   const securitySearchIncomplete = !!latest && ["failed", "attention"].includes(latest.stage) && latest.results.some(result => result.checks?.some(check => check.status === "blocked" && ["OSV", "Trivy", "WPScan", "WPVulnerability"].includes(check.tool)));
   const fixLabel = (fix: { label: string; versions: Set<string>; manual?: boolean }) => `${fix.label} : correctifs référencés ${[...fix.versions].join(", ")} ; ${fix.manual ? "Composant conservé. Mise à jour à effectuer depuis WordPress ou le compte de l’éditeur, avec le développeur si nécessaire, après validation de compatibilité" : "compatibilité à valider"}.`;
-  return { security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fixLabel), manualSecurityFixes: [...fixes.values()].filter(fix => fix.manual).map(fixLabel), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
+  return { securityEvidence, securityOtherAlerts, security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fixLabel), manualSecurityFixes: [...fixes.values()].filter(fix => fix.manual).map(fixLabel), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
 }

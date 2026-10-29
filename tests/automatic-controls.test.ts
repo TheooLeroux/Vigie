@@ -23,6 +23,22 @@ function fixture() {
   return { detail, target, source, report };
 }
 
+test("Contrôle autonome : une image publique identifiée est analysée même sans dépôt Git", async () => {
+  const { detail, target } = fixture();
+  target.repository = null; target.mode = "archive";
+  detail.railway![0].services[0].image = "postgres:17";
+  let written: AutomaticControl | undefined, scans = 0;
+  const result = await reconcileAutomaticControls({}, {
+    projects: async () => [detail.project], detail: async () => detail, targets: async () => [target],
+    scan: async (_target, source) => { scans++; assert.match(source.image!, /^docker\.io\/library\/postgres@sha256:/); return { checks: [healthCheck({ tool: "Trivy", scope: source.image!, phase: "before", findings: [] })], updates: [], warnings: [], securityCoverage: { scope: "image", limitations: [] } }; },
+    read: async () => null, write: async control => { written = control; }, claim: async () => async () => {}, log: async () => {},
+  });
+  assert.equal(scans, 1);
+  assert.equal(result.checked, 1);
+  assert.equal(result.limited, 0);
+  assert.equal(written?.securityCoverage?.scope, "image");
+});
+
 test("Contrôle autonome : cadence horaire, nouveau déploiement et reprise des erreurs", () => {
   const { report } = fixture(), now = Date.parse(report.checkedAt!);
   assert.equal(automaticControlDue(null, report.identity, now), true);

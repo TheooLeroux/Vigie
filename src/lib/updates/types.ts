@@ -29,6 +29,7 @@ export type SecurityFinding = {
   url?: string;
   explanation?: string;
   kind?: "vulnerability" | "supply-chain" | "unconfirmed";
+  usage?: "runtime" | "build" | "unknown";
 };
 export type UpdateCheck = {
   tool: "OSV" | "Trivy" | "WPScan" | "WPVulnerability" | "Validation" | "Node" | "Static";
@@ -76,7 +77,7 @@ export type UpdateRun = {
 };
 export type UpdateState = {
   automaticControls?: import("../automatic-control-state").AutomaticControl[];
-  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string }[];
+  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string; securityCoverage?: import("../automatic-control-state").SecurityCoverageDetails }[];
   enabled: boolean;
   disabledReason?: string;
   targets: UpdateTarget[];

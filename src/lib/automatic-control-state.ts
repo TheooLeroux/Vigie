@@ -2,9 +2,16 @@ import type { ProjectDetail } from "./types";
 import type { UpdateCheck, UpdateTarget, UpdateState } from "./updates/types";
 import { railwayRuntimeDeployments } from "./railway-status";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
+import { deployedImageReference } from "./image-reference";
 
 export const controlInterval = 60 * 60_000;
+export type SecurityCoverageDetails = {
+  scope: "dependencies" | "wordpress" | "image";
+  limitations: string[];
+  packages?: number;
+};
 export type AutomaticControl = {
+  securityCoverage?: SecurityCoverageDetails;
   sourceQualification?: import("./updates/capabilities").SourceQualification;
   targetId: string;
   identity: string;
@@ -26,6 +33,7 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
     return Number.isFinite(age) && age >= -30_000 && age < maxAge;
   };
   let commit: string | null = null;
+  let image: string | undefined;
   let deployments: unknown[] = [];
   if (target.mode === "wordpress") {
     const site = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId && site.documentRoot === target.root && !site.missingSince && !site.ignored);
@@ -41,12 +49,21 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
     const project = detail.railway?.find(project => project.connectionId === target.connectionId && !project.missingSince && !project.connectionError && project.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId));
     const service = project?.services.find(service => service.id === target.remoteId && service.environmentId === target.environmentId);
     const active = service && railwayRuntimeDeployments(service);
+    if (service?.image && !target.repository) {
+      if (!project || !recent(project.observedAt) || !active?.length || active.some(deployment => deployment.status !== "SUCCESS")) return null;
+      const digest = active[0].evidence?.imageDigest;
+      const reference = deployedImageReference(service.image, digest);
+      if (!reference || active.some(deployment => deployedImageReference(service.image!, deployment.evidence?.imageDigest) !== reference)) return null;
+      image = reference;
+      deployments = active.map(deployment => [deployment.id, reference]).sort((a, b) => a[0].localeCompare(b[0]));
+      return { commit, image, identity: JSON.stringify([target.id, target.projectId, target.connectionId, target.repository, target.root, deployments]) };
+    }
     if (!project || !recent(project.observedAt) || !active?.length || active.some(deployment => deployment.status !== "SUCCESS" || deployment.evidence?.repository !== target.repository || root(deployment.evidence?.rootDirectory) !== target.root)) return null;
     commit = active[0].evidence?.commit || null;
     if (active.some(deployment => deployment.evidence?.commit !== commit)) return null;
     deployments = active.map(deployment => [deployment.id, deployment.evidence?.commit, deployment.evidence?.imageDigest]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   } else return null;
-  return { commit, identity: JSON.stringify([target.id, target.projectId, target.connectionId, target.repository, target.root, deployments]) };
+  return { commit, image, identity: JSON.stringify([target.id, target.projectId, target.connectionId, target.repository, target.root, deployments]) };
 }
 
 export function automaticControlFresh(control: AutomaticControl, now = Date.now()) {

@@ -1,9 +1,10 @@
 "use client";
 
-import { CircleHelp, Loader2, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Loader2, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import type { Project } from "@/lib/types";
 import { useProjectSummary } from "./project-summaries";
+import { ProjectSecurityBadge } from "./project-security-badge";
 
 type Request = (path: string, method?: string, payload?: unknown) => Promise<any>;
 
@@ -14,16 +15,12 @@ export function ProjectListActions({ project, request, onOpen }: {
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const { summary, loading } = useProjectSummary(project.id);
-  const { count, known, partial, incomplete, active, attention, refreshNeeded, disabledReason, securityTitle, unknownLabel } = summary || { count: 0, known: false, partial: false, incomplete: true, active: false, attention: false, refreshNeeded: false, disabledReason: "Résumé indisponible ; réessayez le chargement de la liste.", securityTitle: "Contrôles indisponibles : l’absence de faille n’est pas confirmée.", unknownLabel: "Contrôle indisponible" };
-  const SecurityIcon = count ? ShieldAlert : known ? ShieldCheck : CircleHelp;
+  const { active, attention, refreshNeeded, disabledReason } = summary || { active: false, attention: false, refreshNeeded: false, disabledReason: "Résumé indisponible ; réessayez le chargement de la liste." };
 
   return <>
     <td>
       {loading ? <span className="subtle" role="status"><Loader2 size={14} className="spin" aria-label="Chargement des contrôles" /></span> :
-        <span className={`badge ${count ? "warning" : known ? "sage" : "neutral"}`} title={securityTitle}>
-          <SecurityIcon size={13} aria-hidden="true" />
-          {count || known || partial ? <>{count}{(!known || incomplete) && <span aria-label="Contrôles incomplets">*</span>}</> : unknownLabel}
-        </span>}
+        <ProjectSecurityBadge summary={summary} onOpen={onOpen} />}
     </td>
     <td>
       <button
