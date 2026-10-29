@@ -10,7 +10,6 @@ export async function nodeValidationPlan(targets: UpdateTarget[], checks: (Updat
     if (!vercelRuntime(target)) return [];
     const check = checks[index], proof = check?.nodeEvidence;
     if (check?.status !== "passed" || proof?.source !== "vercel-function" || proof.projectId !== target.remoteId || !stableVersion(proof.version)) throw new ApiError("La version Node fournie par Vercel doit être mesurée avant les installations.", 422);
-    if (proof.version.split(".")[0] !== latestLts.split(".")[0]) throw new ApiError(`Vercel doit utiliser la branche LTS ${latestLts.split(".")[0]}.x avant cette maintenance ; aucun changement de majeure implicite.`, 422);
     return [proof.version];
   });
   const versions = new Set([...observed, ...targets.filter(target => !vercelRuntime(target)).map(() => latestLts)]);
@@ -20,10 +19,12 @@ export async function nodeValidationPlan(targets: UpdateTarget[], checks: (Updat
   if (observed.length) {
     const info = await release(version);
     if (info.supported !== true || !info.checkedAt || info.state === "unknown") throw new ApiError("Le support de la version Node fournie par Vercel n’a pas pu être confirmé.", 422);
-    for (const [index, target] of targets.entries()) if (vercelRuntime(target)) managed.set(target.id, { provider: "vercel", version, latestLts, updatePending: gt(latestLts, version), securityUpdate: info.latestVersion === latestLts ? info.securityUpdate : null, checkedAt: checks[index]!.checkedAt });
+    const branchLatest = info.latestVersion;
+    if (!branchLatest || !stableVersion(branchLatest) || branchLatest.split(".")[0] !== version.split(".")[0] || gt(version, branchLatest)) throw new ApiError("Le catalogue des correctifs de la branche Node mesurée n’est pas confirmé.", 422);
+    for (const [index, target] of targets.entries()) if (vercelRuntime(target)) managed.set(target.id, { provider: "vercel", version, latestLts, branchLatest, migrationAvailable: gt(latestLts, version) && latestLts.split(".")[0] !== version.split(".")[0], updatePending: gt(branchLatest, version), securityUpdate: info.securityUpdate, checkedAt: checks[index]!.checkedAt });
   }
   return { version, managed };
 }
 export function managedNodeMessage(runtime: ManagedNode) {
-  return `Node ${runtime.version} est fourni par Vercel et utilisé pour valider les dépendances. ${runtime.securityUpdate ? "Correctif de sécurité" : "Version LTS"} ${runtime.latestLts} en attente chez l’hébergeur ; la mise à jour du runtime n’est pas confirmée. Vigie ne peut pas imposer ce correctif à Vercel.`;
+  return `Node ${runtime.version} est fourni par Vercel et utilisé pour valider les dépendances sur sa branche prise en charge. ${runtime.updatePending ? `${runtime.securityUpdate ? "Correctif de sécurité" : "Correctif Node"} ${runtime.branchLatest || runtime.latestLts} en attente chez l’hébergeur ; la mise à jour du runtime n’est pas confirmée. Vigie ne peut pas imposer ce correctif à Vercel.` : "Aucun correctif manquant identifié sur cette branche."}${runtime.migrationAvailable ? ` Migration vers la LTS ${runtime.latestLts} à planifier séparément ; elle ne bloque pas les dépendances compatibles.` : ""}`;
 }

@@ -9,11 +9,11 @@ import { latestPackageVersion } from "./versions";
 import { mapConcurrent, withPlanningSession } from "./planning";
 import type { UpdateTarget } from "./types";
 import { workspaceLockCovers } from "./workspace-monitor";
-import { qualifySources, SourceQualificationError } from "./capabilities";
+import { qualifySources, SourceQualificationError, CoverageLimit } from "./capabilities";
 
 const locks = ["npm-shrinkwrap.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
 export async function scanCurrentNode(target: UpdateTarget, commit: string | null, dependencies = { github: githubRequest, scan: scanNodeSources, latest: latestPackageVersion }) {
-  if (target.mode !== "git" || !target.repository) throw new ApiError(target.unavailable?.startsWith("Image externe") ? "Image externe : l’analyse des dépendances npm ne couvre pas ce service. Un contrôle de l’image est nécessaire." : "Les sources de ce service ne sont pas reliées à un dépôt GitHub identifiable. L’analyse complète des dépendances est indisponible.");
+  if (target.mode !== "git" || !target.repository) throw new CoverageLimit(target.unavailable?.startsWith("Image externe") ? "Image externe : l’analyse des dépendances npm ne couvre pas ce service. Un contrôle de l’image est nécessaire." : "Les sources de ce service ne sont pas reliées à un dépôt GitHub identifiable. L’analyse complète des dépendances est indisponible.");
   // Provider-bound read-only monitoring is independent of permission to publish
   // updates. The token's existing repository read rights still apply.
   if (!/^[\w.-]+\/[\w.-]+$/.test(target.repository) || !githubUpdateToken(target.repository)) throw new ApiError("L’accès GitHub en lecture aux sources de ce service est indisponible.");

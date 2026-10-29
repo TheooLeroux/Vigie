@@ -20,6 +20,10 @@ import { requireSession } from "@/lib/auth";
 import { projectUpdates, startProjectUpdate, configureUpdateSource, closeInterruptedUpdate } from "@/lib/updates/service";
 import { readUpdateSource } from "@/lib/updates/storage";
 import { updateTargets } from "@/lib/updates/targets";
+import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
+import { projectSummaries } from "@/lib/project-summaries";
+import { activityPage } from "@/lib/activity";
+import { recordedBackups } from "@/lib/backups";
 import {
   hostingConnections,
   saveHostingConnection,
@@ -146,7 +150,18 @@ async function handleRequest(request: Request, context: Context) {
     const { path } = await context.params;
     const [root, id, child] = path;
     const method = request.method;
+    if (method === "POST" && root === "project-summaries" && path.length === 1) {
+      const input = z.object({ ids: z.array(z.string().uuid()).max(200) }).parse(await body(request));
+      return Response.json(await projectSummaries(input.ids, request.signal));
+    }
+    if (method === "POST" && root === "updates" && id === "refresh" && path.length === 2) {
+      const input = z.object({ projectId: z.string().uuid() }).parse(await body(request));
+      const refresh = await refreshProjectHosting(input.projectId);
+      return Response.json({ ...refresh, state: await projectUpdates(input.projectId) });
+    }
     if (method === "GET") {
+      if (root === "activity" && path.length === 1) return Response.json(await activityPage(Object.fromEntries(url.searchParams.entries().filter(([key]) => key !== "workspace")), workspace));
+      if (root === "backups" && path.length === 1) return Response.json(await recordedBackups(z.coerce.number().int().min(0).max(1_000_000).parse(url.searchParams.get("offset") || 0)));
       if (root === "updates" && id && child === "source" && path.length === 3) {
         const targets = await updateTargets(z.string().uuid().parse(id));
         const target = targets.find(target => target.id === url.searchParams.get("targetId"));

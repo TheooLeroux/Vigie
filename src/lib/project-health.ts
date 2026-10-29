@@ -4,7 +4,7 @@ import type { SoftwareRelease } from "./railway-types";
 import type { ProjectDetail, SiteInventory } from "./types";
 import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
-import { automaticControlFresh, controlSource } from "./automatic-control-state";
+import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
 
 export type ProjectHealth = {
   security: string[];
@@ -81,10 +81,14 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       return result.stage === "completed" && target?.provider === "vercel" && target.remoteId === project.id && target.connectionId === project.connectionId && result.managedNode && proof?.source === "vercel-function" && proof.projectId === project.id && proof.version === result.managedNode.version && proof.deploymentId === deployment.id && !!proof.commit && proof.commit === deployment.commit;
     })?.result.managedNode;
     const nodeKey = `vercel:${project.id}:node`;
-    const release = managed ? { ...deployment.nodeRelease, state: managed.updatePending ? "available" as const : "current" as const, latestVersion: managed.latestLts, latestLts: managed.latestLts, latestStable: deployment.nodeRelease?.latestStable || managed.latestLts, supported: true, supportEndsAt: deployment.nodeRelease?.supportEndsAt || null, securityUpdate: managed.securityUpdate, checkedAt: managed.checkedAt, source: "https://nodejs.org/dist/index.json" } : deployment.nodeRelease || undefined;
+    const release = managed ? { ...deployment.nodeRelease, state: managed.updatePending ? "available" as const : "current" as const, latestVersion: managed.branchLatest || managed.latestLts, latestLts: managed.branchLatest || managed.latestLts, latestStable: deployment.nodeRelease?.latestStable || managed.latestLts, supported: true, supportEndsAt: deployment.nodeRelease?.supportEndsAt || null, securityUpdate: managed.securityUpdate, checkedAt: managed.checkedAt, source: "https://nodejs.org/dist/index.json" } : deployment.nodeRelease || undefined;
     const nodeLabel = deployment.analysis?.status === "observed" && !deployment.analysis.runtimes.length ? "Node.js de construction (configuration Vercel)" : "Node.js";
     addRelease(nodeKey, `${project.name} · ${nodeLabel}`, managed?.version || deployment.nodeBranch || "version inconnue", release);
     if (managed?.updatePending && updates.has(nodeKey)) manualUpdates.set(nodeKey, { label: updates.get(nodeKey)!, reason: "Runtime géré par Vercel : correctif en attente chez l’hébergeur. Les dépendances sont validées avec la version mesurée ; le runtime reste à actualiser." });
+    if (managed?.migrationAvailable) {
+      const key = nodeKey + ":migration", label = `${project.name} · Migration Node ${managed.version} → LTS ${managed.latestLts}.`;
+      updates.set(key, label); manualUpdates.set(key, { label, reason: "Migration de majeure à planifier séparément ; elle ne bloque pas les dépendances compatibles sur la branche prise en charge." });
+    }
     for (const technology of deployment.analysis?.technologies || []) {
       if (technology.update === "available") {
         versionsKnown = true;
@@ -159,7 +163,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
   const automaticIds = new Set((state?.automaticControls || []).map(control => control.targetId));
   const automatic = (state?.automaticControls || []).flatMap(control => {
     const target = state?.targets.find(target => target.id === control.targetId);
-    const matches = target && controlSource(target, detail)?.identity === control.identity;
+    const matches = target && controlMatches(control, target, detail);
     if (!matches) { incomplete = true; return []; }
     const fresh = automaticControlFresh(control);
     if (!fresh) incomplete = true;

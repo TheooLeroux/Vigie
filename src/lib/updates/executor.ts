@@ -29,6 +29,7 @@ import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { nodeValidationPlan, managedNodeMessage } from "./managed-node";
+import { refreshProjectHosting } from "./refresh-hosting";
 import { buildStaticCandidate, qualifyStaticSources, staticPreflight, vercelStaticTarget, verifyStaticDeployment, type StaticBuild, type StaticProfile } from "./vercel-static";
 import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
 import { assertSourceImpact } from "./source-impact";
@@ -119,7 +120,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const version = plan.version;
   for (const [index, target] of targets.entries()) {
     const managed = plan.managed.get(target.id);
-    if (managed) { results[index].managedNode = managed; if (managed.updatePending) results[index].warnings.push(managedNodeMessage(managed)); }
+    if (managed) { results[index].managedNode = managed; if (managed.updatePending || managed.migrationAvailable) results[index].warnings.push(managedNodeMessage(managed)); }
   }
   const temporary = await mkdtemp(join(tmpdir(), "vigie-update-"));
   try {
@@ -390,6 +391,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       return;
     }
     await assertSourceImpact(targets, changes.map(file => file.path));
+    await refreshProjectHosting(run.projectId);
     const currentTargets = await updateTargets(run.projectId);
     for (const [index, target] of targets.entries()) {
       const current = currentTargets.find(item => item.id === target.id);

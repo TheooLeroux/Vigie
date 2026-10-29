@@ -44,7 +44,7 @@ export type UpdateCheck = {
   wordpressRetained?: { package: string; version: string }[];
 };
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
-export type ManagedNode = { provider: "vercel"; version: string; latestLts: string; updatePending: boolean; securityUpdate: boolean | null; checkedAt: string };
+export type ManagedNode = { provider: "vercel"; version: string; latestLts: string; branchLatest?: string; migrationAvailable?: boolean; updatePending: boolean; securityUpdate: boolean | null; checkedAt: string };
 export type UpdateResult = {
   targetId: string;
   name: string;

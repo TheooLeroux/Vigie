@@ -27,10 +27,10 @@ test("Vercel géré : les validations ciblent exactement le runtime mesuré et c
  const current=await nodeValidationPlan([target],[before("24.22.1")],"24.22.1",release);
  assert.equal(current.managed.get(target.id)!.updatePending,false);
 });
-test("Vercel géré : aucune version n’est choisie sans preuve qualifiée, catalogue connu et branche LTS attendue",async()=>{
+test("Vercel géré : aucune version n’est choisie sans preuve qualifiée, catalogue de branche connu et support confirmé",async()=>{
  await assert.rejects(nodeValidationPlan([target],[null],"24.22.1",release),/mesurée/);
  await assert.rejects(nodeValidationPlan([target],[{...before(),status:"blocked"}],"24.22.1",release),/mesurée/);
- await assert.rejects(nodeValidationPlan([target],[before("22.23.4")],"24.22.1",release),/branche LTS/);
+ await assert.rejects(nodeValidationPlan([target],[before("22.23.4")],"24.22.1",release),/catalogue des correctifs/);
  await assert.rejects(nodeValidationPlan([target],[before()],"24.22.1",async()=>({...await release(),supported:false})),/support/);
  await assert.rejects(nodeValidationPlan([target],[before()],"24.22.1",async()=>({...await release(),state:"unknown"})),/support/);
 });
@@ -39,6 +39,19 @@ test("Les groupes Railway conservent la dernière LTS ; un groupe aux runtimes d
  assert.equal((await nodeValidationPlan([railway],[null],"24.22.1",release)).version,"24.22.1");
  await assert.rejects(nodeValidationPlan([target,railway],[before(),null],"24.22.1",release),/versions Node différentes/);
  await assert.rejects(nodeValidationPlan([target,{...target,id:"second"}],[before(),before("24.22.1")],"24.22.1",release),/versions Node différentes/);
+});
+
+test("Nouvelle majeure LTS : les dépendances restent validables sur la branche Vercel encore prise en charge", async () => {
+ const plan=await nodeValidationPlan([target],[before()],"26.13.0",release);
+ assert.equal(plan.version,"24.21.0");
+ const managed=plan.managed.get(target.id)!;
+ assert.equal(managed.branchLatest,"24.22.1"); assert.equal(managed.migrationAvailable,true); assert.equal(managed.updatePending,true);
+ assert.match(managedNodeMessage(managed),/Correctif de sécurité 24.22.1/);
+ assert.match(managedNodeMessage(managed),/Migration vers la LTS 26.13.0 à planifier séparément/);
+ await assert.rejects(nodeValidationPlan([target],[before()],"26.13.0",async()=>({...await release(),supported:false})),/support/);
+ const current=await nodeValidationPlan([target],[before("24.22.1")],"26.13.0",release);
+ assert.equal(current.managed.get(target.id)!.updatePending,false);
+ assert.equal(current.managed.get(target.id)!.migrationAvailable,true);
 });
 test("L’interface sépare explicitement les dépendances validées du correctif de sécurité Node non appliqué",()=>{
  const state=healthUpdates();

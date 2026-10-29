@@ -16,6 +16,7 @@ import type { SourceSettings } from "./types";
 import { currentWordPressSecurity } from "./wordpress-current-security";
 import { readAutomaticControl } from "../automatic-control-storage";
 import { allowsAutomaticMaintenance } from "./capabilities";
+import { refreshProjectHosting } from "./refresh-hosting";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -37,6 +38,7 @@ const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(
 export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate) {
   const input = startSchema.parse(raw);
   if (!updatesEnabled()) throw new ApiError("Le service de mise à jour n’est pas encore activé.", 503);
+  await refreshProjectHosting(input.projectId);
   const all = await updateTargets(input.projectId);
   const targets = input.targetIds ? input.targetIds.map(id => {
     const target = all.find(target => target.id === id);

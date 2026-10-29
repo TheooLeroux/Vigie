@@ -30,3 +30,15 @@ Un échec d’un groupe indépendant n’empêche pas de tenter les autres group
 Avant publication Git, l’exécuteur recherche les autres consommateurs connus du dépôt sur les connexions Vercel/Railway, y compris les services non rattachés ou exclus. Une modification d’un verrou ou manifeste parent affectant un consommateur non sélectionné est refusée avant publication. Les consommateurs d’une autre branche explicitement identifiée ne sont pas affectés par le déplacement de cette référence ; une branche inconnue reste prise en compte par prudence. Ce contrôle porte sur l’inventaire connu, pas sur des hébergements qui ne sont pas connectés à Vigie.
 
 Les tests de cette évolution utilisent des fixtures et des conteneurs jetables. Ils ne lancent aucune maintenance sur les projets du parc et ne réparent aucun WordPress.
+
+## Exploitation et consultation
+
+Les relevés Vercel/Railway restent soumis au seuil de fraîcheur de 15 minutes. La fiche actualise les connexions périmées à la demande et lors de sa consultation ; le lancement et la vérification avant publication les réactualisent aussi si nécessaire. Ce parcours lit uniquement les inventaires hébergeur et n’installe aucun agent WordPress. Les appels concurrents à une même connexion sont regroupés dans le processus ; les verrous du connecteur restent applicables. La planification GitHub continue d’assurer les contrôles de fond.
+
+Une source sans dépôt, une image externe ou une technologie sans analyseur produit un rapport de couverture limitée, sans preuve de sécurité et sans échec technique. Il suit la cadence horaire des contrôles, tandis qu’un véritable échec conserve la reprise à cinq minutes. Les erreurs de droits GitHub restent explicites et ne sont pas converties en couverture validée.
+
+La liste consulte des résumés groupés, par lots bornés à 200 projets et quatre calculs concurrents côté serveur. Les détails et rapports complets restent dans les fiches. Les requêtes côté navigateur sont annulées à la fermeture du parcours et les appels inutiles ne sont pas planifiés pour un onglet caché. Les statuts de relevé technique sont distincts des inventaires manuels.
+
+Les filtres et pages d’activité interrogent tout l’historique conservé côté serveur ; le jour de départ utilise Europe/Paris. Les données initiales de l’espace restent limitées aux 100 dernières actions, sans charger toute la table en mémoire. Les choix de projets proviennent du parc complet. Les écrans et les onglets de fiche se retrouvent via la navigation et l’URL.
+
+Backup centralise les emplacements de sauvegarde WordPress et les références Git/déploiement consignés dans les maintenances, y compris anciennes via pagination. Ce catalogue ne contrôle pas l’existence physique des fichiers et ne recense pas les sauvegardes externes à Vigie. Une référence de code n’est pas une sauvegarde de données. Aucune restauration automatique, création de sauvegarde ou lecture des archives distantes n’est déclenchée par sa consultation.

@@ -14,6 +14,7 @@ export type AutomaticControl = {
   updates: string[];
   warnings: string[];
   error?: string;
+  coverage?: "partial";
 };
 
 // Include deployment IDs as well as commits: redeploying the same sources also
@@ -51,6 +52,10 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
 export function automaticControlFresh(control: AutomaticControl, now = Date.now()) {
   const age = now - Date.parse(control.checkedAt || "");
   return !control.error && Number.isFinite(age) && age >= 0 && age < controlInterval;
+}
+export function controlMatches(control: AutomaticControl, target: UpdateTarget, detail: ProjectDetail) {
+  const source = controlSource(target, detail);
+  return source?.identity === control.identity || control.coverage === "partial" && control.identity === "unavailable" && !source;
 }
 
 export function automaticControlDue(previous: AutomaticControl | null, identity: string, now = Date.now(), force = false) {

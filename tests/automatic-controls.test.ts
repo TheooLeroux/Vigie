@@ -64,7 +64,7 @@ test("Contrôle autonome : exécution sans interface, conservation des résultat
     read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl,
     log: async () => {},
   };
-  assert.deepEqual(await reconcileAutomaticControls({}, dependencies), { checked: 1, failed: 1, deferred: 0 });
+  assert.deepEqual(await reconcileAutomaticControls({}, dependencies), { checked: 1, failed: 1, deferred: 0, limited: 0 });
   assert.deepEqual(scanned, [target.id, "healthy"]);
   const failed = (await readAutomaticControl(target.id))!;
   assert.deepEqual(failed.checks, report.checks, "la dernière preuve reste conservée avec son ancienne date");
@@ -72,10 +72,10 @@ test("Contrôle autonome : exécution sans interface, conservation des résultat
   assert.ok(!JSON.stringify(failed).includes("private credential"));
   assert.equal(automaticControlFresh(failed), false);
   scanned.length = 0;
-  assert.deepEqual(await reconcileAutomaticControls({}, dependencies), { checked: 0, failed: 0, deferred: 0 });
+  assert.deepEqual(await reconcileAutomaticControls({}, dependencies), { checked: 0, failed: 0, deferred: 0, limited: 0 });
   assert.deepEqual(scanned, [], "aucun nouveau scan avant son échéance");
   const release = await claimAutomaticControl("healthy"); assert.ok(release);
-  assert.deepEqual(await reconcileAutomaticControls({ force: true }, dependencies), { checked: 0, failed: 1, deferred: 1 });
+  assert.deepEqual(await reconcileAutomaticControls({ force: true }, dependencies), { checked: 0, failed: 1, deferred: 1, limited: 0 });
   await release();
 });
 

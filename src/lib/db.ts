@@ -283,6 +283,10 @@ export async function createProject(
   (await log(workspace, "project.created", "Projet ajouté à l’inventaire.", p.id));
   return p;
 }
+async function recentActivity(workspace: Workspace, projectId?: string) {
+  const rows = await database().prepare("SELECT data FROM activity WHERE workspace=?" + (projectId ? " AND project_id=?" : "") + " ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT 100").all(workspace, ...(projectId ? [projectId] : [])) as { data: string }[];
+  return rows.map(row => JSON.parse(row.data) as Activity);
+}
 export async function workspaceData(workspace: Workspace): Promise<WorkspaceData> {
   return {
     clients: (await list<Client>("clients", workspace)).sort((a, b) =>
@@ -298,9 +302,7 @@ export async function workspaceData(workspace: Workspace): Promise<WorkspaceData
     inventories: (await list<Inventory>("inventories", workspace)).sort((a, b) =>
       b.collectedAt.localeCompare(a.collectedAt),
     ),
-    activity: (await list<Activity>("activity", workspace))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 100),
+    activity: await recentActivity(workspace),
   };
 }
 export async function projectDetail(id: string, workspace: Workspace): Promise<ProjectDetail> {
@@ -324,9 +326,7 @@ export async function projectDetail(id: string, workspace: Workspace): Promise<P
     components: (await list<Component>("components", workspace, id)).filter((c) =>
       latestIds.has(c.inventoryId),
     ),
-    activity: (await list<Activity>("activity", workspace, id))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 100),
+    activity: await recentActivity(workspace, id),
   };
 }
 export async function saveInventory(

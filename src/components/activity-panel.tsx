@@ -8,17 +8,11 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RecordLink } from "./record-link";
 import { EmptyState, formatDate } from "./ui";
 
-function category(action: string) {
-  if (/creat|ajout|cré|import/.test(action.toLowerCase())) return "Ajouts";
-  if (/review|relu|revue/.test(action.toLowerCase())) return "Revues";
-  if (/connect|synch|relev|collect|rattach|invent/.test(action.toLowerCase()))
-    return "Connexions & relevés";
-  return "Modifications";
-}
+import { activityCategory as category } from "@/lib/activity-model";
 const dayKey = (value: string) =>
   new Intl.DateTimeFormat("fr-CA", {
     timeZone: "Europe/Paris",
@@ -32,23 +26,29 @@ export function ActivityPanel({
   items,
   onProject,
   scoped = false,
+  request,
+  projectId,
+  allProjects,
 }: {
   items: Activity[];
   onProject: (id: string) => void;
   scoped?: boolean;
+  request?: (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
+  projectId?: string;
+  allProjects?: { id: string; name: string }[];
 }) {
   const [query, setQuery] = useState("");
   const [project, setProject] = useState("");
   const [kind, setKind] = useState("");
   const [since, setSince] = useState("");
   const [page, setPage] = useState(0);
-  const projects = [
+  const projects = (allProjects ? allProjects.map(item => [item.id, item.name]) : [
     ...new Map(
       items
         .filter((i) => i.projectId)
         .map((i) => [i.projectId!, i.projectName]),
     ).entries(),
-  ].sort((a, b) => a[1].localeCompare(b[1], "fr"));
+  ]).sort((a, b) => a[1].localeCompare(b[1], "fr"));
   const filtered = items
     .filter(
       (item) =>
@@ -60,14 +60,23 @@ export function ActivityPanel({
           .includes(query.trim().toLocaleLowerCase("fr")),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const currentPage = Math.min(
-    page,
-    Math.max(0, Math.ceil(filtered.length / pageSize) - 1),
-  );
-  const visible = filtered.slice(
-    currentPage * pageSize,
-    (currentPage + 1) * pageSize,
-  );
+  const [remote, setRemote] = useState<{ items: Activity[]; total: number; page: number } | null>(null);
+  const [loading, setLoading] = useState(!!request), [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!request) return;
+    const controller = new AbortController(); setLoading(true); setError(""); setRemote(null);
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({ query, page: String(page) });
+      if (projectId || project) params.set("projectId", projectId || project);
+      if (kind) params.set("kind", kind);
+      if (since) params.set("since", since);
+      request("activity?" + params.toString(), "GET", undefined, { signal: controller.signal }).then(data => { if (!controller.signal.aborted) setRemote(data); }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [request, query, project, projectId, kind, since, page, attempt]);
+  const total = request ? remote?.total || 0 : filtered.length;
+  const currentPage = request ? remote?.page ?? page : Math.min(page, Math.max(0, Math.ceil(total / pageSize) - 1));
+  const visible = request ? remote?.items || [] : filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const hasFilters = !!(query || project || kind || since);
   function reset() {
     setQuery("");
@@ -164,18 +173,9 @@ export function ActivityPanel({
           )}
         </div>
       </div>
-      <div className="activity-results" role="status">
-        {filtered.length} action{filtered.length > 1 ? "s" : ""}
-        {hasFilters
-          ? ` sur ${items.length}`
-          : " enregistrée" + (items.length > 1 ? "s" : "")}
-        {items.length >= 100 && (
-          <span className="activity-limit">
-            Recherche parmi les {items.length} dernières actions chargées.
-          </span>
-        )}
-      </div>
-      {!visible.length ? (
+      <div className="activity-results" role="status">{loading ? "Recherche dans l’historique…" : `${total} action(s) ${hasFilters ? "correspondante(s)" : "enregistrée(s)"}`}{request && <span className="activity-limit">Recherche dans tout l’historique conservé.</span>}</div>
+      {error && <p role="alert">{error} <button className="text-button" onClick={() => setAttempt(value => value + 1)}>Réessayer</button></p>}
+      {loading || error ? null : !visible.length ? (
         <EmptyState
           icon={ActivityIcon}
           title={
@@ -251,28 +251,28 @@ export function ActivityPanel({
           ))}
         </ol>
       )}
-      {filtered.length > pageSize && (
+      {total > pageSize && (
         <div className="activity-pagination">
           <span>
             {currentPage * pageSize + 1}–
-            {Math.min((currentPage + 1) * pageSize, filtered.length)} sur{" "}
-            {filtered.length}
+            {Math.min((currentPage + 1) * pageSize, total)} sur{" "}
+            {total}
           </span>
           <div>
             <button
               className="button secondary"
-              disabled={currentPage === 0}
+              disabled={loading || currentPage === 0}
               onClick={() => setPage(currentPage - 1)}
             >
               <ArrowLeft size={14} />
               Précédent
             </button>
             <span>
-              Page {currentPage + 1} / {Math.ceil(filtered.length / pageSize)}
+              Page {currentPage + 1} / {Math.ceil(total / pageSize)}
             </span>
             <button
               className="button secondary"
-              disabled={(currentPage + 1) * pageSize >= filtered.length}
+              disabled={loading || (currentPage + 1) * pageSize >= total}
               onClick={() => setPage(currentPage + 1)}
             >
               Suivant

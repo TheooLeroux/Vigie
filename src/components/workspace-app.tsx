@@ -34,6 +34,9 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ProjectSummaries, useProjectSummary } from "./project-summaries";
+import { observedInventory } from "@/lib/project-summary";
+import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
 import { ClientsPanel } from "./clients-panel";
 import { ConnectionsPanel } from "./connections-panel";
@@ -149,7 +152,11 @@ function needsInfo(p: Project, services: Service[]) {
     s.some((s) => !s.technology || !s.provider || (!!s.runtime && !s.version))
   );
 }
-function Status({ project, data }: { project: Project; data: WorkspaceData }) {
+function Status({ project, data, detail }: { project: Project; data: WorkspaceData; detail?: ProjectDetail }) {
+  const { summary, loading } = useProjectSummary(project.id);
+  if (observedInventory(detail) || summary?.observed) return <span className="badge sage">Relevé technique enregistré</span>;
+  if (!detail && loading) return <span className="badge neutral">Inventaire en cours…</span>;
+  if (!detail && !loading && (!summary || !summary.inventoryKnown)) return <span className="badge neutral">Inventaire non vérifiable</span>;
   const serviceIds = new Set(
     data.services.filter((s) => s.projectId === project.id).map((s) => s.id),
   );
@@ -213,29 +220,29 @@ export function WorkspaceApp({
     toastTimer.current = setTimeout(() => setToast(""), 4500);
   }
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    localStorage.removeItem("vigie.workspace");
-    if (params.get("project")) {
+    const restoreLocation = () => {
+      const params = new URLSearchParams(window.location.search);
       setSelected(params.get("project"));
-      setView("sites");
-    } else if (params.get("client")) {
-      setSelectedClient(params.get("client"));
-      setView("clients");
-    } else {
-      const destination = navigation.find((n) => n.id === params.get("view"));
-      if (destination) setView(destination.id);
-    }
-    setReady(true);
+      setSelectedClient(params.get("project") ? null : params.get("client"));
+      setView(params.get("project") ? "sites" : params.get("client") ? "clients" : navigation.find(n => n.id === params.get("view"))?.id || "sites");
+      setProjectTab(projectTabs.find(tab => tab.id === params.get("tab"))?.id || "overview");
+      setDialog(null); setMobileNav(false); setError("");
+    };
+    localStorage.removeItem("vigie.workspace");
+    restoreLocation(); setReady(true);
+    window.addEventListener("popstate", restoreLocation);
     return () => {
+      window.removeEventListener("popstate", restoreLocation);
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, []);
   const api = useCallback(
-    async (path: string, method = "GET", payload?: unknown) => {
+    async (path: string, method = "GET", payload?: unknown, options?: { signal?: AbortSignal }) => {
       const response = await fetch(
         `/api/${path}${path.includes("?") ? "&" : "?"}workspace=${workspace}`,
         {
           method,
+          signal: options?.signal,
           headers: payload ? { "Content-Type": "application/json" } : undefined,
           body: payload ? JSON.stringify(payload) : undefined,
           cache: "no-store",
@@ -314,7 +321,7 @@ export function WorkspaceApp({
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
   }, []);
-  function go(v: View) {
+  function go(v: View, updateHistory = true) {
     setView(v);
     setSelected(null);
     setSelectedClient(null);
@@ -322,24 +329,29 @@ export function WorkspaceApp({
     setMobileNav(false);
     setQuery("");
     setError("");
-    window.history.replaceState({}, "", `/?view=${v}`);
+    if (updateHistory && window.location.search !== `?view=${v}`) window.history.pushState({}, "", `/?view=${v}`);
   }
   function openClient(id: string | null) {
-    go("clients");
+    go("clients", false);
     setSelectedClient(id);
-    if (id)
-      window.history.replaceState({}, "", `/?client=${encodeURIComponent(id)}`);
+    window.history.pushState({}, "", id ? `/?client=${encodeURIComponent(id)}` : "/?view=clients");
   }
   function openProject(id: string) {
     setProjectTab("overview");
     setSelected(id);
     setView("sites");
     setError("");
-    window.history.replaceState(
+    window.history.pushState(
       {},
       "",
       `/?workspace=${workspace}&project=${id}`,
     );
+  }
+  function navigateProjectTab(tab: ProjectTab) {
+    setProjectTab(tab);
+    const params = new URLSearchParams(window.location.search);
+    params.set("tab", tab);
+    window.history.replaceState({}, "", "/?" + params.toString());
   }
   function resetFilters() {
     setQuery("");
@@ -402,6 +414,9 @@ export function WorkspaceApp({
     Number(incompleteOnly);
 
   function renderProjects(rows: Project[], compact = false) {
+    return <ProjectSummaries ids={rows.map(row => row.id)} request={api}>{renderProjectsContent(rows, compact)}</ProjectSummaries>;
+  }
+  function renderProjectsContent(rows: Project[], compact = false) {
     if (!rows.length)
       return (
         <EmptyState
@@ -606,14 +621,14 @@ export function WorkspaceApp({
               aria-selected={projectTab === tab.id}
               aria-controls={`project-panel-${tab.id}`}
               tabIndex={projectTab === tab.id ? 0 : -1}
-              onClick={() => setProjectTab(tab.id)}
+              onClick={() => navigateProjectTab(tab.id)}
               onKeyDown={(event) => {
                 const next = event.key === "ArrowRight" ? (index + 1) % projectTabs.length
                   : event.key === "ArrowLeft" ? (index + projectTabs.length - 1) % projectTabs.length
                   : event.key === "Home" ? 0 : event.key === "End" ? projectTabs.length - 1 : null;
                 if (next === null) return;
                 event.preventDefault();
-                setProjectTab(projectTabs[next].id);
+                navigateProjectTab(projectTabs[next].id);
                 document.getElementById(`project-tab-${projectTabs[next].id}`)?.focus();
               }}
             >{tab.label}</button>
@@ -730,7 +745,7 @@ export function WorkspaceApp({
             <h2>À propos du projet</h2>
             <p className="project-intro">{p.description || "Aucune description renseignée."}</p>
             <div className="detail-meta">
-              <Status project={p} data={data!} />
+              <Status project={p} data={data!} detail={detail} />
               <span><ShieldCheck size={14} />{p.criticality === "critical" ? "Criticité élevée" : p.criticality === "important" ? "Projet important" : "Criticité standard"}</span>
               {p.tags.map(tag => <span className="plain-tag" key={tag}>{tag}</span>)}
             </div>
@@ -857,6 +872,8 @@ export function WorkspaceApp({
         <div className="project-content project-tab-panel" id="project-panel-history" role="tabpanel" aria-labelledby="project-tab-history" hidden={projectTab !== "history"} tabIndex={0}>
             <ActivityPanel
               items={detail.activity}
+              request={api}
+              projectId={p.id}
               onProject={openProject}
               scoped
             />
@@ -1197,14 +1214,13 @@ export function WorkspaceApp({
                       </section>
                     )}
                     {view === "backup" && (
-                      <section className="panel backup-placeholder">
-                        <Database size={32} />
-                        <h2>Coming soon</h2>
-                      </section>
+                      <BackupsPanel request={api} onProject={openProject} />
                     )}
                     {view === "activity" && (
                       <ActivityPanel
                         items={data.activity}
+                        request={api}
+                        allProjects={data.projects}
                         onProject={openProject}
                       />
                     )}

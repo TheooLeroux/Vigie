@@ -17,7 +17,8 @@ export type MaintenanceCapability = {
   reason: string;
   staticFramework?: "vite" | "astro" | "create-react-app";
 };
-export class SourceQualificationError extends ApiError {
+export class CoverageLimit extends ApiError {}
+export class SourceQualificationError extends CoverageLimit {
   constructor(message: string, readonly sourceQualification: SourceQualification) { super(message, 422); }
 }
 const markers: Record<string, SourceQualification["family"]> = { "composer.json": "php", "requirements.txt": "python", "pyproject.toml": "python", "Pipfile": "python", "go.mod": "go", "Cargo.toml": "rust", "Gemfile": "ruby", "pom.xml": "java", "build.gradle": "java" };

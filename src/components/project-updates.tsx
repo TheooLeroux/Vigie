@@ -46,10 +46,10 @@ export function WordPressManualUpdates({ run, observations, targets = [] }: { ru
   </div>;
 }
 export function ManagedNodeNotice({ run }: { run?: UpdateRun }) {
-  const pending = run?.results.filter(result => result.managedNode?.updatePending) || [];
+  const pending = run?.results.filter(result => result.managedNode?.updatePending || result.managedNode?.migrationAvailable) || [];
   if (!pending.length) return null;
-  return <div className="updates-note" role="status"><strong>Correctif Node en attente chez Vercel</strong>
-    {pending.map(result => <p key={result.targetId}>{result.name} : dernière version mesurée <strong>Node {result.managedNode!.version}</strong>. {result.managedNode!.securityUpdate ? "Correctif de sécurité" : "Version LTS"} attendu : <strong>{result.managedNode!.latestLts}</strong>. {result.stage === "completed" ? "Les dépendances ont été validées avec la version mesurée. " : ""}La mise à jour du runtime dépend de Vercel et n’est pas confirmée. Relevé du {formatDate(result.managedNode!.checkedAt)}.</p>)}
+  return <div className="updates-note" role="status"><strong>{pending.some(result => result.managedNode?.updatePending) ? "Correctif Node en attente chez Vercel" : "Migration Node à planifier"}</strong>
+    {pending.map(result => <p key={result.targetId}>{result.name} : dernière version mesurée <strong>Node {result.managedNode!.version}</strong>. {result.managedNode!.updatePending && <>{result.managedNode!.securityUpdate ? "Correctif de sécurité" : "Correctif Node"} attendu : <strong>{result.managedNode!.branchLatest || result.managedNode!.latestLts}</strong>. La mise à jour du runtime dépend de Vercel et n’est pas confirmée. </>}{result.stage === "completed" ? "Les dépendances ont été validées avec la version mesurée. " : ""}{result.managedNode!.migrationAvailable && <>Migration vers la LTS {result.managedNode!.latestLts} à planifier séparément ; elle ne bloque pas les dépendances compatibles. </>}Relevé du {formatDate(result.managedNode!.checkedAt)}.</p>)}
   </div>;
 }
 export function UpdateProgress({ run }: { run: UpdateRun }) {
@@ -96,13 +96,25 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
 export function ProjectUpdates({ projectId, request, onComplete, onState }: { projectId: string; request: Request; onComplete: () => Promise<void>; onState?: (projectId: string, state: UpdateState | null) => void }) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true), completed = useRef("");
+  const refreshing = useRef(false), lastAttempt = useRef(0);
+  const [refreshingHosting, setRefreshingHosting] = useState(false), [hostingError, setHostingError] = useState("");
+  const refreshHosting = useCallback(async () => {
+    if (refreshing.current) return;
+    refreshing.current = true; lastAttempt.current = Date.now(); setRefreshingHosting(true);
+    try {
+      const response = await request("updates/refresh", "POST", { projectId });
+      if (alive.current) { setState(response.state); onState?.(projectId, response.state); setHostingError(response.errors.join(" ")); }
+    } catch (error) { if (alive.current) setHostingError(error instanceof Error ? error.message : "Actualisation non confirmée."); }
+    finally { refreshing.current = false; if (alive.current) setRefreshingHosting(false); }
+  }, [projectId, request, onState]);
   const refresh = useCallback(async () => {
     try {
       const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`);
-      if (alive.current) { setState(next); setError(""); onState?.(projectId, next); }
+      if (alive.current && !refreshing.current) { setState(next); setError(""); onState?.(projectId, next); }
+      if (alive.current && next.targets.some(target => target.provider !== "o2switch" && /expiré|contrôle .*indisponible/.test(target.unavailable || "")) && Date.now() - lastAttempt.current > 60_000) void refreshHosting();
       return next;
     } catch (error) { if (alive.current) onState?.(projectId, null); throw error; }
-  }, [projectId, request, onState]);
+  }, [projectId, request, onState, refreshHosting]);
   useEffect(() => {
     alive.current = true;
     void refresh().catch(error => { if (alive.current) setError(error.message); });
@@ -120,7 +132,7 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
   const newerObservation = latest?.stage === "failed" && state?.currentSecurity?.some(item => !item.error && item.check && Date.parse(item.check.checkedAt) > Date.parse(latest.updatedAt));
   return <section id="project-updates" className="panel project-updates" aria-label="Mises à jour du projet">
     <div className="updates-heading"><div><h2>Mettre le projet à jour</h2><p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
-      <button className="button primary" disabled={busy || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
+      <button className="button primary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled || !available.length} onClick={async () => {
         setBusy(true); setError("");
         try { await request("updates", "POST", { projectId }); await refresh(); }
         catch (error) { setError(error instanceof Error ? error.message : "La mise à jour n’a pas démarré."); }
@@ -128,8 +140,10 @@ export function ProjectUpdates({ projectId, request, onComplete, onState }: { pr
       }}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
     </div>
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
+    {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
     {state && <UpdateReadiness state={state} />}
+    {state?.targets.some(target => target.provider !== "o2switch") && <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>}
     {state && <MaintenanceScope targets={state.targets} />}
     {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
     {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}

@@ -4,12 +4,12 @@ import { projectHealth } from "@/lib/project-health";
 import type { ProjectDetail } from "@/lib/types";
 import type { UpdateState } from "@/lib/updates/types";
 import { wordpressSecurityVersions } from "@/lib/updates/wordpress-security-key";
-import { automaticControlFresh, controlInterval, controlSource } from "@/lib/automatic-control-state";
+import { controlMatches, automaticControlFresh, controlInterval, controlSource } from "@/lib/automatic-control-state";
 
 export function ProjectHealthSummary({ detail, updates, updatesUnavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; updatesUnavailable?: boolean }) {
   const health = projectHealth(detail, updates);
   const controls = updates?.automaticControls || [];
-  const pendingControl = updates?.automaticControls !== undefined && updates.targets.some(target => !controls.some(control => control.targetId === target.id && automaticControlFresh(control) && controlSource(target, detail)?.identity === control.identity));
+  const pendingControl = updates?.automaticControls !== undefined && updates.targets.some(target => !controls.some(control => control.targetId === target.id && automaticControlFresh(control) && controlMatches(control, target, detail)));
   const lastControlAt = controls.map(control => control.checkedAt).filter((at): at is string => !!at).sort().at(-1);
   const wordpress = detail.hosting?.some(site => site.kind === "wordpress") || updates?.targets.some(target => target.mode === "wordpress");
   const securityUnavailable = pendingControl || updates?.currentSecurity?.some(item => {
@@ -37,7 +37,8 @@ export function ProjectHealthSummary({ detail, updates, updatesUnavailable = fal
         {security && <ul>{health.security.map(item => <li key={item}>{item}</li>)}</ul>}
         <p>Les composants non analysés restent à vérifier.</p>
         <p>Contrôle automatique toutes les heures et après détection d’un nouveau déploiement.</p>
-        {lastControlAt && <p>Dernier contrôle enregistré le {new Date(lastControlAt).toLocaleString("fr-FR")} ; prochain passage horaire prévu le {new Date(Date.parse(lastControlAt) + controlInterval).toLocaleString("fr-FR")}.</p>}
+        {lastControlAt && <p>Dernier contrôle enregistré le {new Date(lastControlAt).toLocaleString("fr-FR")} . La cadence cible est horaire ; l’heure effective dépend du service de contrôle.</p>}
+        {!!controls.length && <p>Dernière tentative : {new Date(controls.map(control => control.attemptedAt).sort().at(-1)!).toLocaleString("fr-FR")}. Les échecs techniques sont réessayés après cinq minutes ; les couvertures limitées suivent la cadence horaire.</p>}
         {pendingControl && <p>Un contrôle manque, a expiré ou a échoué. La reprise automatique est attendue.</p>}
         {controls.flatMap(control => control.error ? [<p key={control.targetId}>{control.error}</p>] : control.warnings.map(warning => <p key={`${control.targetId}:${warning}`}>{warning}</p>))}
         {securityUnavailable && <p>Les anciens signalements restent visibles ; l’absence de faille n’est pas confirmée.</p>}
