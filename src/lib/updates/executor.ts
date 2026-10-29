@@ -29,6 +29,7 @@ import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { nodeValidationPlan, managedNodeMessage } from "./managed-node";
+import { buildStaticCandidate, qualifyStaticSources, staticPreflight, vercelStaticTarget, verifyStaticDeployment, type StaticBuild, type StaticProfile } from "./vercel-static";
 import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
 import { assertSourceImpact } from "./source-impact";
 
@@ -93,11 +94,20 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   if (representative.mode === "git" && new Set(targets.map(target => target.branch)).size !== 1) throw new ApiError("Ce dépôt est déployé depuis plusieurs branches. Séparez leurs mises à jour.");
   const latestLts = await latestNode();
   const runtimeChecks: (UpdateCheck | null)[] = [];
+  const staticFrameworks = new Map<string, string>();
   for (const [index, target] of targets.entries()) {
     results[index].previousDeploymentId = await providerPreflight(target, latestLts);
     await checkNodeEndpoint(target);
     if (workerTarget(target)) results[index].warnings.push("Traitement en arrière-plan : les tests isolés et le processus Node actif sont contrôlés. Aucun résultat de tâche, envoi externe ou parcours métier n’est certifié par la seule présence du processus.");
-    const check = results[index].previousDeploymentId ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
+    if (vercelStaticTarget(target)) {
+      if (!results[index].previousDeploymentId) throw new ApiError("Le déploiement statique actif doit être identifié avant la maintenance.", 422);
+      const observed = await staticPreflight(target, { deploymentId: results[index].previousDeploymentId! });
+      const framework = observed.framework || target.capability?.staticFramework;
+      if (!framework || observed.framework && observed.framework !== target.capability?.staticFramework) throw new ApiError("Le framework statique du déploiement ne correspond plus aux sources qualifiées.", 422);
+      staticFrameworks.set(target.id, framework);
+      results[index].warnings.push("Site statique : Node sert à construire et valider les sources dans un conteneur isolé. La version du build distant Vercel n’est pas mesurée. Aucun serveur Node n’est revendiqué ; les parcours métier restent à tester.");
+    }
+    const check = results[index].previousDeploymentId && !vercelStaticTarget(target) ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
     runtimeChecks.push(check);
     if (check) {
       results[index].checks ||= []; results[index].checks.push(check);
@@ -126,11 +136,14 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await writeFile(archive, Buffer.from(original.settings.archive, "base64"));
     }
     const names = await extractArchive(archive, sourceFolder, representative.mode === "git");
+    const staticProfiles = new Map<string, StaticProfile>();
+    const staticBuilds = new Map<string, StaticBuild>();
     for (const target of targets) {
       const prefix = target.root ? target.root + "/" : "";
       const local = [...new Set(names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length).split("/")[0]))];
       const manifest = local.includes("package.json") ? JSON.parse(await readFile(join(sourceFolder, prefix + "package.json"), "utf8")) : undefined;
       const family = sourceFamily(local, manifest);
+      if (vercelStaticTarget(target)) staticProfiles.set(target.id, await qualifyStaticSources(sourceFolder, target, names, staticFrameworks.get(target.id)!));
       if (family !== "node") throw new ApiError(`Les sources sélectionnées correspondent à ${family}. Aucun paquet n’est installé ni publié par le parcours Node ; un adaptateur dédié est nécessaire.`, 422);
       if (workerTarget(target) && typeof manifest?.scripts?.start !== "string") throw new ApiError("Le traitement en arrière-plan doit déclarer son script start pour qualifier son exécution.", 422);
     }
@@ -286,19 +299,27 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       };
     }
     const preparationStarted = performance.now();
-    const prepared = await prepareNodeServices(sourceFolder, roots, names, version, serviceChecks, {
-      transport: catalogs.transport,
-      runtime,
-      dockerRoots: targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root),
-      progress: async (root, phase) => {
-        const message = { preparing: "Préparation des versions", prepared: "Versions préparées ; attente du contrôle de l’ensemble", validating: "Validation des versions assemblées", ready: "Proposition validée ; attente de publication" }[phase];
-        for (const [index, target] of targets.entries()) if (target.root === root) {
-          results[index].stage = "updating";
-          results[index].message = message;
-        }
-        await progress("updating", `${root || "racine"} : ${message}.`);
-      },
-    }).finally(() => runtime.dispose?.());
+    let prepared: Awaited<ReturnType<typeof prepareNodeServices>>;
+    try {
+      prepared = await prepareNodeServices(sourceFolder, roots, names, version, serviceChecks, {
+        transport: catalogs.transport,
+        runtime,
+        dockerRoots: targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root),
+        progress: async (root, phase) => {
+          const message = { preparing: "Préparation des versions", prepared: "Versions préparées ; attente du contrôle de l’ensemble", validating: "Validation des versions assemblées", ready: "Proposition validée ; attente de publication" }[phase];
+          for (const [index, target] of targets.entries()) if (target.root === root) {
+            results[index].stage = "updating";
+            results[index].message = message;
+          }
+          await progress("updating", `${root || "racine"} : ${message}.`);
+        },
+      });
+      const buildNames = [...new Set([...names, ...prepared.allowed])];
+      for (const target of targets) if (vercelStaticTarget(target)) {
+        await progress("updating", `${target.name} : reconstruction statique isolée des versions finales et contrôle des fichiers produits.`);
+        staticBuilds.set(target.id, await buildStaticCandidate(sourceFolder, target, buildNames, staticProfiles.get(target.id)!, version, serviceChecks, runtime));
+      }
+    } finally { await runtime.dispose?.(); }
     const preparationMs = Math.round(performance.now() - preparationStarted);
     for (const [index, target] of targets.entries()) {
       const timing = "services" in prepared ? prepared.services.find(service => service.root === target.root) : null;
@@ -314,9 +335,22 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const warnings = "services" in prepared ? prepared.services.find(service => service.root === targets[index].root)?.warnings || [] : prepared.warnings;
       result.warnings = [...new Set([...result.warnings, ...warnings])];
     }
-    for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
+    for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root) && !vercelStaticTarget(target)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     async function verifyNode(index: number, deploymentId: string) {
       const result = results[index];
+      if (vercelStaticTarget(targets[index])) {
+        try {
+          const check = await verifyStaticDeployment(targets[index], { deploymentId, commit: result.commit || expected || undefined }, staticBuilds.get(targets[index].id)!);
+          result.checks ||= []; result.checks.push(check);
+          await progress("verifying", check.message);
+        } catch (error) {
+          const check: UpdateCheck = { tool: "Static", phase: "after", scope: targets[index].root || "racine", checkedAt: new Date().toISOString(), status: "blocked", message: error instanceof Error ? error.message : "Publication statique non confirmée.", findings: [] };
+          result.checks ||= []; result.checks.push(check);
+          await progress("verifying", check.message);
+          throw error;
+        }
+        return;
+      }
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
     }
     async function rememberValidation() {
@@ -362,7 +396,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       if (!current || current.unavailable || JSON.stringify(current) !== JSON.stringify(target)) throw new ApiError("La configuration du projet a changé pendant les tests. Publication annulée.");
       const currentDeployment = await providerPreflight(target, version);
       if (currentDeployment !== results[index].previousDeploymentId) throw new ApiError("Un autre déploiement a eu lieu pendant les tests. Publication annulée pour ne pas l’écraser.");
-      if (target.provider === "vercel") {
+      if (vercelStaticTarget(target)) {
+        const observed = await staticPreflight(target, { deploymentId: currentDeployment! });
+        if ((observed.framework || target.capability?.staticFramework) !== staticFrameworks.get(target.id)) throw new ApiError("Le framework Vercel a changé pendant la validation ; publication annulée.", 409);
+      } else if (target.provider === "vercel") {
         const runtime = await preflightNodeRuntime(target, currentDeployment!, latestLts);
         if (!runtime || runtime.status !== "passed" || runtime.nodeEvidence?.version !== version) throw new ApiError("Le runtime Vercel a changé pendant les validations. Relancez pour tester sa nouvelle version ; aucun changement publié.", 409);
       }

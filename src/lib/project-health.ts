@@ -82,7 +82,8 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     })?.result.managedNode;
     const nodeKey = `vercel:${project.id}:node`;
     const release = managed ? { ...deployment.nodeRelease, state: managed.updatePending ? "available" as const : "current" as const, latestVersion: managed.latestLts, latestLts: managed.latestLts, latestStable: deployment.nodeRelease?.latestStable || managed.latestLts, supported: true, supportEndsAt: deployment.nodeRelease?.supportEndsAt || null, securityUpdate: managed.securityUpdate, checkedAt: managed.checkedAt, source: "https://nodejs.org/dist/index.json" } : deployment.nodeRelease || undefined;
-    addRelease(nodeKey, `${project.name} · Node.js`, managed?.version || deployment.nodeBranch || "version inconnue", release);
+    const nodeLabel = deployment.analysis?.status === "observed" && !deployment.analysis.runtimes.length ? "Node.js de construction (configuration Vercel)" : "Node.js";
+    addRelease(nodeKey, `${project.name} · ${nodeLabel}`, managed?.version || deployment.nodeBranch || "version inconnue", release);
     if (managed?.updatePending && updates.has(nodeKey)) manualUpdates.set(nodeKey, { label: updates.get(nodeKey)!, reason: "Runtime géré par Vercel : correctif en attente chez l’hébergeur. Les dépendances sont validées avec la version mesurée ; le runtime reste à actualiser." });
     for (const technology of deployment.analysis?.technologies || []) {
       if (technology.update === "available") {
@@ -188,8 +189,10 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       const project = detail.railway?.find(project => project.connectionId === target.connectionId);
       const service = project?.services.find(service => service.id === target.remoteId && service.environmentId === target.environmentId);
       const vercel = detail.vercel?.find(project => project.id === target.remoteId && project.connectionId === target.connectionId)?.production;
-      const bound = proof && (target.provider === "vercel" ? proof.source === "vercel-function" && proof.projectId === target.remoteId && proof.deploymentId === vercel?.id && !!proof.commit && proof.commit === vercel.commit && vercel.state === "READY" : service && railwayRuntimeDeployments(service).some(deployment => deployment.id === proof.deploymentId && deployment.evidence?.imageDigest === proof.imageDigest));
-      if (bound) checks = ["OSV", "Trivy"].flatMap(tool => {
+      const staticProof = result.checks?.findLast(check => check.tool === "Static" && check.phase === "after" && check.status === "passed")?.staticEvidence;
+      const staticBound = target.provider === "vercel" && target.capability?.adapter === "node-static" && staticProof?.projectId === target.remoteId && staticProof.deploymentId === vercel?.id && !!staticProof.commit && staticProof.commit === vercel.commit && vercel.state === "READY" && staticProof.fileCount > 0 && /^[a-f0-9]{64}$/.test(staticProof.artifactHash);
+      const bound = staticBound || proof && (target.provider === "vercel" ? proof.source === "vercel-function" && proof.projectId === target.remoteId && proof.deploymentId === vercel?.id && !!proof.commit && proof.commit === vercel.commit && vercel.state === "READY" : service && railwayRuntimeDeployments(service).some(deployment => deployment.id === proof.deploymentId && deployment.evidence?.imageDigest === proof.imageDigest));
+      if (bound) checks = (staticBound ? ["OSV"] : ["OSV", "Trivy"]).flatMap(tool => {
         const check = result.checks?.findLast(check => check.tool === tool && check.phase === "candidate");
         return check && check.status !== "blocked" ? [check] : [];
       });

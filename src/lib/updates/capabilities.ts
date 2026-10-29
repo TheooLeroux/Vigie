@@ -5,7 +5,7 @@ import type { UpdateTarget } from "./types";
 export const sourceQualificationSchema = z.object({
   schema: z.literal(1), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), commit: z.string().regex(/^[a-f0-9]{40}$/), root: z.string().max(1000),
   family: z.enum(["node", "bun", "wordpress", "dolibarr", "php", "python", "go", "rust", "ruby", "java", "static", "mixed", "unknown"]),
-  manifests: z.array(z.string().max(100)).max(30), scripts: z.array(z.string().max(100)).max(200), lock: z.string().max(1000).nullable(), sharedLock: z.boolean().default(false), checkedAt: z.iso.datetime(),
+  manifests: z.array(z.string().max(100)).max(30), scripts: z.array(z.string().max(100)).max(200), lock: z.string().max(1000).nullable(), sharedLock: z.boolean().default(false), staticFramework: z.enum(["vite", "astro", "create-react-app"]).optional(), checkedAt: z.iso.datetime(),
 });
 export type SourceQualification = z.infer<typeof sourceQualificationSchema>;
 export type MaintenanceCapability = {
@@ -15,6 +15,7 @@ export type MaintenanceCapability = {
   status: "automatic" | "qualify" | "manual";
   label: string;
   reason: string;
+  staticFramework?: "vite" | "astro" | "create-react-app";
 };
 export class SourceQualificationError extends ApiError {
   constructor(message: string, readonly sourceQualification: SourceQualification) { super(message, 422); }
@@ -31,7 +32,9 @@ export function sourceFamily(names: string[], manifest?: Record<string, any>): S
   return [...families][0] || (files.has("index.html") ? "static" : "unknown");
 }
 export function qualifySources(target: Pick<UpdateTarget, "repository" | "root">, commit: string, names: string[], manifest?: Record<string, any>): SourceQualification {
-  return sourceQualificationSchema.parse({ schema: 1, repository: target.repository, root: target.root, commit, family: sourceFamily(names, manifest), manifests: names.filter(name => name === "package.json" || Object.hasOwn(markers, name) || ["wp-load.php", "filefunc.inc.php"].includes(name)), scripts: Object.keys(manifest?.scripts || {}).filter(name => name.length <= 100), lock: names.find(name => ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"].includes(name)) || null, sharedLock: !!manifest?.workspaces || names.includes("pnpm-workspace.yaml"), checkedAt: new Date().toISOString() });
+  const dependencies = { ...manifest?.dependencies, ...manifest?.devDependencies };
+  const staticFramework = typeof manifest?.scripts?.build === "string" ? dependencies.astro ? "astro" : dependencies.vite ? "vite" : dependencies["react-scripts"] ? "create-react-app" : undefined : undefined;
+  return sourceQualificationSchema.parse({ schema: 1, repository: target.repository, root: target.root, commit, family: sourceFamily(names, manifest), manifests: names.filter(name => name === "package.json" || Object.hasOwn(markers, name) || ["wp-load.php", "filefunc.inc.php"].includes(name)), scripts: Object.keys(manifest?.scripts || {}).filter(name => name.length <= 100), lock: names.find(name => ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"].includes(name)) || null, sharedLock: !!manifest?.workspaces || names.includes("pnpm-workspace.yaml"), staticFramework, checkedAt: new Date().toISOString() });
 }
 export function matchingQualification(raw: unknown, repository: string | null, root: string, commit?: string | null) {
   const parsed = sourceQualificationSchema.safeParse(raw);
@@ -55,7 +58,11 @@ export function maintenanceCapability(target: Pick<UpdateTarget, "provider" | "r
   if (!knownNode) return result("unknown", "unknown", null, "qualify", "Technologie à qualifier", "Le contrôle des sources doit identifier la technologie de ce service avant sa maintenance.");
   if (source && (!source.lock || !source.scripts.some(name => name === "test" || name === "build"))) return result("node", "unknown", null, "qualify", "Node à qualifier", "Un verrou de dépendances et un script test ou build sont nécessaires pour qualifier ce service.");
   const staticSite = evidence.staticSite || target.provider === "vercel" && evidence.runtimes?.length === 0;
-  if (staticSite) return target.provider === "railway" ? result("node", "static", "node-static", "automatic", "Node de construction · site statique", "Build et site publié contrôlés ; aucune version Node serveur n’est revendiquée.") : result("node", "static", null, "qualify", "Construction statique à qualifier", "Le parcours de build statique Vercel doit être qualifié ; une absence de fonction observée ne suffit pas à certifier le type de sortie.");
+  if (staticSite) {
+    if (target.provider === "railway") return result("node", "static", "node-static", "automatic", "Node de construction · site statique", "Build et site publié contrôlés ; aucune version Node serveur n’est revendiquée.");
+    if (source?.lock && source.staticFramework && source.scripts.includes("build") && (!evidence.framework || evidence.framework === source.staticFramework)) return { ...result("node", "static", "node-static", "automatic", "Site statique Vercel", "Sources et sortie du build qualifiées avant publication ; empreintes des fichiers, domaine public et absence de fonctions contrôlés après déploiement. Configurations particulières à qualifier séparément."), staticFramework: source.staticFramework };
+    return result("node", "static", null, "qualify", "Construction statique à qualifier", "Le contrôle des sources doit confirmer le verrou, le script build et un framework statique pris en charge ; l’absence de fonction observée ne suffit pas.");
+  }
   if (!target.url && target.provider === "railway") return source?.scripts.includes("start") ? result("node", "worker", "node-worker", "automatic", "Traitement Node en arrière-plan", "Tests isolés et processus Node du déploiement contrôlés ; les résultats métier demandent un contrôle dédié.") : result("node", "worker", null, "qualify", "Traitement en arrière-plan à qualifier", "La source, le verrou et les scripts start et test ou build doivent être identifiés avant la maintenance sans page HTTP.");
   return result("node", "web", "node-web", "automatic", "Application Node web", "Dépendances, tests, déploiement, runtime Node et réponse HTTPS contrôlés.");
 }

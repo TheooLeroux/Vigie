@@ -16,7 +16,7 @@ La qualification ne vaut que pour ce commit, cette racine et ce dépôt. Un chan
 | Node de build statique Railway | Attestation de construction et contrôle du site ; aucune revendication de processus Node serveur. |
 | Worker Node Railway sans domaine | Sources au commit déployé, verrou et scripts `start` et `test` ou `build` requis. Même installation isolée, scans et preuve du Node exécuté dans les instances actives ; aucun HTTP fictif demandé. La présence du processus ne certifie pas les résultats métier. |
 | WordPress o2switch | Cœur et extensions admissibles ; thèmes, code personnalisé et paquets protégés conservés et signalés. Un relevé avant chargement des extensions n’autorise pas une mise à jour. |
-| Statique Vercel | À qualifier. L’absence de fonctions observées ne prouve pas une sortie purement statique et ne remplace pas une preuve de build. |
+| Statique Vercel | Sources Vite, Astro ou Create React App qualifiées au commit déployé, verrou et build obligatoires. Qualification de configuration avant installation, reconstruction isolée, sortie statique contrôlée, puis comparaison SHA-256 de chaque fichier servi et contrôle du domaine public. Aucun runtime Node serveur revendiqué. Voir les limites du parcours dans `vercel-maintenance.md`. |
 | Cron, images externes, bases, réseau, autres langages | Intervention séparée ou qualification dédiée, avec un motif visible. Aucun passage implicite par l’exécuteur Node. |
 
 Un workspace ou verrou partagé reste à qualifier : son analyse de sécurité peut couvrir plusieurs applications mais ne suffit pas à valider leur mise à jour groupée. Les applications avec des racines indépendantes dans un même dépôt restent utilisables par les parcours existants.
