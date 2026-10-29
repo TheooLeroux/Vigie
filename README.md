@@ -48,6 +48,8 @@ La colonne **Failles connues** distingue les vulnérabilités applicables, les s
 
 ## Connexions o2switch
 
+Les projets sans GitHub disposent également d’une analyse des fichiers déployés récupérables sur Vercel. Les sources statiques GitHub et les fichiers accessibles sur o2switch sont inspectés pour leurs dépendances et bibliothèques externes identifiables. La fiche présente les fichiers effectivement consultés, leur provenance, les composants et les limites ; un site HTML n’est plus déclaré sans sources uniquement parce qu’il n’a pas de dépôt Git.
+
 Le menu **Connexions** contient les deux comptes du fichier source. Chaque compte accepte un jeton API cPanel (méthode privilégiée) ou un mot de passe cPanel. Le bouton **Synchroniser les sites** lit les domaines et leurs répertoires, reconnaît WordPress, Dolibarr, les sites HTML et les exports Next.js. Il relève les versions WordPress et Dolibarr dans leurs fichiers de version. Les comptes utilisent les deux jetons dédiés autorisés séparément par l’utilisateur ; ils expirent le 20 janvier 2027 à midi (Paris).
 
 Une correspondance unique de domaine (y compris les URL des environnements/services) ou de répertoire documenté sur le même compte rattache l’installation à sa fiche existante. Une ambiguïté ou une fiche archivée demande un choix manuel. Les nouveaux sites sont proposés avec **Ajouter au parc** ; aucun projet n’est créé sans ce clic. Le rattachement et la création sont conservés lors des synchronisations suivantes, sans doublon. Les clients existants ne changent pas et aucun client n’est inventé. Une fiche peut recevoir plusieurs installations, par exemple production et préproduction.

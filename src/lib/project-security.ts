@@ -5,13 +5,14 @@ import type { SecurityFinding, UpdateState, UpdateTarget } from "./updates/types
 
 export type CoverageStatus = "covered" | "partial" | "missing" | "pending" | "stale" | "error" | "unsupported";
 export const coverageLabels: Record<CoverageStatus, string> = {
-  covered: "Périmètre couvert", partial: "Couverture partielle", missing: "À connecter",
+  covered: "Périmètre couvert", partial: "Couverture partielle", missing: "Sources manquantes",
   pending: "Analyse attendue", stale: "À actualiser", error: "Contrôle en erreur", unsupported: "Analyse à compléter",
 };
 export type ServiceCoverage = {
   id: string; name: string; provider: string; status: CoverageStatus; scope: string;
   reason: string; action: string; limitations: string[]; checkedAt?: string; packages?: number;
   repository?: string | null; commit?: string | null;
+  evidence?: import("./automatic-control-state").SecurityCoverageDetails;
 };
 export type ProjectVulnerability = {
   key: string; id: string; aliases: string[]; targetId: string; service: string;
@@ -73,17 +74,17 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   const control = state?.automaticControls?.find(item => item.targetId === target.id);
   const service = detail.railway?.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
   const image = control?.securityCoverage?.scope === "image" || !!service?.image && !target.repository;
-  const scope = target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
-  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit };
+  const scope = control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
+  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage };
   const outcome = (status: CoverageStatus, reason: string, action: string, extra: Partial<ServiceCoverage> = {}): ServiceCoverage => ({ ...base, status, reason, action, ...extra });
   if (!state) return outcome("error", "Les rapports de sécurité sont indisponibles.", "Recharger les contrôles du projet.");
   const last = control?.checkedAt ? { checkedAt: control.checkedAt } : {};
   if (control?.error) return outcome("error", control.error, /GitHub|dépôt|accès/.test(control.error) ? "Vérifier l’accès en lecture au dépôt et au commit déployé." : "Actualiser les relevés ; le contrôle sera réessayé automatiquement.", last);
-  if (control?.coverage === "partial" && !control.checks.some(check => securityTools.has(check.tool))) return outcome(target.repository || image || target.mode === "wordpress" ? "unsupported" : "missing", control.warnings[0] || "Aucun analyseur disponible pour ce service.", image ? "Rendre l’image exacte accessible au scanner." : target.repository ? "Fournir un verrou résolu et un analyseur adapté à la technologie." : "Relier les sources ou fournir un inventaire lié au déploiement.", { ...last, limitations: control.warnings });
+  if (control?.coverage === "partial" && !control.checks.some(check => securityTools.has(check.tool))) return outcome(target.repository || image || target.mode === "wordpress" || control.securityCoverage?.scope === "sources" ? "unsupported" : "missing", control.warnings[0] || "Aucun analyseur disponible pour ce service.", control.securityCoverage?.scope === "sources" ? "Compléter les versions ou les fichiers signalés ; les sources disponibles ont été récupérées." : image ? "Rendre l’image exacte accessible au scanner." : target.repository ? "Fournir un verrou résolu et un analyseur adapté à la technologie." : "Relier les sources ou fournir un inventaire lié au déploiement.", { ...last, limitations: control.warnings });
   if (!control) {
     const observation = state.currentSecurity?.find(item => item.targetId === target.id);
     if (observation?.error) return outcome("error", observation.error, "Actualiser l’inventaire WordPress et attendre le prochain contrôle.");
-    if (!target.repository && target.mode !== "wordpress" && !image) return outcome("missing", "Les sources déployées ne sont pas identifiées.", "Relier le dépôt source ou un inventaire vérifiable au déploiement.");
+    if (!target.repository && target.mode !== "wordpress" && !image && target.provider !== "vercel") return outcome("missing", "Les sources déployées ne sont pas identifiées.", "Relier le dépôt source ou un inventaire vérifiable au déploiement.");
     return outcome("pending", "Aucun rapport automatique enregistré pour ce service.", "Attendre le prochain contrôle ou actualiser les relevés.");
   }
   if (!controlMatches(control, target, detail) || !automaticControlFresh(control)) return outcome("stale", "Le rapport a expiré, le déploiement a changé ou le relevé hébergeur doit être renouvelé.", "Actualiser les relevés et analyser le déploiement actuel.", last);

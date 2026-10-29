@@ -12,6 +12,8 @@ import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } fr
 import { CoverageLimit, SourceQualificationError } from "./updates/capabilities";
 import type { AutomaticControl } from "./automatic-control-state";
 import { scanDeployedImage } from "./updates/image-monitor";
+import { scanVercelSources } from "./updates/vercel-source-monitor";
+import { scanHostingSources } from "./updates/hosting-source-monitor";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string) {
@@ -26,6 +28,14 @@ export async function automaticControlsNeeded(provider: UpdateTarget["provider"]
 
 async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage">> {
   if (source.image) return scanDeployedImage(source.image);
+  if (source.hosting) return scanHostingSources(target);
+  if (target.provider === "vercel" && source.deploymentId) {
+    if (target.repository && source.commit) {
+      try { return await scanCurrentDependencies(target, source.commit); }
+      catch { /* Try the independently retrievable deployed files. */ }
+    }
+    return scanVercelSources(target, source.deploymentId);
+  }
   if (target.mode !== "wordpress") return scanCurrentDependencies(target, source.commit);
   const observation = await currentWordPressSecurity(target, { fresh: true });
   if (observation.error || !observation.check) throw new ApiError(observation.error || "Inventaire ou contrôle de sécurité WordPress indisponible.");
@@ -47,7 +57,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
           if (!automaticControlDue(previous, identity, Date.now(), options.force)) continue;
           const attemptedAt = new Date().toISOString();
           try {
-            if (target.mode !== "wordpress" && !target.repository && !source?.image) throw new CoverageLimit(["database", "network", "image"].includes(target.capability?.family || "") ? "Image externe : une image publique accessible et une empreinte identique sur les déploiements actifs sont nécessaires au contrôle." : "Sources GitHub non disponibles ; relier un dépôt ou un inventaire vérifiable au déploiement.");
+            if (target.mode !== "wordpress" && !target.repository && !source?.image && !source?.deploymentId && !source?.hosting) throw new CoverageLimit(["database", "network", "image"].includes(target.capability?.family || "") ? "Image externe : une image publique accessible et une empreinte identique sur les déploiements actifs sont nécessaires au contrôle." : "Sources non disponibles ; relier un dépôt ou un inventaire vérifiable au déploiement.");
             if (!source) throw new ApiError("Le relevé de l’hébergeur ou l’inventaire actuel est manquant, périmé ou non vérifiable.");
             const observation = await dependencies.scan(target, source);
             // A deployment or inventory may change while the scanner is running.

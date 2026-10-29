@@ -6,9 +6,15 @@ import { deployedImageReference } from "./image-reference";
 
 export const controlInterval = 60 * 60_000;
 export type SecurityCoverageDetails = {
-  scope: "dependencies" | "wordpress" | "image";
+  scope: "dependencies" | "wordpress" | "image" | "sources";
   limitations: string[];
   packages?: number;
+  source?: "github" | "vercel" | "hosting";
+  deploymentId?: string;
+  files?: number;
+  filesRead?: string[];
+  inventory?: { name: string; version: string; origin: string }[];
+  observations?: string[];
 };
 export type AutomaticControl = {
   securityCoverage?: SecurityCoverageDetails;
@@ -34,6 +40,8 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
   };
   let commit: string | null = null;
   let image: string | undefined;
+  let deploymentId: string | undefined;
+  let hosting: boolean | undefined;
   let deployments: unknown[] = [];
   if (target.mode === "wordpress") {
     const site = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId && site.documentRoot === target.root && !site.missingSince && !site.ignored);
@@ -44,6 +52,7 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
     const deployment = project?.production;
     if (!project || !recent(project.observedAt) || !deployment || deployment.state !== "READY" || deployment.repository !== target.repository || root(deployment.rootDirectory ?? project.rootDirectory) !== target.root) return null;
     commit = deployment.commit;
+    deploymentId = deployment.id;
     deployments = [[deployment.id, commit]];
   } else if (target.provider === "railway") {
     const project = detail.railway?.find(project => project.connectionId === target.connectionId && !project.missingSince && !project.connectionError && project.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId));
@@ -62,8 +71,12 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
     commit = active[0].evidence?.commit || null;
     if (active.some(deployment => deployment.evidence?.commit !== commit)) return null;
     deployments = active.map(deployment => [deployment.id, deployment.evidence?.commit, deployment.evidence?.imageDigest]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  } else if (target.provider === "o2switch") {
+    const site = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId && site.documentRoot === target.root && !site.ignored && !site.missingSince && !site.inspectionError);
+    if (!site || !recent(site.observedAt, controlInterval)) return null;
+    hosting = true; deployments = [site.observedAt, site.kind];
   } else return null;
-  return { commit, image, identity: JSON.stringify([target.id, target.projectId, target.connectionId, target.repository, target.root, deployments]) };
+  return { commit, image, deploymentId, hosting, identity: JSON.stringify([target.id, target.projectId, target.connectionId, target.repository, target.root, deployments]) };
 }
 
 export function automaticControlFresh(control: AutomaticControl, now = Date.now()) {

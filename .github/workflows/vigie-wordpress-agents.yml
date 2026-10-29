@@ -61,7 +61,10 @@ jobs:
       - name: Signaler une découverte incomplète après avoir contrôlé les agents connus
         if: always() && steps.discovery.outcome == 'failure'
         run: exit 1
-      - name: Analyser automatiquement les failles WordPress
+      - name: Installer les scanners pour les sources hébergées
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' }}
+        run: node --import tsx scripts/install-update-scanners.ts
+      - name: Analyser automatiquement les failles WordPress et les sources hébergées
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' }}
         run: node --import tsx scripts/automatic-control-worker.ts
         env:

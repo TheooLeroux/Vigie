@@ -176,6 +176,17 @@ test("Contrôle réel depuis la base : les observations hébergeur sont chargée
   assert.equal(result.checked, 1);
   assert.equal(result.failed, 0);
   assert.equal((await readAutomaticControl(target.id))?.error, undefined);
+  // The same deployed-source identity remains usable without a Git repository.
+  remote.repository = null; remote.production!.repository = null; remote.production!.commit = null;
+  await applyVercelSnapshot(connection.id, [remote]);
+  const noGitTargets = await updateTargets(project.id);
+  let deploymentRead = false;
+  const noGit = await reconcileAutomaticControls({ provider: "vercel", force: true }, {
+    projects: async () => [project], detail: observedProjectDetail, targets: async () => noGitTargets,
+    scan: async (_target, source) => { assert.equal(source.deploymentId, "deployed"); assert.equal(source.commit, null); deploymentRead = true; return { checks: [], updates: [], warnings: [] }; },
+    read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log: async () => {},
+  });
+  assert.equal(deploymentRead, true); assert.equal(noGit.checked, 1); assert.equal(noGit.limited, 0);
 });
 
 test("Parc : limiter à trois projets simultanés pour ne pas retarder tout le parc derrière un scan lent", async () => {

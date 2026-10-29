@@ -43,6 +43,9 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
         <div><strong>{service.name}</strong><span className={`badge ${service.status === "covered" ? "sage" : "neutral"}`}>{coverageLabels[service.status]}</span></div>
         <p>{service.scope}{service.packages !== undefined ? ` · ${service.packages} composant(s) identifié(s)` : ""}</p>
         <p>{service.reason}</p>
+        {service.evidence?.source && <small>Lecture : {service.evidence.source === "vercel" ? "fichiers du déploiement Vercel" : service.evidence.source === "hosting" ? "fichiers de l’hébergement" : "sources GitHub"}{service.evidence.files !== undefined ? ` · ${service.evidence.files} fichier(s)` : ""}{service.evidence.deploymentId ? ` · ${service.evidence.deploymentId}` : ""}</small>}
+        {!!service.evidence?.inventory?.length && <details><summary>Composants identifiés ({service.evidence.inventory.length})</summary><ul>{service.evidence.inventory.map(item => <li key={`${item.name}@${item.version}:${item.origin}`}>{item.name} {item.version} · {item.origin}</li>)}</ul></details>}
+        {!!service.evidence?.filesRead?.length && <details><summary>Fichiers consultés ({service.evidence.filesRead.length})</summary><ul>{service.evidence.filesRead.map(path => <li key={path}>{path}</li>)}</ul></details>}
         {service.limitations.length > 0 && <ul>{service.limitations.map(item => <li key={item}>{item}</li>)}</ul>}
         {service.action && <p><strong>À faire :</strong> {service.action}</p>}
         {service.repository && <small>Source : {service.repository}{service.commit ? ` · commit ${service.commit.slice(0, 12)}` : ""}</small>}

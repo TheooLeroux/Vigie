@@ -45,7 +45,11 @@ export async function scanDependencyFiles(files: { name: string; content: Uint8A
 export async function scanCurrentDependencies(target: UpdateTarget, commit: string | null, dependencies = { node: scanCurrentNode, github: githubRequest, scan: scanDependencyFiles }): Promise<Observation> {
   try { return await dependencies.node(target, commit); }
   catch (error) {
-    if (!(error instanceof SourceQualificationError) || !formats[error.sourceQualification.family]) throw error;
+    if (!(error instanceof SourceQualificationError)) throw error;
+    if (!formats[error.sourceQualification.family]) {
+      const { scanGitHubSources } = await import("./github-source-monitor");
+      return { ...await scanGitHubSources(target, commit, { github: dependencies.github, scan: (await import("./source-snapshot")).scanSourceSnapshot }), sourceQualification: error.sourceQualification };
+    }
     const sourceQualification = error.sourceQualification;
     if (!target.repository || !commit || !/^[a-f0-9]{40}$/.test(commit) || sourceQualification.repository !== target.repository || sourceQualification.commit !== commit || sourceQualification.root !== target.root) throw new ApiError("La qualification ne correspond pas au déploiement actuel.");
     const format = formats[sourceQualification.family]!;

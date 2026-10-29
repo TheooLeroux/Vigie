@@ -5,6 +5,7 @@ import {
   type HostingConnectionInput,
 } from "./o2switch";
 import { ApiError } from "../http";
+import { inspectableSource } from "../updates/source-files";
 export type CpanelFile = { file: string; type: string; size: number };
 export function cpanelReadClient(
   raw: HostingConnectionInput,
@@ -86,6 +87,16 @@ export function cpanelReadClient(
     }
   }
   return {
+    async readSource(root: string, relative: string) {
+      const base = safePath(root);
+      if (!relative || relative.startsWith("/") || /[\\\x00-\x1f]/.test(relative) || relative.split("/").some(part => !part || part === "." || part === "..") || !inspectableSource(relative)) throw new ApiError("Source hors du périmètre autorisé.");
+      const path = posix.join(base, relative);
+      if (!path.startsWith(base + "/")) throw new ApiError("Source hors du site.");
+      const data = await api("Fileman/get_file_content", { dir: posix.dirname(path), file: posix.basename(path), charset: "utf-8" });
+      const content = typeof data === "string" ? data : (data as { content?: unknown })?.content;
+      if (typeof content !== "string") throw new ApiError("Source non lisible.", 502);
+      return content;
+    },
     async list(dir: string, onlyFiles?: string[]): Promise<CpanelFile[]> {
       const data = await api("Fileman/list_files", {
         dir: safePath(dir),
