@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { RecordLink } from "./record-link";
+import { useProjectRealtime } from "./project-realtime";
 import { EmptyState, formatDate } from "./ui";
 
 import { activityCategory as category } from "@/lib/activity-model";
@@ -62,6 +63,11 @@ export function ActivityPanel({
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const [remote, setRemote] = useState<{ items: Activity[]; total: number; page: number } | null>(null);
   const [loading, setLoading] = useState(!!request), [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
+  const { subscribe } = useProjectRealtime();
+  useEffect(() => subscribe(change => {
+    const selectedProject = projectId || project;
+    if (change.activity || (selectedProject ? change.activityProjects.includes(selectedProject) : change.activityProjects.length > 0)) setAttempt(value => value + 1);
+  }), [subscribe, projectId, project]);
   useEffect(() => {
     if (!request) return;
     const controller = new AbortController(); setLoading(true); setError(""); setRemote(null);

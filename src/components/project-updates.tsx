@@ -4,8 +4,10 @@ import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
 import { activeUpdateStages, type SecurityFinding, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
 import { updateStopSummary } from "@/lib/updates/stop-summary";
+import { createRefreshQueue } from "@/lib/project-realtime";
+import { useProjectRealtime } from "./project-realtime";
 
-type Request = (path: string, method?: string, payload?: unknown) => Promise<any>;
+type Request = (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
 function FindingDetails({ finding }: { finding: SecurityFinding }) {
   const level = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
   return <div><p><strong>{finding.title || finding.package}</strong></p><p><code>{finding.package}@{finding.version}</code> · {finding.aliases[0] || finding.id} · sévérité {level}</p>{finding.explanation && <p>{finding.explanation}</p>}{finding.fixedVersions?.length ? <p>Version(s) correctrice(s) référencée(s) : {finding.fixedVersions.join(", ")}. Leur compatibilité doit être vérifiée avant installation.</p> : null}{finding.url && <a href={finding.url} target="_blank" rel="noreferrer">Consulter la source du signalement</a>}</div>;
@@ -93,39 +95,36 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
-export function ProjectUpdates({ projectId, request, onComplete, onState }: { projectId: string; request: Request; onComplete: () => Promise<void>; onState?: (projectId: string, state: UpdateState | null) => void }) {
+export function ProjectUpdates({ projectId, request, onState }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void }) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
-  const alive = useRef(true), completed = useRef("");
-  const refreshing = useRef(false), lastAttempt = useRef(0);
+  const alive = useRef(true);
+  const refreshing = useRef(false);
+  const { subscribe } = useProjectRealtime();
   const [refreshingHosting, setRefreshingHosting] = useState(false), [hostingError, setHostingError] = useState("");
   const refreshHosting = useCallback(async () => {
     if (refreshing.current) return;
-    refreshing.current = true; lastAttempt.current = Date.now(); setRefreshingHosting(true);
+    refreshing.current = true; setRefreshingHosting(true);
     try {
       const response = await request("updates/refresh", "POST", { projectId });
       if (alive.current) { setState(response.state); onState?.(projectId, response.state); setHostingError(response.errors.join(" ")); }
     } catch (error) { if (alive.current) setHostingError(error instanceof Error ? error.message : "Actualisation non confirmée."); }
     finally { refreshing.current = false; if (alive.current) setRefreshingHosting(false); }
   }, [projectId, request, onState]);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`);
-      if (alive.current && !refreshing.current) { setState(next); setError(""); onState?.(projectId, next); }
-      if (alive.current && next.targets.some(target => target.provider !== "o2switch" && /expiré|contrôle .*indisponible/.test(target.unavailable || "")) && Date.now() - lastAttempt.current > 60_000) void refreshHosting();
+      const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`, "GET", undefined, { signal });
+      if (alive.current && !signal?.aborted && !refreshing.current) { setState(next); setError(""); onState?.(projectId, next); }
       return next;
-    } catch (error) { if (alive.current) onState?.(projectId, null); throw error; }
-  }, [projectId, request, onState, refreshHosting]);
+    } catch (error) { if (alive.current && !signal?.aborted) onState?.(projectId, null); throw error; }
+  }, [projectId, request, onState]);
   useEffect(() => {
     alive.current = true;
-    void refresh().catch(error => { if (alive.current) setError(error.message); });
-    const timer = setInterval(() => {
-      void refresh().then(next => {
-        const latest = next.runs[0];
-        if (latest?.stage === "completed" && completed.current !== latest.id) { completed.current = latest.id; void onComplete().catch(() => {}); }
-      }).catch(error => { if (alive.current) setError(error.message); });
-    }, 8000);
-    return () => { alive.current = false; clearInterval(timer); };
-  }, [refresh, onComplete]);
+    const controller = new AbortController();
+    const queue = createRefreshQueue(async () => { await refresh(controller.signal); }, error => { if (alive.current && !controller.signal.aborted) setError((error as Error).message); });
+    const unsubscribe = subscribe(change => { if (change.all || change.projects.includes(projectId)) queue.invalidate([projectId]); });
+    queue.invalidate([projectId]);
+    return () => { alive.current = false; controller.abort(); queue.dispose(); unsubscribe(); };
+  }, [refresh, subscribe, projectId]);
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const available = state?.targets.filter(target => !target.unavailable && (!target.capability || target.capability.status === "automatic" && target.capability.adapter)) || [];
   const unresolved = latest?.stage === "attention";

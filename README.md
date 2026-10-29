@@ -25,6 +25,8 @@ Les étapes et URL exactes sont dans [docs/connexion-google.md](docs/connexion-g
 
 ## Plateau
 
+Les projets s’actualisent via [Neon Realtime](docs/projets-realtime.md), sans polling des données : informations, failles connues, avancement et historique suivent les modifications enregistrées par les utilisateurs et les workers.
+
 - Fiches clients avec contact, email, téléphone, site et notes.
 - Un client peut posséder plusieurs sites. Rattachement et changement de client depuis la fiche projet ou la fiche client.
 - Liste, recherche et filtres des sites, dont un filtre par client et « À rattacher ».

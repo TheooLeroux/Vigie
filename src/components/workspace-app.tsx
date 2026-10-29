@@ -35,6 +35,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ProjectSummaries, useProjectSummary } from "./project-summaries";
+import { ProjectRealtime, ProjectRealtimeStatus, useProjectRealtime } from "./project-realtime";
+import { createRefreshQueue } from "@/lib/project-realtime";
 import { observedInventory } from "@/lib/project-summary";
 import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
@@ -183,12 +185,16 @@ function Status({ project, data, detail }: { project: Project; data: WorkspaceDa
     </span>
   );
 }
-export function WorkspaceApp({
+export function WorkspaceApp({ user }: { user: { name: string; email: string } }) {
+  return <ProjectRealtime><WorkspaceContent user={user} /></ProjectRealtime>;
+}
+function WorkspaceContent({
   user,
 }: {
   user: { name: string; email: string };
 }) {
   const workspace: Workspace = "live";
+  const { subscribe } = useProjectRealtime();
   const [ready, setReady] = useState(false),
     [data, setData] = useState<WorkspaceData | null>(null),
     [error, setError] = useState("");
@@ -204,6 +210,8 @@ export function WorkspaceApp({
     [incompleteOnly, setIncompleteOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null),
     [detail, setDetail] = useState<ProjectDetail | null>(null);
+  const selectedRef = useRef(selected), workspaceRead = useRef(0), detailRead = useRef(0);
+  selectedRef.current = selected;
   const [projectTab, setProjectTab] = useState<ProjectTab>("overview");
   const [dialog, setDialog] = useState<Dialog>(null),
     [editService, setEditService] = useState<Service | undefined>(),
@@ -254,54 +262,53 @@ export function WorkspaceApp({
       } catch {
         throw new Error("Le serveur n’a pas renvoyé une réponse valide.");
       }
-      if (!response.ok) throw new Error(json.error || "L’opération a échoué.");
+      if (!response.ok) throw Object.assign(new Error(json.error || "L’opération a échoué."), { status: response.status });
       return json;
     },
     [workspace],
   );
-  const refresh = useCallback(async () => {
-    const next = await api("workspace");
-    setData(next);
-    if (selected) {
-      const d = await api(`projects/${selected}`);
-      setDetail(d);
+  const readWorkspace = useCallback(async (signal?: AbortSignal) => {
+    const revision = ++workspaceRead.current;
+    const next: WorkspaceData = await api("workspace", "GET", undefined, { signal });
+    if (!signal?.aborted && revision === workspaceRead.current) {
+      setData(next);
+      setSelected(current => current && !next.projects.some(project => project.id === current) ? null : current);
     }
-  }, [api, selected]);
+  }, [api]);
+  const readDetail = useCallback(async (id: string, signal?: AbortSignal) => {
+    const revision = ++detailRead.current;
+    const next = await api(`projects/${id}`, "GET", undefined, { signal });
+    if (!signal?.aborted && revision === detailRead.current && selectedRef.current === id) setDetail(next);
+  }, [api]);
+  const refresh = useCallback(async () => {
+    await Promise.all([readWorkspace(), selected ? readDetail(selected) : Promise.resolve()]);
+  }, [readWorkspace, readDetail, selected]);
   useEffect(() => {
     if (!ready) return;
-    let cancelled = false;
-    setData(null);
+    const controller = new AbortController();
     setError("");
-    api("workspace")
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [api, ready]);
+    const queue = createRefreshQueue(() => readWorkspace(controller.signal), error => { if (!controller.signal.aborted) setError((error as Error).message); });
+    const unsubscribe = subscribe(change => { if (change.workspace) queue.invalidate(["workspace"]); });
+    queue.invalidate(["workspace"]);
+    return () => { controller.abort(); queue.dispose(); unsubscribe(); };
+  }, [readWorkspace, ready, subscribe]);
   useEffect(() => {
     if (!ready || !selected) {
       setDetail(null);
       return;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     setDetail(null);
     setError("");
-    api(`projects/${selected}`)
-      .then((d) => {
-        if (!cancelled) setDetail(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [api, selected, ready]);
+    const queue = createRefreshQueue(() => readDetail(selected, controller.signal), error => {
+      if (controller.signal.aborted) return;
+      if ((error as { status?: number }).status === 404) { setSelected(null); setDetail(null); }
+      else setError((error as Error).message);
+    });
+    const unsubscribe = subscribe(change => { if (change.all || change.projects.includes(selected)) queue.invalidate([selected]); });
+    queue.invalidate([selected]);
+    return () => { controller.abort(); queue.dispose(); unsubscribe(); };
+  }, [readDetail, selected, ready, subscribe]);
   useEffect(() => {
     const keyboard = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
@@ -636,7 +643,7 @@ export function WorkspaceApp({
         </div>
         <div className="project-content project-tab-panel" id="project-panel-overview" role="tabpanel" aria-labelledby="project-tab-overview" hidden={projectTab !== "overview"} tabIndex={0}>
           <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onComplete={refresh} onState={onProjectUpdateState} />
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} />
         </div>
         <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
           <section
@@ -1006,6 +1013,7 @@ export function WorkspaceApp({
           </div>
         </header>
         <main className="main-content">
+          {(view === "sites" || view === "clients") && <ProjectRealtimeStatus />}
           {error && !selected && (
             <div className="error-banner" role="alert">
               {error}
