@@ -7,9 +7,9 @@ import { updateStageLabels } from "./project-updates";
 export function BackupsPanel({ request, onProject }: { request: (path: string) => Promise<any>; onProject: (id: string) => void }) {
   const [data, setData] = useState<RecordedBackups | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [attempt, setAttempt] = useState(0);
   useEffect(() => { let alive = true; setData(null); setError(""); request("backups").then(value => { if (alive) setData(value); }).catch(error => { if (alive) setError(error.message); }); return () => { alive = false; }; }, [request, attempt]);
-  return <section className="panel"><h2>Sauvegardes et références de reprise</h2>
-    <p>Sauvegardes WordPress et références de code consignées pendant les maintenances. Leur présence actuelle chez l’hébergeur n’est pas vérifiée par cette liste.</p>
-    <p>Une référence Git ou un ancien déploiement couvre le code, sans sauvegarder la base ni les fichiers envoyés par les utilisateurs. Les restaurations restent manuelles : conservez d’abord les données actuelles et vérifiez la compatibilité de la sauvegarde.</p>
+  return <section className="panel project-updates"><div className="panel-heading"><h2>Sauvegardes et références de reprise</h2></div>
+    <p className="updates-note">Sauvegardes WordPress et références de code consignées pendant les maintenances. Leur présence actuelle chez l’hébergeur n’est pas vérifiée par cette liste.</p>
+    <p className="updates-note">Une référence Git ou un ancien déploiement couvre le code, sans sauvegarder la base ni les fichiers envoyés par les utilisateurs. Les restaurations restent manuelles : conservez d’abord les données actuelles et vérifiez la compatibilité de la sauvegarde.</p>
     {error && <p role="alert">{error} <button className="text-button" disabled={busy} onClick={() => setAttempt(value => value + 1)}>Réessayer</button></p>}
     {!data && !error && <p role="status">Chargement des sauvegardes…</p>}
     {data && !data.items.length && <p>Aucune sauvegarde ou référence de reprise enregistrée. Les sauvegardes réalisées directement chez l’hébergeur ne sont pas inventoriées ici.</p>}
