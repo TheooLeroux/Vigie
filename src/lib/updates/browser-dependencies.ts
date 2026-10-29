@@ -29,7 +29,7 @@ export function browserDependencies(files: { path: string; content: string }[]) 
       const pathname = decodeURIComponentSafe(url.pathname);
       const npm = url.hostname === "cdn.jsdelivr.net" ? pathname.match(/^\/npm\/((?:@[^/]+\/)?[^/@]+)@([^/]+)/) : ["unpkg.com", "esm.sh", "cdn.skypack.dev"].includes(url.hostname) ? pathname.match(/^\/((?:@[^/]+\/)?[^/@]+)@([^/]+)/) : null;
       if (npm) [, name, version] = npm;
-      if (url.hostname === "cdnjs.cloudflare.com") { const match = pathname.match(/^\/ajax\/libs\/([^/]+)\/([^/]+)\//); if (match) { name = match[1] === "font-awesome" ? Number(match[2].split(".")[0]) >= 5 ? "@fortawesome/fontawesome-free" : "font-awesome" : aliases[match[1]]; version = match[2]; } }
+      if (url.hostname === "cdnjs.cloudflare.com") { const match = pathname.match(/^\/ajax\/libs\/([^/]+)\/([^/]+)\//); if (match) { name = match[1].toLowerCase() === "font-awesome" ? Number(match[2].split(".")[0]) >= 5 ? "@fortawesome/fontawesome-free" : "font-awesome" : aliases[match[1].toLowerCase()]; version = match[2]; } }
       if (url.hostname === "code.jquery.com") { const match = pathname.match(/^\/jquery-([0-9.]+)(?:\.slim)?(?:\.min)?\.js$/); if (match) { name = "jquery"; version = match[1]; } }
       if (name && packageName.test(name) && version && valid(version)) inventory.push({ name, version: valid(version)!, origin: file.path });
       else limitations.add(`${file.path} : bibliothèque externe sans identité/version vérifiable (${url.hostname}).`);

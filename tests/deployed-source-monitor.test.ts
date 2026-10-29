@@ -54,6 +54,8 @@ test("Bibliothèques navigateur : CDN exacts, imports, alias et versions non ré
   assert.deepEqual(result.inventory.map(i => i.name), ["jspdf", "@scope/lib", "@fortawesome/fontawesome-free", "react"]);
   assert.equal(result.limitations.length, 2); assert.ok(result.limitations.every(x => !x.includes("googleapis")));
   assert.equal(inspectableSource(".env"), false); assert.equal(inspectableSource("secrets.js"), false); assert.equal(inspectableSource("js/config.js"), true);
+  const chart = browserDependencies([{ path: "index.html", content: '<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>' }]);
+  assert.deepEqual(chart.inventory, [{ name: "chart.js", version: "4.4.4", origin: "index.html" }]); assert.deepEqual(chart.limitations, []);
 });
 
 test("Catalogue OSV : pagination complète et aucune transmission de code ou de jeton", async () => {
