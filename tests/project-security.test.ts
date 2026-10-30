@@ -67,7 +67,8 @@ test("Fiche : intitulé et correction du signalement conservés, failles les plu
   assert.ok(html.indexOf("Exécution de code à distance") < html.indexOf("library-0"));
   assert.ok(html.indexOf("library-0") < html.indexOf("Voir les 2 autres signalements"));
   assert.ok(html.indexOf("Voir les 2 autres signalements") < html.indexOf("library-5"));
-  assert.doesNotMatch(html, /<details[^>]*open/);
+  assert.match(html, /<details class="security-findings-block" open="">/);
+  assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
 
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {
@@ -94,10 +95,10 @@ test("Fiche : les mêmes dépendances vulnérables sont attribuées à leur bloc
   state.automaticControls!.push({ ...report, targetId: secondTarget.id, identity: controlSource(secondTarget, detail)!.identity });
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /2 failles connues/);
-  const blocks = html.split('<section class="security-findings-block"').slice(1).map(section => section.split("</section>")[0]);
+  const blocks = html.split('<details class="security-findings-block"').slice(1).map(section => section.split("</details>")[0]);
   assert.equal(blocks.length, 2);
-  const backend = blocks.find(block => block.includes('aria-label="Bloc : Backend"'));
-  const tailscale = blocks.find(block => block.includes('aria-label="Bloc : tailscale"'));
+  const backend = blocks.find(block => block.includes('Bloc : <strong>Backend</strong>'));
+  const tailscale = blocks.find(block => block.includes('Bloc : <strong>tailscale</strong>'));
   assert.ok(backend);
   assert.ok(tailscale);
   for (const block of [backend, tailscale]) {

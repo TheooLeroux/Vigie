@@ -38,11 +38,11 @@ function Findings({ items }: { items: ProjectVulnerability[] }) {
   return <div className="security-findings-group">{[...blocks].map(([targetId, entries]) => {
     const visible = entries.filter(item => visibleKeys.has(item.key));
     const remaining = entries.filter(item => !visibleKeys.has(item.key));
-    return <section className="security-findings-block" aria-label={`Bloc : ${entries[0].service}`} key={targetId}>
-      <div className="security-block-heading"><h3><span>Bloc :</span> {entries[0].service}</h3><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></div>
+    return <details className="security-findings-block" open={visible.length > 0} key={targetId}>
+      <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
       {visible.length > 0 && <FindingRows items={visible} />}
       {remaining.length > 0 && <details className="health-details security-more"><summary>Voir les {remaining.length} autres signalements</summary><FindingRows items={remaining} /></details>}
-    </section>;
+    </details>;
   })}</div>;
 }
 

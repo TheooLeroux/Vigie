@@ -113,10 +113,16 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .project-security-card .security-coverage-note { color: var(--muted); font-size: 11px; }
 .security-findings-group { width: 100%; min-width: 0; }
 .security-findings-block + .security-findings-block { margin-top: 14px; }
-.security-block-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 10px; margin-bottom: 4px; border-radius: 5px; background: var(--soft); }
-.project-health-card .security-block-heading h3 { margin: 0; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
-.security-block-heading h3 > span { color: var(--text); font-weight: 400; }
-.security-block-heading > small { flex-shrink: 0; }
+.security-block-heading { display: flex; align-items: baseline; gap: 10px; padding: 9px 10px; border-radius: 5px; background: var(--soft); cursor: pointer; list-style: none; }
+.security-block-heading::-webkit-details-marker { display: none; }
+.security-block-heading::before { content: "›"; color: var(--muted); font-size: 16px; line-height: 1; }
+.security-findings-block[open] > .security-block-heading { margin-bottom: 4px; }
+.security-findings-block[open] > .security-block-heading::before { transform: rotate(90deg); }
+.security-block-heading:hover { background: var(--line); }
+.security-block-heading:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+.security-block-name { min-width: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.security-block-name > strong { color: var(--ink); }
+.security-block-heading > small { margin-left: auto; flex-shrink: 0; }
 .project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
 .project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
 .project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }
