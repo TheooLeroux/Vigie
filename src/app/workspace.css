@@ -112,6 +112,11 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .project-security-card .security-severities { margin: 0; gap: 6px; }
 .project-security-card .security-coverage-note { color: var(--muted); font-size: 11px; }
 .security-findings-group { width: 100%; min-width: 0; }
+.security-findings-block + .security-findings-block { margin-top: 14px; }
+.security-block-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 10px; margin-bottom: 4px; border-radius: 5px; background: var(--soft); }
+.project-health-card .security-block-heading h3 { margin: 0; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+.security-block-heading h3 > span { color: var(--text); font-weight: 400; }
+.security-block-heading > small { flex-shrink: 0; }
 .project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
 .project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
 .project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }

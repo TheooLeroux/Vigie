@@ -83,6 +83,29 @@ test("Couverture : un scan complet sans alerte donne un zéro borné à son pér
   assert.doesNotMatch(html, /Contrôles incomplets|Non vérifiable/);
 });
 
+test("Fiche : les mêmes dépendances vulnérables sont attribuées à leur bloc respectif", () => {
+  const { detail, target, report, state } = fixture();
+  const service = structuredClone(detail.railway![0].services[0]);
+  service.id = "tailscale";
+  service.name = "tailscale";
+  detail.railway![0].services.push(service);
+  const secondTarget = { ...target, id: "tailscale-target", remoteId: service.id, name: service.name };
+  state.targets.push(secondTarget);
+  state.automaticControls!.push({ ...report, targetId: secondTarget.id, identity: controlSource(secondTarget, detail)!.identity });
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(html, /2 failles connues/);
+  const blocks = html.split('<section class="security-findings-block"').slice(1).map(section => section.split("</section>")[0]);
+  assert.equal(blocks.length, 2);
+  const backend = blocks.find(block => block.includes('aria-label="Bloc : Backend"'));
+  const tailscale = blocks.find(block => block.includes('aria-label="Bloc : tailscale"'));
+  assert.ok(backend);
+  assert.ok(tailscale);
+  for (const block of [backend, tailscale]) {
+    assert.match(block, /CVE-2026-12345/);
+    assert.match(block, /1 signalement/);
+  }
+});
+
 test("Couverture : aucun zéro depuis un runtime seul, un service absent ou un rapport vide", () => {
   const { detail, state, report } = fixture([]);
   report.checks = [];

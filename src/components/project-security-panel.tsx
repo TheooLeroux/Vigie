@@ -8,12 +8,12 @@ const severityLabels = { critical: "Critique", high: "Élevée", moderate: "Mod�
 const usageLabels = { runtime: "Dépendance de production", build: "Développement / construction", unknown: "Usage à qualifier" };
 const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
 
-function Findings({ items }: { items: ProjectVulnerability[] }) {
-  const rows = (entries: ProjectVulnerability[]) => <ul className="security-findings">{entries.map(item => <li key={item.key}>
+function FindingRows({ items }: { items: ProjectVulnerability[] }) {
+  return <ul className="security-findings">{items.map(item => <li key={item.key}>
     <details className="security-finding">
       <summary>
         <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
-        <span className="security-finding-content"><strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong><span>{item.package} <span className="security-version">{item.version}</span> · {item.service}</span></span>
+        <span className="security-finding-content"><strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong><span>{item.package} <span className="security-version">{item.version}</span></span></span>
         <span className="security-finding-reference">{item.id}</span>
       </summary>
       <div className="security-finding-body">
@@ -25,7 +25,25 @@ function Findings({ items }: { items: ProjectVulnerability[] }) {
       </div>
     </details>
   </li>)}</ul>;
-  return <div className="security-findings-group">{rows(items.slice(0, 5))}{items.length > 5 && <details className="health-details security-more"><summary>Voir les {items.length - 5} autres signalements</summary>{rows(items.slice(5))}</details>}</div>;
+}
+
+function Findings({ items }: { items: ProjectVulnerability[] }) {
+  const blocks = new Map<string, ProjectVulnerability[]>();
+  const visibleKeys = new Set(items.slice(0, 5).map(item => item.key));
+  for (const item of items) {
+    const entries = blocks.get(item.targetId) || [];
+    entries.push(item);
+    blocks.set(item.targetId, entries);
+  }
+  return <div className="security-findings-group">{[...blocks].map(([targetId, entries]) => {
+    const visible = entries.filter(item => visibleKeys.has(item.key));
+    const remaining = entries.filter(item => !visibleKeys.has(item.key));
+    return <section className="security-findings-block" aria-label={`Bloc : ${entries[0].service}`} key={targetId}>
+      <div className="security-block-heading"><h3><span>Bloc :</span> {entries[0].service}</h3><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></div>
+      {visible.length > 0 && <FindingRows items={visible} />}
+      {remaining.length > 0 && <details className="health-details security-more"><summary>Voir les {remaining.length} autres signalements</summary><FindingRows items={remaining} /></details>}
+    </section>;
+  })}</div>;
 }
 
 export function ProjectSecurityPanel({ detail, updates, health, unavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean }) {
