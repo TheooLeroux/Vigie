@@ -12,6 +12,7 @@ import type { SourceSettings, UpdateTarget } from "./types";
 import type { HostingInstallationView } from "../types";
 import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
 import { refreshWordPressWeb } from "./wordpress-web-check";
+import { wordpressLoadFailureMessage } from "../connectors/wordpress-load-failure";
 
 type Installation = NonNullable<SourceSettings["agentInstallation"]>;
 async function lockSource(targetId: string, projectId: string) {
@@ -72,7 +73,8 @@ async function prepareSite(id: string) {
     await refreshWordPressWeb({ remoteId: id, connectionId: site.connectionId, url: null }, "inventory");
     site = await hostingInstallation(id);
   }
-  if (!site.inventory?.php || site.inventory.source !== "wordpress-observer" || site.inventory.error || site.inventory.collectionMode === "early" || !site.inventory.observedAt || !Number.isFinite(Date.parse(site.inventory.observedAt)) || Math.abs(Date.now() - Date.parse(site.inventory.observedAt)) > 5 * 60_000) throw new ApiError("L’agent attend un inventaire WordPress récent avec le PHP web.");
+  if (site.inventory?.collectionMode === "early") throw new ApiError(`${site.inventory.loadFailure ? wordpressLoadFailureMessage(site.inventory.loadFailure) : "Le chargement complet de WordPress échoue après le chargement des extensions."} L’inventaire partiel ne permet pas de préparer l’agent.`);
+  if (!site.inventory?.php || site.inventory.source !== "wordpress-observer" || site.inventory.error || !site.inventory.observedAt || !Number.isFinite(Date.parse(site.inventory.observedAt)) || Math.abs(Date.now() - Date.parse(site.inventory.observedAt)) > 5 * 60_000) throw new ApiError("L’agent attend un inventaire WordPress récent avec le PHP web.");
   return site;
 }
 export async function processAgentInstallation(id: string, requestId?: string, dependencies: { prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}) {

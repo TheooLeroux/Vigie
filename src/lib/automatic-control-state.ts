@@ -9,7 +9,7 @@ export type SecurityCoverageDetails = {
   scope: "dependencies" | "wordpress" | "image" | "sources";
   limitations: string[];
   packages?: number;
-  source?: "github" | "vercel" | "hosting";
+  source?: "github" | "vercel" | "hosting" | "railway";
   deploymentId?: string;
   files?: number;
   filesRead?: string[];
@@ -22,6 +22,7 @@ export type AutomaticControl = {
   targetId: string;
   identity: string;
   attemptedAt: string;
+  attemptRevision?: string;
   checkedAt?: string;
   checks: UpdateCheck[];
   updates: string[];
@@ -69,6 +70,7 @@ export function controlSource(target: UpdateTarget, detail: ProjectDetail) {
     }
     if (!project || !recent(project.observedAt) || !active?.length || active.some(deployment => deployment.status !== "SUCCESS" || deployment.evidence?.repository !== target.repository || root(deployment.evidence?.rootDirectory) !== target.root)) return null;
     commit = active[0].evidence?.commit || null;
+    if (active.length === 1) deploymentId = active[0].id;
     if (active.some(deployment => deployment.evidence?.commit !== commit)) return null;
     deployments = active.map(deployment => [deployment.id, deployment.evidence?.commit, deployment.evidence?.imageDigest]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   } else if (target.provider === "o2switch") {
@@ -88,8 +90,8 @@ export function controlMatches(control: AutomaticControl, target: UpdateTarget, 
   return source?.identity === control.identity || control.coverage === "partial" && control.identity === "unavailable" && !source;
 }
 
-export function automaticControlDue(previous: AutomaticControl | null, identity: string, now = Date.now(), force = false) {
-  if (!previous || previous.identity !== identity || force) return true;
+export function automaticControlDue(previous: AutomaticControl | null, identity: string, now = Date.now(), force = false, forceRevision?: string) {
+  if (!previous || previous.identity !== identity || force && (!forceRevision || previous.attemptRevision !== forceRevision)) return true;
   // Retry failures after five minutes, independently of the hourly success cadence.
   const age = now - Date.parse(previous.attemptedAt);
   return previous.error ? !Number.isFinite(age) || age < 0 || age >= 5 * 60_000 : !automaticControlFresh(previous, now);

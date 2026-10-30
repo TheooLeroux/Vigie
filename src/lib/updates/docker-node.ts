@@ -63,12 +63,13 @@ export async function readDockerNode(target: UpdateTarget, deploymentId: string,
 }
 
 // Shared short-lived SSH lifecycle; probes provide only fixed, read-only commands.
-export async function readRailwayProbe<T extends object>(target: UpdateTarget, deploymentId: string, probe: { command: (nonce: string) => string; parse: (output: string, nonce: string) => T }, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
+export async function readRailwayProbe<T extends object>(target: UpdateTarget, deploymentId: string, probe: { command: (nonce: string) => string; parse: (output: string, nonce: string) => T; maxInstances?: number }, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
   identifier.parse(deploymentId);
   if (target.provider !== "railway") throw new ApiError("Sonde réservée aux conteneurs Railway.", 422);
+  const maxInstances = z.number().int().min(1).max(32).parse(probe.maxInstances ?? 32);
   async function instances() {
     const raw = await dependencies.request(target, instancesQuery, { id: deploymentId });
-    const data = z.object({ deployment: z.object({ id: z.literal(deploymentId), status: z.literal("SUCCESS"), instances: z.array(z.object({ id: identifier, status: z.literal("RUNNING") })).min(1).max(32) }) }).safeParse(raw);
+    const data = z.object({ deployment: z.object({ id: z.literal(deploymentId), status: z.literal("SUCCESS"), instances: z.array(z.object({ id: identifier, status: z.literal("RUNNING") })).min(1).max(maxInstances) }) }).safeParse(raw);
     if (!data.success) throw new ApiError("Les instances du déploiement ne sont pas toutes actives. Attestation du conteneur non confirmée.", 422);
     const ids = data.data.deployment.instances.map(instance => instance.id).sort();
     if (new Set(ids).size !== ids.length) throw new ApiError("Instances dupliquées dans l’attestation de déploiement.", 422);

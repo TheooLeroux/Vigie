@@ -70,6 +70,8 @@ export type UpdateRun = {
   stage: UpdateStage;
   createdAt: string;
   updatedAt: string;
+  startedAt?: string;
+  lastProgressAt?: string;
   actor: { name: string; email: string };
   targets: UpdateTarget[];
   results: UpdateResult[];

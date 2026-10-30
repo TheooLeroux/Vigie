@@ -63,6 +63,7 @@ export type SiteInventory = {
   localAgent?: { detected: true; lastSeenAt: string };
   source: "cpanel-files" | "wordpress-observer";
   collectionMode?: "normal" | "early";
+  loadFailure?: { kind: "plugin" | "theme"; component: string; file: string; line: number; knownIssue?: "wp-rocket-wordpress-7.1" };
   observedAt: string | null;
   lastAttemptAt: string;
   error: string | null;

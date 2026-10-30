@@ -11,6 +11,7 @@ async function pace(address: string) {
     await new Promise((resolve) => setTimeout(resolve, start - now));
 }
 import { z } from "zod";
+import { parseWordPressLoadFailure, wordpressLoadFailureMessage } from "./wordpress-load-failure";
 import { ApiError } from "../http";
 import type { SiteInventory } from "../types";
 const text = z.string().max(500),
@@ -327,8 +328,27 @@ export async function collectObserver(
         429,
       );
     }
-    if (response.status >= 500 && !early)
-      return collectObserver(url, root, secret, transport, resolve, true);
+    if (response.status >= 500 && !early) {
+      let failure: SiteInventory["loadFailure"];
+      const reader = response.body?.getReader();
+      if (reader) {
+        const chunks: Uint8Array[] = [];
+        let bytes = 0;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) { failure = parseWordPressLoadFailure(JSON.parse(Buffer.concat(chunks).toString("utf8")), root); break; }
+            bytes += value.length;
+            if (bytes > 8192) { await reader.cancel(); break; }
+            chunks.push(value);
+          }
+        } catch { /* A diagnostic failure must not suppress the bounded fallback. */ }
+      }
+      const fallback = await collectObserver(url, root, secret, transport, resolve, true);
+      return failure && fallback.collectionMode === "early"
+        ? { ...fallback, loadFailure: failure, warnings: [...fallback.warnings, wordpressLoadFailureMessage(failure)] }
+        : fallback;
+    }
     if (!response.ok)
       throw new ApiError(
         response.status >= 300 && response.status < 400

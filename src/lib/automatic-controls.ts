@@ -14,19 +14,21 @@ import type { AutomaticControl } from "./automatic-control-state";
 import { scanDeployedImage } from "./updates/image-monitor";
 import { scanVercelSources } from "./updates/vercel-source-monitor";
 import { scanHostingSources } from "./updates/hosting-source-monitor";
+import { scanRailwaySources } from "./updates/railway-source-monitor";
+import { GitHubAccessError } from "./updates/github";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
-export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string) {
+export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string) {
   for (const project of (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active" && (!projectId || project.id === projectId))) {
     const detail = await observedProjectDetail(project.id, "live");
     for (const target of (await updateTargets(project.id)).filter(target => target.provider === provider)) {
-      if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force)) return true;
+      if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force, forceRevision)) return true;
     }
   }
   return false;
 }
 
-async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage">> {
+export async function scanAutomaticTarget(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>, readers = { dependencies: scanCurrentDependencies, railway: scanRailwaySources }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage" | "coverage">> {
   if (source.image) return scanDeployedImage(source.image);
   if (source.hosting) return scanHostingSources(target);
   if (target.provider === "vercel" && source.deploymentId) {
@@ -36,14 +38,21 @@ async function scan(target: UpdateTarget, source: NonNullable<ReturnType<typeof 
     }
     return scanVercelSources(target, source.deploymentId);
   }
-  if (target.mode !== "wordpress") return scanCurrentDependencies(target, source.commit);
+  if (target.mode !== "wordpress") {
+    try { return await readers.dependencies(target, source.commit); }
+    catch (error) {
+      if (error instanceof GitHubAccessError && target.provider === "railway" && source.deploymentId && source.commit) return readers.railway(target, source.deploymentId, source.commit);
+      throw error;
+    }
+  }
   const observation = await currentWordPressSecurity(target, { fresh: true });
   if (observation.error || !observation.check) throw new ApiError(observation.error || "Inventaire ou contrôle de sécurité WordPress indisponible.");
   return { checks: [observation.check], updates: [], warnings: observation.warnings, securityCoverage: observation.securityCoverage };
 }
 
-export async function reconcileAutomaticControls(options: { force?: boolean; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
+export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan: scanAutomaticTarget, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
   const result = { checked: 0, failed: 0, deferred: 0, limited: 0 };
+  const attemptRevision = options.forceRevision || (/^[a-f0-9]{40}$/i.test(process.env.GITHUB_SHA || "") ? process.env.GITHUB_SHA : undefined);
   await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId)), 3, async project => {
     try {
       const detail = await dependencies.detail(project.id, "live");
@@ -54,7 +63,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
           const source = controlSource(target, detail);
           const identity = source?.identity || "unavailable";
           const previous = await dependencies.read(target.id);
-          if (!automaticControlDue(previous, identity, Date.now(), options.force)) continue;
+          if (!automaticControlDue(previous, identity, Date.now(), options.force, options.forceRevision)) continue;
           const attemptedAt = new Date().toISOString();
           try {
             if (target.mode !== "wordpress" && !target.repository && !source?.image && !source?.deploymentId && !source?.hosting) throw new CoverageLimit(["database", "network", "image"].includes(target.capability?.family || "") ? "Image externe : une image publique accessible et une empreinte identique sur les déploiements actifs sont nécessaires au contrôle." : "Sources non disponibles ; relier un dépôt ou un inventaire vérifiable au déploiement.");
@@ -65,11 +74,11 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
             const currentTargets = await dependencies.targets(project.id);
             const current = currentTargets.find(item => item.id === target.id);
             if (fresh.project.lifecycle !== "active" || !current || controlSource(current, fresh)?.identity !== identity) throw new ApiError("Le déploiement a changé pendant le contrôle. Une reprise automatique est prévue.");
-            await dependencies.write({ targetId: target.id, identity, attemptedAt, checkedAt: new Date().toISOString(), ...observation });
+            await dependencies.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: new Date().toISOString(), ...observation });
             result.checked++;
           } catch (error) {
             if (error instanceof CoverageLimit) {
-              await dependencies.write({ targetId: target.id, identity, attemptedAt, checkedAt: attemptedAt, coverage: "partial", checks: [], updates: [], warnings: [error.message], ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}) });
+              await dependencies.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: attemptedAt, coverage: "partial", checks: [], updates: [], warnings: [error.message], ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}) });
               result.limited++; continue;
             }
             if (!(error instanceof ApiError)) {
@@ -79,7 +88,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; pro
               console.error(JSON.stringify({ targetId: target.id, kind, frames }));
             }
             const message = error instanceof ApiError ? error.message : "Le contrôle automatique n’a pas abouti. Nouvelle tentative au prochain passage ; consultez les accès et l’inventaire du projet.";
-            await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}), targetId: target.id, identity, attemptedAt, error: message });
+            await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}), targetId: target.id, identity, attemptedAt, attemptRevision, error: message });
             result.failed++;
           }
         } finally { await release(); }

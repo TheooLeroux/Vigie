@@ -203,6 +203,24 @@ test("observateur : HTTPS public, IP privées et redirections bloquées ; répon
     /redirige/,
   );
 });
+test("observateur : erreur PHP diagnostiquée après un repli signé valide, sans conserver sa trace", async () => {
+  const dns = (async () => [{ address: "109.234.161.69", family: 4 }]) as any;
+  let calls = 0;
+  const transport: typeof fetch = async (_url, options) => {
+    calls++;
+    if (calls === 1) return Response.json({ data: { error: { type: 1, file: root + "/wp-content/plugins/wp-rocket/inc/ThirdParty/Plugins/CDN/Cloudflare.php", line: 496, message: "Uncaught TypeError: substr(): Argument #1 ($string) must be of type string, int given\nsecret-in-stack" } } }, { status: 500 });
+    assert.deepEqual(JSON.parse(String(options?.body)), { refresh: false, mode: "early" });
+    return Response.json({ ...payload(), collectionMode: "early", nonce: (options!.headers as Record<string, string>)["X-Vigie-Nonce"] });
+  };
+  const inventory = await collectObserver("https://site.example.org/", root, secret, transport, dns);
+  assert.equal(calls, 2);
+  assert.equal(inventory.collectionMode, "early");
+  assert.equal(inventory.configuration, null);
+  assert.equal(inventory.loadFailure?.component, "wp-rocket");
+  assert.match(inventory.warnings.join(" "), /3\.23\.2\.2/);
+  assert.doesNotMatch(JSON.stringify(inventory), /secret-in-stack|Uncaught/);
+});
+
 test("secrets observateurs : chiffrés, authentifiés et liés à leur installation", () => {
   const sealed = sealConnectorSecret(secret, "site-a");
   assert.ok(!sealed.includes(secret));

@@ -11,6 +11,7 @@ import { createProject } from "../src/lib/db";
 import { createProjectSchema } from "../src/lib/validation";
 import { applyVercelSnapshot, linkVercelProject, saveVercelConnection } from "../src/lib/vercel";
 import { observedProjectDetail } from "../src/lib/project-observations";
+import { forcedControlRevision } from "../src/lib/control-force";
 import { updateTargets } from "../src/lib/updates/targets";
 import type { VercelProject } from "../src/lib/vercel-types";
 
@@ -52,6 +53,33 @@ test("Contrôle autonome : cadence horaire, nouveau déploiement et reprise des 
   assert.equal(automaticControlDue(failed, report.identity, now + 300_000), true);
   assert.equal(automaticControlDue({ ...report, checkedAt: "invalid" }, report.identity, now), true);
   assert.equal(automaticControlFresh(report, now - 1), false);
+});
+
+test("Contrôle autonome : un push et son déploiement ne forcent qu’une analyse par révision du moteur", async () => {
+  const { report, detail, target } = fixture(), now = Date.parse(report.checkedAt!), revision = "a".repeat(40);
+  const evaluated = { ...report, attemptRevision: revision };
+  assert.equal(automaticControlDue(evaluated, report.identity, now + 1, true, revision), false);
+  assert.equal(automaticControlDue(evaluated, report.identity, now + 1, true, "b".repeat(40)), true);
+  assert.equal(automaticControlDue(evaluated, "new-deployment", now + 1, true, revision), true);
+  assert.equal(automaticControlDue(evaluated, report.identity, now + controlInterval, true, revision), true);
+  assert.equal(automaticControlDue(evaluated, report.identity, now + 1, true), true, "La relance manuelle reste disponible");
+  assert.equal(automaticControlDue({ ...evaluated, error: "offline" }, report.identity, now + 1, true, revision), false);
+  assert.equal(automaticControlDue({ ...evaluated, error: "offline" }, report.identity, now + 300_000, true, revision), true);
+  let stored: AutomaticControl | null = null, scans = 0;
+  const dependencies = { projects: async () => [detail.project], detail: async () => detail, targets: async () => [target], scan: async () => { scans++; return { checks: report.checks, warnings: [], updates: [] }; }, read: async () => stored, write: async (value: AutomaticControl) => { stored = value; }, claim: async () => async () => {}, log: async () => {} };
+  await reconcileAutomaticControls({ force: true, forceRevision: revision }, dependencies);
+  await reconcileAutomaticControls({ force: true, forceRevision: revision }, dependencies);
+  assert.equal(scans, 1);
+  await reconcileAutomaticControls({ force: true, forceRevision: "b".repeat(40) }, dependencies);
+  assert.equal(scans, 2);
+});
+
+test("Contrôle autonome : révision automatique GitHub, relance manuelle et configuration invalide", () => {
+  const sha = "a".repeat(40);
+  for (const event of ["push", "deployment_status"]) assert.equal(forcedControlRevision({ GITHUB_EVENT_NAME: event, GITHUB_SHA: sha }), sha);
+  for (const event of ["schedule", "workflow_dispatch", undefined]) assert.equal(forcedControlRevision({ GITHUB_EVENT_NAME: event, GITHUB_SHA: sha }), undefined);
+  assert.equal(forcedControlRevision({ VIGIE_CONTROL_FORCE_REVISION: sha }), sha);
+  assert.throws(() => forcedControlRevision({ GITHUB_EVENT_NAME: "push", GITHUB_SHA: "invalid" }), /Révision/);
 });
 
 test("Contrôle autonome : verrou durable, récupération après arrêt et protection du nouveau propriétaire", async () => {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gt, valid } from "semver";
 import { ApiError } from "../http";
-import { githubRequest, githubUpdateToken } from "./github";
+import { githubRequest, githubUpdateToken, GitHubAccessError } from "./github";
 import { scanNodeSources, securityCheck } from "./security";
 import { latestPackageVersion } from "./versions";
 import { mapConcurrent, withPlanningSession } from "./planning";
@@ -18,7 +18,8 @@ export async function scanCurrentNode(target: UpdateTarget, commit: string | nul
   if (target.mode !== "git" || !target.repository) throw new CoverageLimit(target.unavailable?.startsWith("Image externe") ? "Image externe : l’analyse des dépendances npm ne couvre pas ce service. Un contrôle de l’image est nécessaire." : "Les sources de ce service ne sont pas reliées à un dépôt GitHub identifiable. L’analyse complète des dépendances est indisponible.");
   // Provider-bound read-only monitoring is independent of permission to publish
   // updates. The token's existing repository read rights still apply.
-  if (!/^[\w.-]+\/[\w.-]+$/.test(target.repository) || !githubUpdateToken(target.repository)) throw new ApiError("L’accès GitHub en lecture aux sources de ce service est indisponible.");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(target.repository)) throw new ApiError("L’accès GitHub en lecture aux sources de ce service est indisponible.");
+  if (!githubUpdateToken(target.repository)) throw new GitHubAccessError(401, "L’accès GitHub en lecture aux sources de ce service est indisponible.");
   if (!commit || !/^[a-f0-9]{40}$/.test(commit)) throw new ApiError("Le commit réellement déployé doit être identifié avant l’analyse.");
   if (target.root && (target.root.split("/").some(part => !part || part === "." || part === "..") || /[\\\x00-\x1f]/.test(target.root))) throw new ApiError("Répertoire source invalide.");
   const repository = target.repository, token = githubUpdateToken(repository);

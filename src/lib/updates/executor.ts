@@ -16,6 +16,7 @@ import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPre
 import { activeNodeImage, confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
 import { completedNodeRuns, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { createUpdateProgressTracker } from "./progress";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import { executeLocalWordPress } from "./wordpress-agent-execution";
@@ -507,15 +508,16 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
   const run = await readUpdateRun(id);
   if (!run) return false;
   run.stage = "checking";
+  run.startedAt ||= new Date().toISOString();
   run.workflowRunId = process.env.GITHUB_RUN_ID;
   let writes = Promise.resolve();
-  const progress: Progress = (stage, message) => {
-    run.stage = stage;
-    run.message = message;
+  const trackProgress = createUpdateProgressTracker(run);
+  const persist = () => {
     writes = writes.then(() => writeUpdateRun(run));
     return writes;
   };
-  const heartbeat = setInterval(() => { void progress(run.stage, run.message).catch(() => {}); }, 30_000);
+  const progress: Progress = (stage, message) => { trackProgress(stage, message); return persist(); };
+  const heartbeat = setInterval(() => { void persist().catch(() => {}); }, 30_000);
   try {
     await withAuditActor(run.actor, async () => {
       await progress("checking", "Vérification des accès et de la configuration du projet.");
@@ -578,6 +580,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
   } finally {
     clearInterval(heartbeat);
     await writes;
+    trackProgress(run.stage, run.message);
     await transaction(async () => {
       await writeUpdateRun(run);
       if (run.stage !== "attention") await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(id);

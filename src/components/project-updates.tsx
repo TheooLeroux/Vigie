@@ -4,6 +4,7 @@ import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
 import { activeUpdateStages, type SecurityFinding, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
 import { updateStopSummary } from "@/lib/updates/stop-summary";
+import { updateProgressStatus } from "@/lib/updates/progress";
 import { createRefreshQueue } from "@/lib/project-realtime";
 import { useProjectRealtime } from "./project-realtime";
 
@@ -56,13 +57,14 @@ export function ManagedNodeNotice({ run }: { run?: UpdateRun }) {
 }
 export function UpdateProgress({ run }: { run: UpdateRun }) {
   const active = activeUpdateStages.includes(run.stage);
-  const delayed = active && Date.now() - Date.parse(run.updatedAt) > 10 * 60_000;
+  const { heartbeatMissing: delayed, noConfirmedProgress } = updateProgressStatus(run);
   const stopped = updateStopSummary(run);
   return <div className={`updates-progress ${run.stage}`} role="status" aria-live="polite">
     {active ? <Loader2 size={18} className="spin" /> : run.stage === "completed" ? <Check size={18} /> : <CircleAlert size={18} />}
     <div><strong>{delayed ? "Le traitement met plus de temps que prévu" : stopped?.title || updateStageLabels[run.stage]}</strong><p>{delayed ? "Vigie attend une confirmation de l’exécuteur. Ne relancez pas une deuxième mise à jour." : stopped?.reason || run.message}</p>
       {stopped && <><p>{stopped.notice}</p>{stopped.findings.length > 0 && <><p>Derniers signalements relevés pendant cette tentative :</p><ul>{stopped.findings.map(({target, finding}, index) => <li key={index}><strong>{target} · {finding.package} {finding.version}</strong> : {finding.aliases[0] || finding.id}. {finding.fixedVersions?.length ? `Correctifs référencés : ${finding.fixedVersions.join(", ")} ; compatibilité à valider.` : "Aucun correctif référencé dans ce rapport."}</li>)}</ul>{stopped.additionalFindings > 0 && <p>{stopped.additionalFindings} autre(s) signalement(s) dans le compte rendu détaillé.</p>}</> }</>}
-      <small>{formatDate(run.updatedAt)}</small></div>
+      {noConfirmedProgress && !delayed && <p>Aucune nouvelle étape confirmée depuis au moins 15 minutes. L’exécuteur répond encore ; l’étape en cours reste à vérifier.</p>}
+      <small>{run.lastProgressAt ? `Dernière progression : ${formatDate(run.lastProgressAt)} · Activité de l’exécuteur : ` : ""}{formatDate(run.updatedAt)}</small></div>
   </div>;
 }
 function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTarget; projectId: string; request: Request; onSaved: () => Promise<void> }) {

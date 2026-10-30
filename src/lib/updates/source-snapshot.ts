@@ -15,7 +15,7 @@ export type SourceFile = { path: string; content: string };
 const generic: Record<string, string> = { "bun.lock": "npm", "composer.lock": "Packagist", "uv.lock": "PyPI", "poetry.lock": "PyPI", "Pipfile.lock": "PyPI", "pdm.lock": "PyPI", "pylock.toml": "PyPI", "go.mod": "Go", "Cargo.lock": "crates.io", "Gemfile.lock": "RubyGems", "gems.locked": "RubyGems" };
 
 // A snapshot is read-only evidence. No install, build or uploaded code is run.
-export async function scanSourceSnapshot(files: SourceFile[], options: { source: "vercel" | "github" | "hosting"; deploymentId?: string; limitations?: string[] }, dependencies = { node: scanNodeSources, generic: scanDependencyFiles, query: queryKnownPackages }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "securityCoverage" | "coverage">> {
+export async function scanSourceSnapshot(files: SourceFile[], options: { source: "vercel" | "github" | "hosting" | "railway"; deploymentId?: string; limitations?: string[] }, dependencies = { node: scanNodeSources, generic: scanDependencyFiles, query: queryKnownPackages }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "securityCoverage" | "coverage">> {
   if (!files.length || files.length > 500 || files.some(file => !file.path || file.path.startsWith("/") || /[\\\x00-\x1f]/.test(file.path) || file.path.split("/").some(part => part === ".." || part === ".")) || new Set(files.map(file => file.path)).size !== files.length) throw new ApiError("Inventaire de sources vide, ambigu ou trop volumineux.");
   const browser = browserDependencies(files.filter(file => /\.(?:html?|[cm]?jsx?|tsx?|css)$/i.test(file.path)));
   const limitations = [...options.limitations || [], ...browser.limitations];

@@ -1,5 +1,9 @@
 import { ApiError } from "../http";
 
+export class GitHubAccessError extends ApiError {
+  constructor(readonly githubStatus: 401 | 403 | 404, message = `GitHub refuse l’opération (${githubStatus}). Vérifiez les accès au dépôt.`) { super(message, 502); }
+}
+
 export function githubUpdateToken(repository: string) {
   const owner = repository.split("/")[0];
   const separate = process.env[`VIGIE_UPDATES_GITHUB_TOKEN_${owner.toUpperCase()}`]
@@ -20,7 +24,10 @@ export async function githubRequest(path: string, token: string, method = "GET",
     redirect: "error",
     signal: AbortSignal.timeout(25_000),
   });
-  if (!response.ok) throw new ApiError(`GitHub refuse l’opération (${response.status}). Vérifiez les accès au dépôt.`, 502);
+  if (!response.ok) {
+    if (method === "GET" && [401, 403, 404].includes(response.status)) throw new GitHubAccessError(response.status as 401 | 403 | 404);
+    throw new ApiError(`GitHub refuse l’opération (${response.status}). Vérifiez les accès au dépôt.`, 502);
+  }
   return response.status === 204 ? null : response.json();
 }
 export function updateRunner() {
