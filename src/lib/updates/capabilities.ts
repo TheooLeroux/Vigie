@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApiError } from "../http";
 import type { UpdateTarget } from "./types";
+import { tailscaleImage } from "./image-policy";
 
 export const sourceQualificationSchema = z.object({
   schema: z.literal(1), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), commit: z.string().regex(/^[a-f0-9]{40}$/), root: z.string().max(1000),
@@ -11,7 +12,7 @@ export type SourceQualification = z.infer<typeof sourceQualificationSchema>;
 export type MaintenanceCapability = {
   family: SourceQualification["family"] | "database" | "network" | "image";
   workload: "web" | "static" | "worker" | "scheduled" | "persistent" | "unknown";
-  adapter: "node-web" | "node-worker" | "node-static" | "wordpress" | null;
+  adapter: "node-web" | "node-worker" | "node-static" | "wordpress" | "railway-image" | null;
   status: "automatic" | "qualify" | "manual";
   label: string;
   reason: string;
@@ -49,7 +50,9 @@ export function maintenanceCapability(target: Pick<UpdateTarget, "provider" | "r
     const family = evidence.installation === "dolibarr" ? "dolibarr" : ["static", "next-static"].includes(evidence.installation) ? "static" : evidence.installation === "php" ? "php" : "unknown";
     return result(family, family === "static" ? "static" : "web", null, "manual", family === "dolibarr" ? "Dolibarr" : family === "static" ? "Fichiers statiques" : "Application à qualifier", "Cette application reste inventoriée ; sa maintenance demande un parcours dédié. Les autres services compatibles peuvent être traités.");
   }
-  if (evidence.image) return result(/postgres|mysql|mariadb|redis/i.test(evidence.image) ? "database" : /tailscale/i.test(evidence.image) ? "network" : "image", "persistent", null, "manual", "Image ou service persistant", "Image externe : version, données et récupération à qualifier séparément du moteur Node.");
+  if (evidence.image) return target.provider === "railway" && tailscaleImage(evidence.image)
+    ? result("network", "persistent", "railway-image", "automatic", "Image Tailscale · Railway", "Image stable officielle analysée avant remplacement ; proxy SOCKS sortant, configuration, reconnexion et accès réseau contrôlés. Les usages persistants ou personnalisés demandent une qualification séparée.")
+    : result(/postgres|mysql|mariadb|redis/i.test(evidence.image) ? "database" : /tailscale/i.test(evidence.image) ? "network" : "image", "persistent", null, "manual", "Image ou service persistant", "Cette image exige un adaptateur de maintenance qualifié pour ses données et sa récupération.");
   if (evidence.cron) return result("unknown", "scheduled", null, "manual", "Tâche planifiée", "Qualifier la source, le résultat de tâche et la récupération avant d’automatiser cette tâche.");
   if (target.provider === "vercel" && evidence.runtimes?.some(runtime => !/^nodejs/.test(runtime))) return result("mixed", "unknown", null, "qualify", "Environnement d’exécution à qualifier", "Des fonctions autres que Node sont observées. Leur compatibilité ne peut pas être déduite d’une sonde Node.");
   const source = matchingQualification(evidence.source, target.repository, target.root, evidence.commit);

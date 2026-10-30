@@ -99,6 +99,7 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   if (!target) throw new ApiError("Service introuvable.", 404);
   if (target.provider === "o2switch" && target.mode !== "wordpress") throw new ApiError("Cette application demande un parcours de maintenance dédié ; ses sources ne sont pas traitées comme une archive Node.", 422);
   if (target.mode === "git") throw new ApiError("Les sources de ce service sont gérées par GitHub.");
+  if (target.mode === "image") throw new ApiError("L’image et ses accès sont gérés par le connecteur Railway ; aucune archive source n’est nécessaire.", 422);
   if (target.mode === "wordpress" && input.localAgent) return { configured: false, ...(await requestAgentInstallation(target.remoteId, undefined, true)) };
   if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
   const scope = updateScope(target), db = await updateStorage();

@@ -10,7 +10,8 @@ export type UpdateTarget = {
   branch: string | null;
   root: string;
   url: string | null;
-  mode: "git" | "archive" | "wordpress";
+  mode: "git" | "archive" | "wordpress" | "image";
+  image?: string;
   configured: boolean;
   unavailable: string | null;
   builder?: string;
@@ -60,6 +61,7 @@ export type UpdateResult = {
   checks?: UpdateCheck[];
   manualUpdates?: WordPressManualUpdate[];
   managedNode?: ManagedNode;
+  imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; rollbackDeploymentId?: string };
 };
 export type UpdateRun = {
   nodeReceipts?: import("./node-current").NodeValidationReceipt[];

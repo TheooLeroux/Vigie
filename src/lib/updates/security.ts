@@ -8,6 +8,7 @@ import { runCommand } from "./process";
 import { createHash } from "node:crypto";
 import type { SecurityFinding, UpdateCheck, UpdateResult } from "./types";
 import { wordpressBlockingMessage } from "./wordpress-blocking";
+import { verifiedImageResiduals } from "./image-policy";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().regex(/^\d+\.\d+\.\d+$/)).max(200).optional() });
@@ -67,6 +68,7 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
       if (!previous || check.phase !== "before" || previous.phase === "before") latest.set(check.tool, check);
     }
     for (const check of latest.values()) {
+      if (verifiedImageResiduals(result, check)) continue;
       const findings = check.tool === "WPVulnerability" && check.phase !== "before" ? check.findings.filter(finding => !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version)) : check.findings;
       if (!findings.length && check.status !== "blocked") continue;
       const failure = findings.length ? securityCheck(check.tool, "after", check.scope, findings) : check;

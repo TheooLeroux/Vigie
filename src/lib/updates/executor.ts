@@ -33,6 +33,8 @@ import { refreshProjectHosting } from "./refresh-hosting";
 import { buildStaticCandidate, qualifyStaticSources, staticPreflight, vercelStaticTarget, verifyStaticDeployment, type StaticBuild, type StaticProfile } from "./vercel-static";
 import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
 import { assertSourceImpact } from "./source-impact";
+import { executeRailwayImage } from "./railway-image";
+import { recordCompletedImageControls } from "./image-control";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -497,7 +499,7 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
     result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
   });
 }
-export async function executeUpdate(id: string, executeGroup = nodeGroup, executeWordPress = wordpressTarget, afterComplete = refreshUpdateInventories) {
+export async function executeUpdate(id: string, executeGroup = nodeGroup, executeWordPress = wordpressTarget, afterComplete = refreshUpdateInventories, executeImage = executeRailwayImage) {
   z.string().uuid().parse(id);
   const db = await updateStorage();
   const claim = await db.prepare("UPDATE update_runs SET stage='checking' WHERE id=? AND stage='queued'").run(id);
@@ -536,6 +538,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
             if (lock?.run_id !== id) throw new ApiError("Le verrou de mise à jour n’est plus détenu par ce traitement.", 409);
           }
           if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
+          else if (targets[0].mode === "image") await executeImage(run, targets[0], results[0], progress);
           else await executeGroup(run, targets, results, progress);
           requireZeroFinalFindings(results);
           if (results.some(result => result.stage !== "completed")) throw new ApiError("Le résultat final du service n’est pas confirmé.", 502);
@@ -561,6 +564,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       run.message = manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       const pendingNodes = run.results.filter(result => result.managedNode?.updatePending).length;
       if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
+      const imageFindings = run.results.reduce((count, result) => count + (result.imageUpdate?.remainingFindings || 0), 0);
+      if (imageFindings) run.message += ` ${imageFindings} signalement(s) non classé(s) déjà présents dans les images restent à qualifier ; ils restent visibles dans le compteur de sécurité.`;
       if (run.excludedTargets?.length) run.message += ` ${run.excludedTargets.length} service(s) non sélectionné(s) restent à traiter séparément ; seuls les services sélectionnés sont couverts par ce résultat.`;
       await log("live", "updates.completed", run.message, run.projectId);
     });
@@ -582,9 +587,10 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       }
     });
   }
-  const completedTargets = run.targets.filter(target => run.results.some(result => result.targetId === target.id && result.stage === "completed"));
-  if (completedTargets.length) {
-    await afterComplete(completedTargets);
+  const observedTargets = run.targets.filter(target => run.results.some(result => result.targetId === target.id && (result.stage === "completed" || target.mode === "image" && result.stage === "attention")));
+  if (observedTargets.length) {
+    await afterComplete(observedTargets);
+    await recordCompletedImageControls(run);
   }
   return true;
 }

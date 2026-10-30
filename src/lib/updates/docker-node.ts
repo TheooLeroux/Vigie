@@ -55,10 +55,21 @@ export function parseDockerNodeProbe(output: string, nonce: string, target: Upda
 export async function readDockerNode(target: UpdateTarget, deploymentId: string, imageDigest: string, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<DockerNodeProof> {
   identifier.parse(deploymentId);
   if (target.provider !== "railway" || !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) throw new ApiError("Image déployée non identifiable pour la sonde Node.", 422);
+  const instances = await readRailwayProbe(target, deploymentId, {
+    command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + dockerNodeProbe(nonce).replace(/'/g, "'\\''") + "'",
+    parse: (output, nonce) => parseDockerNodeProbe(output, nonce, target, deploymentId),
+  }, dependencies);
+  return { deploymentId, imageDigest, instances };
+}
+
+// Shared short-lived SSH lifecycle; probes provide only fixed, read-only commands.
+export async function readRailwayProbe<T extends object>(target: UpdateTarget, deploymentId: string, probe: { command: (nonce: string) => string; parse: (output: string, nonce: string) => T }, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
+  identifier.parse(deploymentId);
+  if (target.provider !== "railway") throw new ApiError("Sonde réservée aux conteneurs Railway.", 422);
   async function instances() {
     const raw = await dependencies.request(target, instancesQuery, { id: deploymentId });
     const data = z.object({ deployment: z.object({ id: z.literal(deploymentId), status: z.literal("SUCCESS"), instances: z.array(z.object({ id: identifier, status: z.literal("RUNNING") })).min(1).max(32) }) }).safeParse(raw);
-    if (!data.success) throw new ApiError("Les instances du déploiement ne sont pas toutes actives. Version Node non confirmée.", 422);
+    if (!data.success) throw new ApiError("Les instances du déploiement ne sont pas toutes actives. Attestation du conteneur non confirmée.", 422);
     const ids = data.data.deployment.instances.map(instance => instance.id).sort();
     if (new Set(ids).size !== ids.length) throw new ApiError("Instances dupliquées dans l’attestation de déploiement.", 422);
     return ids;
@@ -80,7 +91,7 @@ export async function readDockerNode(target: UpdateTarget, deploymentId: string,
         const keys = await dependencies.request(target, `query NodeProbeKeys($after:String){sshPublicKeys(first:100,after:$after){edges{node{id publicKey}} pageInfo{hasNextPage endCursor}}}`, { after });
         const connection = z.object({ sshPublicKeys: z.object({ edges: z.array(z.object({ node: z.object({ id: z.string().min(1).max(128), publicKey: z.string() }) })), pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }) }) }).parse(keys).sshPublicKeys;
         const matches = connection.edges.filter(edge => edge.node.publicKey.trim() === publicKey);
-        if (matches.length > 1) throw new ApiError("Clé de sonde Node ambiguë : révocation à vérifier.", 422);
+        if (matches.length > 1) throw new ApiError("Clé de sonde ambiguë : révocation à vérifier.", 422);
         keyId = matches[0]?.node.id;
         if (keyId || !connection.pageInfo.hasNextPage) break;
         if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === after || page === 19) throw new ApiError("Recherche de la clé temporaire incomplète : révocation à vérifier.", 422);
@@ -89,30 +100,29 @@ export async function readDockerNode(target: UpdateTarget, deploymentId: string,
     }
     if (keyId) {
       const deleted = await dependencies.request(target, deleteKey, { id: keyId });
-      if (deleted.sshPublicKeyDelete !== true) throw new ApiError("Railway n’a pas confirmé la révocation de la clé temporaire Node.", 422);
+      if (deleted.sshPublicKeyDelete !== true) throw new ApiError("Railway n’a pas confirmé la révocation de la clé temporaire.", 422);
     }
   }
   try {
     await writeFile(config, "", { mode: 0o600 });
     await dependencies.execute("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", identity, "-C", "vigie-node-proof"], { cwd: temporary, env: environment, timeout: 10_000 });
     publicKey = (await readFile(identity + ".pub", "utf8")).trim();
-    if (!/^ssh-ed25519 [A-Za-z0-9+/=]+ vigie-node-proof$/.test(publicKey)) throw new ApiError("La clé éphémère de la sonde Node est invalide.", 422);
+    if (!/^ssh-ed25519 [A-Za-z0-9+/=]+ vigie-node-proof$/.test(publicKey)) throw new ApiError("La clé éphémère de la sonde est invalide.", 422);
     publicKey = publicKey.split(" ").slice(0, 2).join(" ");
     registrationAttempted = true;
     const created = await dependencies.request(target, createKey, { input: { name: `vigie-node-proof-${randomUUID()}`, publicKey } });
     const key = z.object({ sshPublicKeyCreate: z.object({ id: z.string().min(1).max(128), publicKey: z.literal(publicKey) }) }).safeParse(created);
-    if (!key.success) throw new ApiError("Railway n’a pas confirmé la clé temporaire de vérification Node.", 422);
+    if (!key.success) throw new ApiError("Railway n’a pas confirmé la clé temporaire de vérification.", 422);
     keyId = key.data.sshPublicKeyCreate.id;
-    const results: DockerNodeProof["instances"] = [];
+    const results: ({ id: string } & T)[] = [];
     for (const id of before) {
-      const nonce = randomUUID(), script = dockerNodeProbe(nonce);
-      const command = "env -u NODE_OPTIONS -u NODE_PATH node -e '" + script.replace(/'/g, "'\\''") + "'";
+      const nonce = randomUUID(), command = probe.command(nonce);
       const args = ["-F", config, "-T", "-a", "-x", "-i", identity, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${known}`, "-o", `GlobalKnownHostsFile=${known}`, "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", `${id}@ssh.railway.com`, command];
       const output = await dependencies.execute("ssh", args, { cwd: temporary, env: environment, timeout: 20_000 });
-      results.push({ id, ...parseDockerNodeProbe(output, nonce, target, deploymentId) });
+      results.push({ id, ...probe.parse(output, nonce) });
     }
-    if (JSON.stringify(before) !== JSON.stringify(await instances())) throw new ApiError("Les instances ont changé pendant la vérification Node. Attestation refusée.", 422);
-    return { deploymentId, imageDigest, instances: results };
+    if (JSON.stringify(before) !== JSON.stringify(await instances())) throw new ApiError("Les instances ont changé pendant la vérification du conteneur. Attestation refusée.", 422);
+    return results;
   } finally {
     try {
       // A transient API failure must not leave an authentication key behind.

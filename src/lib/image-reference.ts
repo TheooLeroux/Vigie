@@ -1,10 +1,11 @@
 const publicRegistries = new Set(["docker.io", "ghcr.io", "quay.io", "gcr.io", "mcr.microsoft.com", "registry.k8s.io"]);
+export function normalizeImageDigest(value: unknown) { return typeof value === "string" && /^(?:sha256:)?[a-f0-9]{64}$/i.test(value) ? `sha256:${value.replace(/^sha256:/i, "").toLowerCase()}` : null; }
 
 // Bind a declared public image name to the digest observed on the deployment.
 // Mutable tags, private registries and absent/contradictory digests are not proof.
 export function deployedImageReference(image: string, digest: string | null | undefined): string | null {
-  if (!digest || !/^(?:sha256:)?[a-f0-9]{64}$/i.test(digest) || image.length > 500 || /[\s\\?#]/.test(image)) return null;
-  digest = `sha256:${digest.replace(/^sha256:/i, "").toLowerCase()}`;
+  digest = normalizeImageDigest(digest);
+  if (!digest || image.length > 500 || /[\s\\?#]/.test(image)) return null;
   const [tagged, declaredDigest, extra] = image.split("@");
   if (extra !== undefined || declaredDigest !== undefined && declaredDigest !== digest) return null;
   const name = tagged.replace(/:[A-Za-z0-9_][A-Za-z0-9_.-]*$/, "");
