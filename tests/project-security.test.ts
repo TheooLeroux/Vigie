@@ -123,3 +123,62 @@ test("Usage : seules les dépendances npm prouvées exclusivement dev sont class
   assert.equal(npmDependencyUsage(lock, "absent", "1.0.0"), "unknown");
   assert.equal(npmDependencyUsage("lockfileVersion: 9", "lib", "1.0.0"), "unknown");
 });
+
+test("Historique : l’expiration du relevé hébergeur conserve le nombre et la date sans valider le présent", () => {
+  const { detail, state, report } = fixture();
+  detail.railway![0].observedAt = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+  const security = projectSecurity(detail, state), summary = summarizeProject(detail.project, detail, state);
+  assert.equal(security.status, "stale");
+  assert.equal(security.count, 0, "le rapport ne prouve pas l’état actuel");
+  assert.equal(security.known, false);
+  assert.equal(summary.lastKnown?.count, 1);
+  assert.equal(summary.lastKnown?.checkedAt, report.checks[0].checkedAt);
+  const html = renderToStaticMarkup(createElement(ProjectSecurityBadge, { summary, onOpen() {} }));
+  assert.match(html, /1 au dernier contrôle/);
+  assert.match(html, /À actualiser/);
+  assert.match(html, /dateTime=/);
+  const panel = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(panel, /derniers contrôles enregistrés/);
+  assert.match(panel, /ne confirment pas l’état actuel/);
+});
+
+test("Historique : ancien zéro clairement daté, aucun zéro inventé depuis un scan bloqué ou absent", () => {
+  const { detail, state, report } = fixture([]);
+  report.checks[0].status = "passed";
+  report.checkedAt = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+  report.checks[0].checkedAt = report.checkedAt;
+  let summary = summarizeProject(detail.project, detail, state);
+  assert.equal(summary.lastKnown?.count, 0);
+  let html = renderToStaticMarkup(createElement(ProjectSecurityBadge, { summary, onOpen() {} }));
+  assert.match(html, /0 au dernier contrôle/);
+  assert.doesNotMatch(html, /0 faille|Périmètre couvert/);
+  report.checks[0].status = "blocked";
+  summary = summarizeProject(detail.project, detail, state);
+  assert.equal(summary.lastKnown, undefined);
+  report.checks = [];
+  assert.equal(summarizeProject(detail.project, detail, state).lastKnown, undefined);
+});
+
+test("Historique : un changement de déploiement distingue ancien rapport et périmètre actuel", () => {
+  const { detail, state } = fixture();
+  detail.railway![0].services[0].activeDeployments[0].id = "new-deployment";
+  const security = projectSecurity(detail, state);
+  assert.equal(security.count, 0);
+  assert.equal(security.known, false);
+  assert.equal(security.lastKnown?.count, 1);
+  state.automaticControls![0].identity = JSON.stringify([state.targets[0].id, "another-project"]);
+  assert.equal(projectSecurity(detail, state).lastKnown, undefined);
+  state.targets = []; detail.railway = [];
+  assert.equal(projectSecurity(detail, state).lastKnown, undefined);
+});
+
+test("Historique : dédoublonnage des CVE, séparation des soupçons et périmètre incomplet", () => {
+  const finding = healthCheck().findings[0];
+  const { detail, state, report } = fixture([finding, { ...finding, id: finding.aliases[0], aliases: [finding.id] }, { ...finding, id: "uncertain", aliases: [], kind: "unconfirmed" }]);
+  report.coverage = "partial";
+  detail.railway![0].observedAt = new Date(0).toISOString();
+  const old = projectSecurity(detail, state).lastKnown!;
+  assert.equal(old.count, 1);
+  assert.equal(old.signalCount, 1);
+  assert.equal(old.partial, true);
+});

@@ -98,12 +98,37 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   return outcome(limitations.length ? "partial" : "covered", limitations.length ? "Certains composants restent à vérifier." : "Le périmètre déclaré a été analysé pour l’état actuel.", limitations.length ? "Compléter les composants ou preuves indiqués ci-dessous." : "", { ...last, limitations: [...new Set(limitations)], packages: control.securityCoverage?.packages });
 }
 
+// Historical evidence is separate from current coverage. Expiring an observation
+// must not erase a recorded count, nor turn an old clean scan into a current zero.
+function lastRecordedSecurity(detail: ProjectDetail, targets: UpdateTarget[], state?: UpdateState | null) {
+  const evidence: ProjectHealth["securityEvidence"] = [], dates: string[] = [];
+  let analyzedServices = 0, limited = false;
+  for (const target of targets) {
+    const control = state?.automaticControls?.find(item => item.targetId === target.id);
+    if (!control?.checkedAt || !Number.isFinite(Date.parse(control.checkedAt))) continue;
+    if (control.identity !== "unavailable") {
+      try { if (JSON.parse(control.identity)[1] !== detail.project.id) continue; } catch { continue; }
+    }
+    const checks = control.checks.filter(check => securityTools.has(check.tool) && Number.isFinite(Date.parse(check.checkedAt)) && (check.status !== "blocked" || check.findings.length > 0));
+    if (!checks.length) continue;
+    analyzedServices++; dates.push(...checks.map(check => check.checkedAt));
+    limited ||= control.coverage === "partial" || !!control.securityCoverage?.limitations.length;
+    for (const check of checks) for (const finding of check.findings) evidence.push({ targetId: target.id, name: target.name, tool: check.tool, checkedAt: check.checkedAt, finding });
+  }
+  if (!analyzedServices) return undefined;
+  const entries = normalizedVulnerabilities(evidence), vulnerabilities = entries.filter(item => item.kind === "vulnerability");
+  const signals = entries.filter(item => item.kind !== "vulnerability" && !item.id.startsWith("EOL-"));
+  dates.sort((a, b) => Date.parse(a) - Date.parse(b));
+  return { count: vulnerabilities.length, signalCount: signals.length, checkedAt: dates[0], latestCheckedAt: dates.at(-1)!, analyzedServices, totalServices: targets.length, partial: limited || analyzedServices < targets.length, vulnerabilities, signals };
+}
+
 export function projectSecurity(detail: ProjectDetail, state?: UpdateState | null, health = projectHealth(detail, state)) {
   const entries = normalizedVulnerabilities(health.securityEvidence);
   const vulnerabilities = entries.filter(item => item.kind === "vulnerability");
   const signals = entries.filter(item => item.kind !== "vulnerability" && !item.id.startsWith("EOL-"));
   const alerts = [...health.securityOtherAlerts, ...entries.filter(item => item.id.startsWith("EOL-")).map(item => `${item.service} · ${item.package} : système en fin de support.`)];
-  const services = expectedTargets(detail, state).map(target => serviceCoverage(target, detail, state));
+  const targets = expectedTargets(detail, state);
+  const services = targets.map(target => serviceCoverage(target, detail, state));
   const coveredServices = services.filter(item => item.status === "covered").length;
   const analyzedServices = services.filter(item => item.status === "covered" || item.status === "partial").length;
   const known = services.length > 0 && coveredServices === services.length;
@@ -112,5 +137,6 @@ export function projectSecurity(detail: ProjectDetail, state?: UpdateState | nul
   const severityCounts = { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 };
   vulnerabilities.forEach(item => severityCounts[item.severity]++);
   const checkedAt = known ? services.map(item => item.checkedAt!).sort()[0] : undefined;
-  return { count: vulnerabilities.length, vulnerabilities, signals, alerts, severityCounts, services, known, partial, status, label: coverageLabels[status], coveredServices, analyzedServices, totalServices: services.length, checkedAt };
+  const lastKnown = !known && !partial ? lastRecordedSecurity(detail, targets, state) : undefined;
+  return { count: vulnerabilities.length, vulnerabilities, signals, alerts, severityCounts, services, known, partial, status, label: coverageLabels[status], coveredServices, analyzedServices, totalServices: services.length, checkedAt, lastKnown };
 }

@@ -6,6 +6,8 @@ La requête live renvoie uniquement des identifiants et des empreintes, calculé
 
 Un onglet masqué conserve les notifications et les applique à son retour. Le SDK reprend la connexion après une coupure ; les erreurs définitives sont affichées avec un bouton de reconnexion. Aucune boucle de polling des données ne sert de secours.
 
+Le temps réel transmet les résultats enregistrés, il ne lance pas les analyses. Si les contrôles planifiés prennent du retard, les compteurs conservent le dernier résultat disponible avec sa date, son périmètre partiel éventuel et l’avertissement « À actualiser ». Ce résultat historique est distinct du compteur actuel : un ancien scan sans alerte ne valide jamais un zéro actuel, et un rapport absent ou bloqué ne fournit pas de zéro. La fiche permet de consulter les signalements du rapport conservé.
+
 ## Configuration
 
 1. Activer Neon Realtime sur la branche de production, dans une région prise en charge.

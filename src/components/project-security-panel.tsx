@@ -6,7 +6,7 @@ import type { UpdateState } from "@/lib/updates/types";
 
 const severityLabels = { critical: "Critique", high: "Élevée", moderate: "Modérée", low: "Faible", unknown: "Non classée" };
 const usageLabels = { runtime: "Dépendance de production", build: "Développement / construction", unknown: "Usage à qualifier" };
-const date = (value: string) => new Date(value).toLocaleString("fr-FR");
+const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
 
 function Findings({ items }: { items: ProjectVulnerability[] }) {
   return <ul className="security-findings">{items.map(item => <li key={item.key}>
@@ -19,12 +19,14 @@ function Findings({ items }: { items: ProjectVulnerability[] }) {
 
 export function ProjectSecurityPanel({ detail, updates, health, unavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean }) {
   const security = projectSecurity(detail, updates, health);
+  const historical = security.lastKnown;
   const hasAlerts = security.count > 0 || security.signals.length > 0 || security.alerts.length > 0;
   const loading = updates === undefined;
   const Icon = hasAlerts ? ShieldAlert : security.known ? ShieldCheck : CircleHelp;
   return <article className={`project-health-card ${hasAlerts ? "danger" : "neutral"}`}>
     <div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité</span><h2>{hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
-    <p>{security.count || security.known || security.partial ? `${security.count} vulnérabilité(s) connue(s) sur les composants analysés.` : loading ? "Chargement des derniers contrôles…" : "Le nombre de vulnérabilités ne peut pas encore être établi."}</p>
+    <p>{historical ? `${historical.count} vulnérabilité(s) relevée(s) lors des derniers contrôles enregistrés.` : security.count || security.known || security.partial ? `${security.count} vulnérabilité(s) connue(s) sur les composants analysés.` : loading ? "Chargement des derniers contrôles…" : "Le nombre de vulnérabilités ne peut pas encore être établi."}</p>
+    {historical && <div><small>Contrôles du {date(historical.checkedAt)}{historical.latestCheckedAt !== historical.checkedAt ? ` au ${date(historical.latestCheckedAt)}` : ""} · {historical.analyzedServices}/{historical.totalServices} service(s) analysé(s){historical.partial ? " · périmètre partiel" : ""}.</small><p>Ces résultats restent consultables, mais ne confirment pas l’état actuel. Les prochains contrôles les actualiseront automatiquement.</p><details className="health-details"><summary>Voir le dernier rapport enregistré</summary>{historical.vulnerabilities.length > 0 ? <Findings items={historical.vulnerabilities} /> : <p>Aucune vulnérabilité n’avait été signalée dans le périmètre de ces contrôles.</p>}{historical.signals.length > 0 && <><h3>Signalements à confirmer dans ce rapport</h3><Findings items={historical.signals} /></>}</details></div>}
     <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
     {!security.known && <small>Couverture partielle ou indisponible : les composants non analysés restent à vérifier.</small>}
     {(security.signals.length > 0 || security.alerts.length > 0) && <p>{security.signals.length} signalement(s) à confirmer · {security.alerts.length} autre(s) alerte(s), hors compteur de vulnérabilités.</p>}
