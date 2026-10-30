@@ -16,14 +16,17 @@ export function completedImageControl(target: UpdateTarget, result: UpdateResult
 }
 export async function recordCompletedImageControls(run: UpdateRun, dependencies = { detail: observedProjectDetail, write: writeAutomaticControl }) {
   const images = run.targets.filter(target => target.mode === "image" && run.results.some(result => result.targetId === target.id && result.stage === "completed" && result.imageUpdate?.verified));
-  if (!images.length) return;
+  if (!images.length) return [] as string[];
   // A synchronization failure cannot turn an old image's scan into proof for the
   // new one. The normal monitoring workflow will retry the missing observation.
+  const pending: string[] = [];
   try {
     const detail = await dependencies.detail(run.projectId, "live");
     for (const target of images) {
       const control = completedImageControl(target, run.results.find(result => result.targetId === target.id)!, detail);
-      if (control) await dependencies.write(control);
+      try { if (control) await dependencies.write(control); else pending.push(target.id); }
+      catch { pending.push(target.id); }
     }
-  } catch { /* Keep the verified update; never fabricate a fresh observation. */ }
+  } catch { return images.map(target => target.id); }
+  return pending;
 }

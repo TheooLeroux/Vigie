@@ -61,7 +61,7 @@ export type UpdateResult = {
   checks?: UpdateCheck[];
   manualUpdates?: WordPressManualUpdate[];
   managedNode?: ManagedNode;
-  imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; rollbackDeploymentId?: string };
+  imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; networkChecks?: import("./socks-health").SocksHealthProof[]; rollbackDeploymentId?: string };
 };
 export type UpdateRun = {
   nodeReceipts?: import("./node-current").NodeValidationReceipt[];

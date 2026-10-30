@@ -590,7 +590,12 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
   const observedTargets = run.targets.filter(target => run.results.some(result => result.targetId === target.id && (result.stage === "completed" || target.mode === "image" && result.stage === "attention")));
   if (observedTargets.length) {
     await afterComplete(observedTargets);
-    await recordCompletedImageControls(run);
+    const pending = await recordCompletedImageControls(run);
+    if (pending.length) {
+      for (const result of run.results.filter(result => pending.includes(result.targetId))) result.warnings.push("Le compteur de sécurité n’a pas pu être actualisé en fin de maintenance. L’ancien rapport reste historique ; un nouveau relevé est nécessaire.");
+      run.message += " Actualisation du compteur de sécurité en attente de confirmation.";
+      await writeUpdateRun(run);
+    }
   }
   return true;
 }

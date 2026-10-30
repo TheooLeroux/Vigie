@@ -30,7 +30,7 @@ const finding = (patch: Partial<SecurityFinding> = {}): SecurityFinding => ({ id
 const values = () => ({ TS_AUTHKEY: "tskey-client-fixture-not-real", TS_HOSTNAME: "proxy", TS_USERSPACE: "true", TS_SOCKS5_SERVER: "[::]:1055", TS_EXTRA_ARGS: "--advertise-tags=tag:proxy", RAILWAY_DEPLOYMENT_ID: oldDeployment });
 const raw = () => ({ service: { projectId: randomUUID() }, serviceInstance: { source: { image: target.image!, repo: null }, numReplicas: null, startCommand: null, preDeployCommand: null, latestDeployment: { id: oldDeployment, status: "SUCCESS", meta: { imageDigest: oldDigest } }, activeDeployments: [{ id: oldDeployment, status: "SUCCESS", meta: { imageDigest: oldDigest } }] }, environment: { volumeInstances: { edges: [] as { node: { id: string; serviceId: string; volumeId: string; mountPath: string } }[], pageInfo: { hasNextPage: false } } } });
 
-function harness(options: { candidateFindings?: SecurityFinding[]; afterFindings?: SecurityFinding[]; networkFailure?: boolean; changedBefore?: boolean; changedAfter?: boolean; changedDuringScan?: boolean; startupDelay?: boolean; rawDigests?: boolean; same?: boolean; authorizationFailure?: boolean; version?: string } = {}) {
+function harness(options: { candidateFindings?: SecurityFinding[]; afterFindings?: SecurityFinding[]; networkFailure?: boolean; httpFailure?: boolean; changedBefore?: boolean; changedAfter?: boolean; changedDuringScan?: boolean; startupDelay?: boolean; rawDigests?: boolean; same?: boolean; authorizationFailure?: boolean; version?: string } = {}) {
   const state = raw(), variables = values(), writes: any[] = [], scans: string[] = [], probes: string[] = [], snapshots: unknown[] = [];
   let reads = 0, deployed = 0;
   if (options.rawDigests) { state.serviceInstance.latestDeployment.meta.imageDigest = oldDigest.slice(7); state.serviceInstance.activeDeployments[0].meta.imageDigest = oldDigest.slice(7); }
@@ -57,6 +57,8 @@ function harness(options: { candidateFindings?: SecurityFinding[]; afterFindings
     probe: async (_target: UpdateTarget, id: string, port: number, peer?: string) => { probes.push(id); assert.equal(port, 1055); if (id === newDeployment && options.networkFailure) throw new Error("no network"); if (id === newDeployment && options.startupDelay && probes.length === 2) throw new ApiError("Le client Tailscale n’est pas connecté.", 422); if (probes.length > 1) assert.equal(peer, "100.65.1.2"); return { version: id === oldDeployment && !options.same ? "1.98.4" : id === rollbackDeployment ? "1.98.4" : "1.104.4", device: id === oldDeployment ? "old-device" : "new-device", addresses: ["100.65.3.4"], onlinePeers: ["100.65.1.2"] }; },
     version: async () => options.version || "1.104.4",
     authorization: async () => { if (options.authorizationFailure) throw new Error("authorization refused"); },
+    networkPlan: async () => [],
+    network: async () => { if (options.httpFailure && state.serviceInstance.source.image === newReference) throw new ApiError("Témoin HTTP indisponible.", 502); return [{ serviceId: target.remoteId, deploymentId: oldDeployment, status: 200 as const, checkedAt: new Date().toISOString() }]; },
     snapshot: async (_run: string, _target: string, snapshot: unknown) => { snapshots.push(snapshot); },
     pause: async () => {},
   };
@@ -146,6 +148,8 @@ test("Exécution : image figée remplacée, réseau vérifié, scan final et ré
   assert.doesNotThrow(() => requireZeroFinalFindings([h.result]));
   const broken = structuredClone(h.result); broken.imageUpdate!.verified!.digest = oldDigest;
   assert.throws(() => requireZeroFinalFindings([broken]));
+  const noHttp = structuredClone(h.result); noHttp.imageUpdate!.networkChecks = [];
+  assert.throws(() => requireZeroFinalFindings([noHttp]), "une validation sans preuve HTTP ne permet pas l’exception image");
 });
 
 for (const [name, options] of Object.entries({ nouvelleAlerte: { candidateFindings: [finding({ id: "CVE-new" })] }, severite: { candidateFindings: [finding({ severity: "high" as const })] }, configuration: { changedBefore: true }, autorisation: { authorizationFailure: true }, reculVersion: { version: "1.90.0" } })) {
@@ -153,7 +157,7 @@ for (const [name, options] of Object.entries({ nouvelleAlerte: { candidateFindin
 }
 
 test("Récupération : échec réseau ou nouvelle alerte finale restaure l’empreinte précédente et vérifie la reconnexion", async () => {
-  for (const options of [{ networkFailure: true }, { afterFindings: [finding({ id: "CVE-just-published" })] }]) {
+  for (const options of [{ networkFailure: true }, { httpFailure: true }, { afterFindings: [finding({ id: "CVE-just-published" })] }]) {
     const h = harness(options); await assert.rejects(h.execute());
     assert.equal(h.result.stage, "attention"); assert.equal(h.writes.length, 2);
     assert.deepEqual(h.writes[1], { source: { image: oldReference } }); assert.equal(h.result.imageUpdate?.rollbackDeploymentId, rollbackDeployment);

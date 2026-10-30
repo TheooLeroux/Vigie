@@ -29,6 +29,7 @@ export function imageSecurityCheck(phase: "before" | "candidate" | "after", imag
 // image replacement with a fresh scan and runtime proof for that exact digest.
 export function verifiedImageResiduals(result: UpdateResult, check: UpdateCheck) {
   const image = result.imageUpdate;
+  if (!image?.networkChecks?.length || image.networkChecks.some(proof => proof.status !== 200 || !proof.serviceId || !proof.deploymentId || !(Date.parse(proof.checkedAt) >= Date.parse(check.checkedAt)))) return false;
   if (!image?.verified || !tailscaleImage(image.candidate) || !image.candidate.endsWith(`@${image.digest}`) || image.remainingFindings !== check.findings.length || result.stage !== "completed" || result.deploymentId !== image.verified.deploymentId || image.verified.digest !== image.digest || check.tool !== "Trivy" || check.phase !== "after" || check.scope !== image.candidate || check.status === "blocked") return false;
   const baseline = result.checks?.find(entry => entry.tool === "Trivy" && entry.phase === "before" && entry.scope === image.previous);
   return !!baseline && retainedImageFindings(check.findings, baseline.findings);

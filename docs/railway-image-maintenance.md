@@ -8,12 +8,15 @@ Le moteur distingue les dépendances issues de Git, les archives et les images e
 - Proxy Tailscale en mode userspace, sans volume ni répertoire d’état persistant, avec les options réseau reconnues. Commandes de démarrage personnalisées, routes annoncées, exit nodes, Serve/Funnel et configurations persistantes sont bloqués avant écriture.
 - Accès OAuth de reconnexion existant, vérifié auprès de Tailscale avec les tags déjà configurés. Aucune clé ni machine créée pour ce contrôle ; aucun jeton conservé ou affiché.
 - Contrôle initial du client connecté et de l’écoute SOCKS ; sélection d’un pair déjà en ligne pour le contrôle après remplacement.
+- Témoin HTTP depuis un consommateur Node du même projet et environnement Railway : `PI_PROXY_URL` doit désigner le domaine privé exact du proxy et `PI_IP` un pair Tailscale déjà configuré. Un GET `/health` à travers une connexion SOCKS5 complète doit fournir HTTP 200 et un objet JSON valide avant et après remplacement, ainsi qu’après récupération. Aucun secret du Pi ni contenu de réponse n’est transmis dans le rapport. Sans témoin qualifié, le remplacement reste bloqué.
 - Résolution du tag officiel `stable`, vérification cryptographique de son index, puis sélection et analyse de l’empreinte Linux amd64. Le remplacement utilise cette empreinte immuable, sans dépendre d’un déplacement ultérieur du tag.
 - Lecture de la version candidate dans un conteneur isolé, sans réseau, volume, privilèges ni secrets de l’application. Aucun retour à une version Tailscale antérieure.
 - Empreinte des paramètres et des variables, références de récupération chiffrées, puis revérification immédiatement avant publication. Seule la source image est écrite ; les variables, volumes et règles réseau ne sont pas réécrits.
 - Déploiement identifié par l’ID retourné par Railway, vérification de l’empreinte active et d’une seule instance, sonde Tailscale/écoute SOCKS, ping du pair, puis scan final frais. Une image identique est recontrôlée sans redéploiement.
 
 Les sondes utilisent des clés SSH éphémères révoquées en fin de contrôle, y compris en cas d’échec. Le résultat et le compteur de sécurité ne sont actualisés que si le rapport final correspond au déploiement et à l’empreinte encore observés.
+
+Si une maintenance prouve un remplacement plus récent que le relevé hébergeur conservé, l’ancien rapport ne valide plus le compteur courant. Son nombre reste consultable comme historique, avec un état « À actualiser ». Un échec de publication du nouveau rapport ajoute une réserve visible à la maintenance ; un déploiement confirmé ne devient pas une preuve de synchronisation du compteur.
 
 ## Politique de sécurité des images
 

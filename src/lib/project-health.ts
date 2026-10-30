@@ -5,6 +5,7 @@ import type { ProjectDetail, SiteInventory } from "./types";
 import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
+import { imageObservationPending } from "./updates/image-observation";
 
 export type ProjectHealth = {
   securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding }[];
@@ -167,6 +168,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
   const automaticIds = new Set((state?.automaticControls || []).map(control => control.targetId));
   const automatic = (state?.automaticControls || []).flatMap(control => {
     const target = state?.targets.find(target => target.id === control.targetId);
+    if (target && imageObservationPending(target, detail, state)) { incomplete = true; return []; }
     const matches = target && controlMatches(control, target, detail);
     if (!matches) { incomplete = true; return []; }
     const fresh = automaticControlFresh(control);

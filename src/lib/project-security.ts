@@ -1,4 +1,5 @@
 import { automaticControlFresh, controlMatches, controlSource } from "./automatic-control-state";
+import { imageObservationPending } from "./updates/image-observation";
 import { projectHealth, type ProjectHealth } from "./project-health";
 import type { ProjectDetail } from "./types";
 import type { SecurityFinding, UpdateState, UpdateTarget } from "./updates/types";
@@ -79,6 +80,7 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   const outcome = (status: CoverageStatus, reason: string, action: string, extra: Partial<ServiceCoverage> = {}): ServiceCoverage => ({ ...base, status, reason, action, ...extra });
   if (!state) return outcome("error", "Les rapports de sécurité sont indisponibles.", "Recharger les contrôles du projet.");
   const last = control?.checkedAt ? { checkedAt: control.checkedAt } : {};
+  if (imageObservationPending(target, detail, state)) return outcome("stale", "L’image a changé après le dernier relevé hébergeur. L’ancien compteur reste historique.", "Actualiser les relevés pour confirmer le compteur de la nouvelle image.", last);
   if (control?.error) return outcome("error", control.error, /GitHub|dépôt|accès/.test(control.error) ? "Vérifier l’accès en lecture au dépôt et au commit déployé." : "Actualiser les relevés ; le contrôle sera réessayé automatiquement.", last);
   if (control?.coverage === "partial" && !control.checks.some(check => securityTools.has(check.tool))) return outcome(target.repository || image || target.mode === "wordpress" || control.securityCoverage?.scope === "sources" ? "unsupported" : "missing", control.warnings[0] || "Aucun analyseur disponible pour ce service.", control.securityCoverage?.scope === "sources" ? "Compléter les versions ou les fichiers signalés ; les sources disponibles ont été récupérées." : image ? "Rendre l’image exacte accessible au scanner." : target.repository ? "Fournir un verrou résolu et un analyseur adapté à la technologie." : "Relier les sources ou fournir un inventaire lié au déploiement.", { ...last, limitations: control.warnings });
   if (!control) {

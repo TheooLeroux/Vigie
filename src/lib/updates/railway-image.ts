@@ -14,6 +14,7 @@ import { resolveTailscaleImage, type ResolvedImage } from "./image-registry";
 import { imageSecurityCheck, requireImageTarget, tailscaleImage } from "./image-policy";
 import { readTailscale } from "./tailscale-probe";
 import { verifyTailscaleAuthorization } from "./tailscale-auth";
+import { prepareSocksHealth, verifySocksHealth } from "./socks-health";
 import { saveUpdateSnapshot } from "./storage";
 import type { SecurityFinding, UpdateResult, UpdateRun, UpdateStage, UpdateTarget } from "./types";
 
@@ -25,7 +26,7 @@ const variablesQuery = `query ImageVariables($projectId:String!,$serviceId:Strin
 const sourceUpdate = `mutation ImageSource($serviceId:String!,$environmentId:String!,$input:ServiceInstanceUpdateInput!){serviceInstanceUpdate(serviceId:$serviceId,environmentId:$environmentId,input:$input)}`;
 const deploy = `mutation ImageDeploy($serviceId:String!,$environmentId:String!){serviceInstanceDeployV2(serviceId:$serviceId,environmentId:$environmentId)}`;
 type Configuration = z.infer<typeof configSchema> & { variables: Record<string, string>; fingerprint: string; port: number };
-type Dependencies = { request: typeof railwayUpdateRequest; resolve: () => Promise<ResolvedImage>; scan: (reference: string) => Promise<SecurityFinding[]>; probe: typeof readTailscale; authorization: typeof verifyTailscaleAuthorization; version: (reference: string) => Promise<string>; snapshot: typeof saveUpdateSnapshot; pause: (ms: number) => Promise<void> };
+type Dependencies = { request: typeof railwayUpdateRequest; resolve: () => Promise<ResolvedImage>; scan: (reference: string) => Promise<SecurityFinding[]>; probe: typeof readTailscale; authorization: typeof verifyTailscaleAuthorization; networkPlan: typeof prepareSocksHealth; network: typeof verifySocksHealth; version: (reference: string) => Promise<string>; snapshot: typeof saveUpdateSnapshot; pause: (ms: number) => Promise<void> };
 
 // Fingerprint secrets, never return or log them. Deployment-generated variables
 // are excluded; provider user variables, source-independent settings and volumes
@@ -61,7 +62,7 @@ export async function imageClientVersion(reference: string, execute = runCommand
 export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, result: UpdateResult, progress: Progress, supplied: Partial<Dependencies> = {}) {
   requireImageTarget(target);
   const cache = await mkdtemp(join(tmpdir(), "vigie-image-update-"));
-  const dependencies: Dependencies = { request: railwayUpdateRequest, resolve: resolveTailscaleImage, scan: async reference => (await scanDeployedImage(reference, runCommand, cache)).checks.flatMap(check => check.findings), probe: readTailscale, authorization: verifyTailscaleAuthorization, version: imageClientVersion, snapshot: saveUpdateSnapshot, pause: ms => new Promise(resolve => setTimeout(resolve, ms)), ...supplied };
+  const dependencies: Dependencies = { request: railwayUpdateRequest, resolve: resolveTailscaleImage, scan: async reference => (await scanDeployedImage(reference, runCommand, cache)).checks.flatMap(check => check.findings), probe: readTailscale, authorization: verifyTailscaleAuthorization, networkPlan: prepareSocksHealth, network: verifySocksHealth, version: imageClientVersion, snapshot: saveUpdateSnapshot, pause: ms => new Promise(resolve => setTimeout(resolve, ms)), ...supplied };
   const ids = { serviceId: target.remoteId, environmentId: target.environmentId };
   result.checks ||= [];
   async function record(check: ReturnType<typeof imageSecurityCheck>) { result.checks!.push(check); await progress(check.phase === "after" ? "verifying" : "checking", check.message); if (check.status === "blocked") throw new ApiError(check.message, 422); }
@@ -74,6 +75,10 @@ export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, 
     const oldRuntime = await dependencies.probe(target, previousDeployment.id, before.port);
     if (!oldRuntime.onlinePeers.length) throw new ApiError("Aucun pair Tailscale en ligne ne permet de contrôler la connexion après remplacement.", 422);
     const peer = oldRuntime.onlinePeers[0];
+    const networkPlan = await dependencies.networkPlan(target, before.service.projectId, before.variables, before.port);
+    const networkBefore = await dependencies.network(networkPlan);
+    if (!networkBefore.length) throw new ApiError("Le témoin HTTP initial du proxy SOCKS n’est pas confirmé.", 422);
+    await record({ tool: "Validation", phase: "before", scope: target.name, checkedAt: new Date().toISOString(), status: "passed", findings: [], message: `HTTP 200 et réponse JSON du témoin de santé vérifiés à travers le proxy SOCKS, depuis ${networkBefore.length} instance(s) consommatrice(s).` });
     result.previousDeploymentId = previousDeployment.id;
     const baseline = await dependencies.scan(previous);
     await record(imageSecurityCheck("before", previous, baseline));
@@ -88,7 +93,7 @@ export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, 
     if (!same) await dependencies.authorization(before.variables);
     const latest = await readConfiguration(target, dependencies.request);
     if (latest.fingerprint !== before.fingerprint || latest.serviceInstance.source.image !== target.image || latest.serviceInstance.activeDeployments.length !== 1 || latest.serviceInstance.activeDeployments[0].id !== previousDeployment.id) throw new ApiError("La configuration a changé pendant l’analyse. Aucune image remplacée.", 409);
-    await dependencies.snapshot(run.id, target.id, { previous, source: current.source.image, fingerprint: before.fingerprint, previousDeploymentId: previousDeployment.id, runtime: oldRuntime, candidate, createdAt: new Date().toISOString() });
+    await dependencies.snapshot(run.id, target.id, { previous, source: current.source.image, fingerprint: before.fingerprint, previousDeploymentId: previousDeployment.id, runtime: oldRuntime, networkPlan, networkBefore, candidate, createdAt: new Date().toISOString() });
     async function waitFor(reference: string, expectedDigest: string, expectedDeployment: string) {
       for (let attempt = 0; attempt < 60; attempt++) {
         const state = await readConfiguration(target, dependencies.request);
@@ -129,14 +134,19 @@ export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, 
       if (!same) result.deploymentId = deploymentId;
       const runtime = await ready(deploymentId);
       if (runtime.version !== version) throw new ApiError("La version Tailscale active ne correspond pas à l’image testée.", 422);
-      await record(imageSecurityCheck("after", candidate.reference, await dependencies.scan(candidate.reference), baseline));
+      const finalScan = imageSecurityCheck("after", candidate.reference, await dependencies.scan(candidate.reference), baseline);
+      await record(finalScan);
+      const networkChecks = await dependencies.network(networkPlan);
+      if (!networkChecks.length) throw new ApiError("Aucune preuve HTTP à travers le proxy SOCKS n’a été obtenue.", 422);
+      await record({ tool: "Validation", phase: "after", scope: target.name, checkedAt: new Date().toISOString(), status: "passed", findings: [], message: `HTTP 200 et réponse JSON du témoin de santé vérifiés à travers le proxy SOCKS, depuis ${networkChecks.length} instance(s) consommatrice(s).` });
       const recheck = await readConfiguration(target, dependencies.request);
       if (recheck.fingerprint !== before.fingerprint || recheck.serviceInstance.source.image !== (same ? target.image : candidate.reference) || recheck.serviceInstance.latestDeployment?.id !== deploymentId || recheck.serviceInstance.latestDeployment.status !== "SUCCESS" || recheck.serviceInstance.activeDeployments.length !== 1 || recheck.serviceInstance.activeDeployments[0].id !== deploymentId || recheck.serviceInstance.activeDeployments[0].status !== "SUCCESS" || ![candidate.digest, candidate.indexDigest].includes(normalizeImageDigest(deploymentEvidence(recheck.serviceInstance.activeDeployments[0].meta)?.imageDigest) || "")) throw new ApiError("L’image ou les paramètres ont changé pendant les contrôles finaux.", 422);
       result.imageUpdate.verified = { deploymentId, digest: candidate.digest, version, device: runtime.device };
+      result.imageUpdate.networkChecks = networkChecks;
       result.deploymentId = deploymentId;
-      result.imageUpdate.remainingFindings = result.checks.at(-1)!.findings.length;
+      result.imageUpdate.remainingFindings = finalScan.findings.length;
       result.stage = "completed";
-      result.message = `${same ? "Image déjà à jour" : "Image mise à jour"} ; Tailscale ${version}, proxy SOCKS et accès au pair contrôlés.${result.imageUpdate.remainingFindings ? ` ${result.imageUpdate.remainingFindings} signalement(s) non classé(s) antérieur(s) restent à qualifier.` : " Aucun signalement dans l’image analysée."}`;
+      result.message = `${same ? "Image déjà à jour" : "Image mise à jour"} ; Tailscale ${version}, proxy SOCKS et réponse HTTP du témoin contrôlés.${result.imageUpdate.remainingFindings ? ` ${result.imageUpdate.remainingFindings} signalement(s) non classé(s) antérieur(s) restent à qualifier.` : " Aucun signalement dans l’image analysée."}`;
       await progress("verifying", result.message);
     } catch (error) {
       if (published) {
@@ -152,6 +162,7 @@ export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, 
             if (!z.uuid().safeParse(restoredDeployment.serviceInstanceDeployV2).success) throw new ApiError("Déploiement de récupération non identifié.", 502);
             const rollback = await waitFor(previous, previousDigest, restoredDeployment.serviceInstanceDeployV2);
             if ((await ready(rollback)).version !== oldRuntime.version) throw new ApiError("La version récupérée n’est pas celle de l’image précédente.", 422);
+            if (!(await dependencies.network(networkPlan)).length) throw new ApiError("Le témoin HTTP de récupération n’est pas confirmé.", 422);
             result.imageUpdate.rollbackDeploymentId = rollback;
             result.warnings.push("Retour à l’ancienne image et connexion réseau vérifiés après refus du nouveau déploiement. Le résultat de maintenance reste à vérifier.");
           } catch { result.warnings.push("Retour à l’image précédente non confirmé : intervention Railway nécessaire. Les références de récupération sont conservées."); }
