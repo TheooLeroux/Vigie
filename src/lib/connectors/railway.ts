@@ -112,6 +112,13 @@ function sourceValue(value: string | null) {
   }
   return value;
 }
+function imageSource(value: string | null) {
+  // The sole @ in a Docker digest reference is not URL userinfo. Continue
+  // rejecting credentials/URLs and accept only a complete SHA-256 suffix.
+  const pinned = value?.match(/^([^@]+)@(sha256:[a-f0-9]{64})$/i);
+  if (pinned && !pinned[1].includes("://") && /^[a-z0-9][a-z0-9._:/-]*$/i.test(pinned[1]) && sourceValue(pinned[1])) return value;
+  return sourceValue(value);
+}
 async function readJson(response: Response) {
   if (!response.body) throw new ApiError("Réponse Railway vide.", 502);
   const reader = response.body.getReader();
@@ -247,7 +254,7 @@ export async function collectRailway(
                   ),
                 ],
                 repository: sourceValue(s.source?.repo || null),
-                image: sourceValue(s.source?.image || null),
+                image: imageSource(s.source?.image || null),
                 builder: s.builder,
                 region: s.region,
                 replicas: s.numReplicas,

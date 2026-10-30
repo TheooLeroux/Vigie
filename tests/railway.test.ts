@@ -141,6 +141,19 @@ function apiData(
 }
 const transport = (value: unknown, status = 200) =>
   (async () => Response.json(value, { status })) as typeof fetch;
+
+test("Railway : conserver les images figées par digest sans accepter de credentials dans les sources", async () => {
+  const workspace = randomUUID(), digest = "sha256:" + "a".repeat(64);
+  for (const image of [`docker.io/tailscale/tailscale@${digest}`, `tailscale/tailscale:stable@${digest}`, `registry.example.test:5000/team/image:v1@${digest}`]) {
+    const project = remote(workspace); project.services[0].repository = null; project.services[0].image = image;
+    assert.equal((await collectRailway(workspace, token, transport(apiData(project))))[0].services[0].image, image);
+  }
+  for (const image of [`user:secret@registry.example.test/image`, `https://user:secret@registry.example.test/image@${digest}`, `image@sha256:abc`, `image@${digest}?token=secret`, `image@${digest}@${digest}`]) {
+    const project = remote(workspace); project.services[0].image = image; project.services[0].repository = image;
+    const service = (await collectRailway(workspace, token, transport(apiData(project))))[0].services[0];
+    assert.equal(service.image, null); assert.equal(service.repository, null);
+  }
+});
 test("Railway : métadonnées brutes éliminées avant stockage et réponse API", async () => {
   const c = (await connection()),
     p = remote(c.workspaceId),
