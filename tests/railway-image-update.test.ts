@@ -73,6 +73,30 @@ test("Images : seuls le dépôt officiel et le profil Railway disposent du parco
   assert.equal(maintenanceCapability(target, { image: "postgres:18" }).adapter, null);
 });
 
+test("Bilan image : image stable analysée sans sauvegarde, autorisation, mutation ni déploiement", async () => {
+  for (const same of [false, true]) {
+    const h = harness({ same, authorizationFailure: true });
+    h.run.purpose = "assessment";
+    await h.execute();
+    assert.equal(h.result.stage, "completed");
+    assert.equal(h.result.assessment!.changes.length, same ? 0 : 1);
+    assert.deepEqual(h.writes, []);
+    assert.deepEqual(h.snapshots, []);
+    assert.equal(h.probes.length, 1);
+    assert.equal(h.result.deploymentId, undefined);
+    assert.ok(h.result.checks!.some(check => check.phase === "candidate"));
+  }
+});
+
+test("Bilan image : une candidate vulnérable ou une configuration modifiée reste refusée", async () => {
+  for (const options of [{ candidateFindings: [finding({ severity: "high" })] }, { changedBefore: true }]) {
+    const h = harness(options); h.run.purpose = "assessment";
+    await assert.rejects(h.execute());
+    assert.equal(h.result.assessment, undefined);
+    assert.deepEqual(h.writes, []);
+  }
+});
+
 test("Registre : contrôle du contenu de l’index et sélection explicite Linux amd64", async () => {
   const body = JSON.stringify({ manifests: [{ digest: newDigest, platform: { os: "linux", architecture: "amd64" } }, { digest: oldDigest, platform: { os: "linux", architecture: "arm64" } }] });
   const indexDigest = "sha256:" + createHash("sha256").update(body).digest("hex");

@@ -6,6 +6,7 @@ import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type Update
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
+import { currentAssessmentResults } from "./updates/assessment";
 
 export type ProjectHealth = {
   securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding }[];
@@ -22,6 +23,9 @@ export type ProjectHealth = {
   securityFixes: string[];
   manualSecurityFixes: string[];
   securitySearchIncomplete: boolean;
+  assessedServices: number;
+  unvalidatedUpdates: number;
+  validatedUpdateServices: number;
 };
 
 function installedWordPressFinding(inventory: SiteInventory, finding: SecurityFinding) {
@@ -37,14 +41,17 @@ const isWordPressSecurityCheck = (check: UpdateCheck) => check.tool === "WPScan"
 // deployed site; accepted Node scans must match its active image identity.
 export function projectHealth(detail: ProjectDetail, state?: UpdateState | null): ProjectHealth {
   const security = new Map<string, string>(), updates = new Map<string, string>();
+  const updateOrigins = new Map<string, string>();
+  const setUpdate = (key: string, label: string, targetId?: string) => { updates.set(key, label); if (targetId) updateOrigins.set(key, targetId); };
+  const targetId = (provider: string, connectionId: string, remoteId: string, environmentId?: string) => state?.targets.find(target => target.provider === provider && target.connectionId === connectionId && target.remoteId === remoteId && (!environmentId || target.environmentId === environmentId))?.id;
   const securityEvidence: ProjectHealth["securityEvidence"] = [];
   const manualUpdates = new Map<string, { label: string; reason: string }>();
-  const fixes = new Map<string, { label: string; versions: Set<string>; manual?: boolean }>();
+  const fixes = new Map<string, { label: string; versions: Set<string>; manual?: boolean; targetId: string }>();
   let securityKnown = false, versionsKnown = false, incomplete = false;
   let securityFromScan = false;
   const history = state?.runs.filter(run => run.projectId === detail.project.id) || [];
   const latest = history[0];
-  const addRelease = (id: string, name: string, version: string, release?: SoftwareRelease) => {
+  const addRelease = (id: string, name: string, version: string, release?: SoftwareRelease, origin?: string) => {
     if (!release) { incomplete = true; return; }
     if (release.securityUpdate !== null || release.supported === false) securityKnown = true;
     if (release.state === "current" || release.state === "available") versionsKnown = true;
@@ -54,7 +61,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     const lts = name.includes("Node") && release.latestLts && ((valid(version) && valid(release.latestLts) && gt(release.latestLts, version)) || (/^\d+\.x$/.test(version) && Number(release.latestLts.split(".")[0]) > Number(version.split(".")[0])));
     if (release.state === "available" || release.supported === false || lts) {
       const next = lts ? release.latestLts : release.latestVersion;
-      updates.set(id, `${name} : ${version}${next ? ` → ${next}` : " à actualiser"}.`);
+      setUpdate(id, `${name} : ${version}${next ? ` → ${next}` : " à actualiser"}.`, origin);
       versionsKnown = true;
     }
   };
@@ -71,7 +78,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       if (!active.length) incomplete = true;
       for (const deployment of active) {
         if (!deployment.evidence?.packages.length) incomplete = true;
-        for (const pkg of deployment.evidence?.packages || []) addRelease(`${project.connectionId}:${service.id}:${service.environmentId}:${deployment.id}:${pkg.name}`, `${service.name} · ${pkg.name === "node" ? "Node.js" : pkg.name}`, pkg.version, pkg.release);
+        for (const pkg of deployment.evidence?.packages || []) addRelease(`${project.connectionId}:${service.id}:${service.environmentId}:${deployment.id}:${pkg.name}`, `${service.name} · ${pkg.name === "node" ? "Node.js" : pkg.name}`, pkg.version, pkg.release, targetId("railway", project.connectionId, service.id, service.environmentId));
       }
     }
   }
@@ -87,7 +94,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     const nodeKey = `vercel:${project.id}:node`;
     const release = managed ? { ...deployment.nodeRelease, state: managed.updatePending ? "available" as const : "current" as const, latestVersion: managed.branchLatest || managed.latestLts, latestLts: managed.branchLatest || managed.latestLts, latestStable: deployment.nodeRelease?.latestStable || managed.latestLts, supported: true, supportEndsAt: deployment.nodeRelease?.supportEndsAt || null, securityUpdate: managed.securityUpdate, checkedAt: managed.checkedAt, source: "https://nodejs.org/dist/index.json" } : deployment.nodeRelease || undefined;
     const nodeLabel = deployment.analysis?.status === "observed" && !deployment.analysis.runtimes.length ? "Node.js de construction (configuration Vercel)" : "Node.js";
-    addRelease(nodeKey, `${project.name} · ${nodeLabel}`, managed?.version || deployment.nodeBranch || "version inconnue", release);
+    addRelease(nodeKey, `${project.name} · ${nodeLabel}`, managed?.version || deployment.nodeBranch || "version inconnue", release, targetId("vercel", project.connectionId, project.id));
     if (managed?.updatePending && updates.has(nodeKey)) manualUpdates.set(nodeKey, { label: updates.get(nodeKey)!, reason: "Runtime géré par Vercel : correctif en attente chez l’hébergeur. Les dépendances sont validées avec la version mesurée ; le runtime reste à actualiser." });
     if (managed?.migrationAvailable) {
       const key = nodeKey + ":migration", label = `${project.name} · Migration Node ${managed.version} → LTS ${managed.latestLts}.`;
@@ -96,7 +103,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     for (const technology of deployment.analysis?.technologies || []) {
       if (technology.update === "available") {
         versionsKnown = true;
-        updates.set(`vercel:${project.id}:${technology.name}`, `${technology.name} : ${technology.version}${technology.latestVersion ? ` → ${technology.latestVersion}` : " à actualiser"}.`);
+        setUpdate(`vercel:${project.id}:${technology.name}`, `${technology.name} : ${technology.version}${technology.latestVersion ? ` → ${technology.latestVersion}` : " à actualiser"}.`, targetId("vercel", project.connectionId, project.id));
       } else if (technology.update === "current") versionsKnown = true;
       else incomplete = true;
     }
@@ -122,7 +129,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         versionsKnown = true;
         const key = `${installation.id}:${component.id}`;
         const label = `${component.name} : ${component.version || "version inconnue"}${component.latestVersion ? ` → ${component.latestVersion}` : " à actualiser"}.`;
-        updates.set(key, label);
+        setUpdate(key, label, targetId("o2switch", installation.connectionId, installation.id));
         const slug = "slug" in component && typeof component.slug === "string" ? component.slug : null;
         // Persisted execution warnings also explain retained private packages in older runs.
         const currentWarnings = state?.currentSecurity?.find(item => item.targetId === `wordpress:${installation.id}` && item.versions === wordpressSecurityVersions(inventory))?.warnings || [];
@@ -174,7 +181,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     const fresh = automaticControlFresh(control);
     if (!fresh) incomplete = true;
     if (control.warnings.length) incomplete = true;
-    if (fresh) for (const [index, update] of control.updates.entries()) updates.set(`automatic:${target.id}:${index}`, update);
+    if (fresh) for (const [index, update] of control.updates.entries()) setUpdate(`automatic:${target.id}:${index}`, update, target.id);
     const checks = fresh ? control.checks : control.checks.filter(check => check.findings.length > 0);
     return [{ target, automatic: true, result: { targetId: target.id, name: target.name, checks, warnings: control.warnings, stage: "completed" as const, message: "Contrôle automatique" } }];
   });
@@ -228,7 +235,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
           const observation = state?.currentSecurity?.find(item => item.targetId === target.id && inventory && item.versions === wordpressSecurityVersions(inventory));
           const retained = [...(observation?.manualUpdates || []), ...("manualUpdates" in result ? result.manualUpdates || [] : [])];
           const manual = target.mode === "wordpress" && (privatePlugin || finding.package.startsWith("themes/") || retained.some(item => item.package === finding.package && item.version === finding.version));
-          const fix = fixes.get(key) || { label: `${result.name} · ${component} ${finding.version}`, versions: new Set<string>(), manual };
+          const fix = fixes.get(key) || { label: `${result.name} · ${component} ${finding.version}`, versions: new Set<string>(), manual, targetId: target.id };
           fix.manual ||= manual;
           finding.fixedVersions.forEach(version => fix.versions.add(version));
           fixes.set(key, fix);
@@ -236,7 +243,14 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       }
     }
   }
+  const assessments = currentAssessmentResults(detail, state);
+  const assessedIds = new Set(assessments.map(result => result.targetId));
+  for (const [key, origin] of updateOrigins) if (assessedIds.has(origin) && !manualUpdates.has(key)) updates.delete(key);
+  for (const [key, fix] of fixes) if (assessedIds.has(fix.targetId) && !fix.manual) fixes.delete(key);
+  const unvalidatedUpdates = [...updates].filter(([key]) => !manualUpdates.has(key)).length + [...fixes.values()].filter(fix => !fix.manual).length;
+  for (const result of assessments) for (const [index, change] of result.assessment!.changes.entries()) updates.set(`assessment:${result.targetId}:${index}`, `${result.name} · ${change}`);
+  if (assessments.length) versionsKnown = true;
   const securitySearchIncomplete = !!latest && ["failed", "attention"].includes(latest.stage) && latest.results.some(result => result.checks?.some(check => check.status === "blocked" && ["OSV", "Trivy", "WPScan", "WPVulnerability"].includes(check.tool)));
   const fixLabel = (fix: { label: string; versions: Set<string>; manual?: boolean }) => `${fix.label} : correctifs référencés ${[...fix.versions].join(", ")} ; ${fix.manual ? "Composant conservé. Mise à jour à effectuer depuis WordPress ou le compte de l’éditeur, avec le développeur si nécessaire, après validation de compatibilité" : "compatibilité à valider"}.`;
-  return { securityEvidence, securityOtherAlerts, security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fixLabel), manualSecurityFixes: [...fixes.values()].filter(fix => fix.manual).map(fixLabel), securitySearchIncomplete, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
+  return { securityEvidence, securityOtherAlerts, security: [...security.values()], updates: [...updates.values()], manualUpdates: [...manualUpdates.values()], securityKnown, versionsKnown, incomplete, securityFromScan, securityFixes: [...fixes.values()].map(fixLabel), manualSecurityFixes: [...fixes.values()].filter(fix => fix.manual).map(fixLabel), securitySearchIncomplete, assessedServices: assessments.length, unvalidatedUpdates, validatedUpdateServices: assessments.filter(result => result.assessment!.changes.length > 0).length, running: !!latest && activeUpdateStages.includes(latest.stage), attention: latest?.stage === "attention" };
 }

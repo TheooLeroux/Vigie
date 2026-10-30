@@ -25,6 +25,8 @@ import { confirmDeployedNode, verifyNodeServices } from "../src/lib/updates/node
 import { UpdateProgress } from "../src/components/project-updates";
 import { ApiError } from "../src/lib/http";
 import type { VercelProject } from "../src/lib/vercel-types";
+import { finishAssessment } from "../src/lib/updates/assessment";
+import { expireInterruptedAssessments } from "../src/lib/updates/daily-assessments";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 process.env.VIGIE_UPDATES_ENABLED = "1";
@@ -61,6 +63,55 @@ test("Mises à jour : un double clic ne crée qu’un traitement et un seul envo
   assert.equal(first.id, second.id);
   assert.equal(calls, 1);
   assert.equal((await projectUpdates(project.id)).runs.length, 1);
+});
+
+test("Bilan durable : une préparation par jour, historique séparé et aucun contrôle post-installation", async () => {
+  const { project } = await fixture();
+  let dispatches = 0, refreshes = 0;
+  const dispatch = async () => { dispatches++; };
+  const run = await startProjectUpdate({ projectId: project.id }, dispatch, { assessment: true });
+  assert.equal(run.purpose, "assessment");
+  await assert.rejects(startProjectUpdate({ projectId: project.id }, dispatch), /bilan préalable est en cours/);
+  await executeUpdate(run.id, async (candidate, _targets, results) => {
+    assert.equal(candidate.purpose, "assessment");
+    for (const result of results) {
+      result.checks = [{ tool: "OSV", phase: "candidate", checkedAt: new Date().toISOString(), scope: "", status: "passed", findings: [], message: "Test isolé" }];
+      finishAssessment(result, ["lib : 1.0.0 → 1.1.0"]);
+    }
+  }, undefined, async () => { refreshes++; });
+  assert.equal(refreshes, 0);
+  const state = await projectUpdates(project.id);
+  assert.equal(state.runs.length, 0);
+  assert.equal(state.assessment?.stage, "completed");
+  assert.equal((await startProjectUpdate({ projectId: project.id }, dispatch, { assessment: true })).id, run.id);
+  assert.equal(dispatches, 1);
+  const installation = await startProjectUpdate({ projectId: project.id }, async () => {});
+  assert.equal(installation.purpose, undefined);
+  assert.notEqual(installation.id, run.id);
+});
+
+test("Bilan durable : un résultat sans preuve de candidate ne devient pas une mise à jour réussie", async () => {
+  const { project } = await fixture();
+  const run = await startProjectUpdate({ projectId: project.id }, async () => {}, { assessment: true });
+  await executeUpdate(run.id, async (_run, _targets, results) => { for (const result of results) finishAssessment(result, []); });
+  const stored = (await readUpdateRun(run.id))!;
+  assert.equal(stored.stage, "failed");
+  assert.match(stored.results[0].message, /proposition vérifiable/);
+  assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
+});
+
+test("Bilan durable : un exécuteur interrompu libère seulement ses propres verrous, sans toucher une installation", async () => {
+  const first = await fixture(), second = await fixture();
+  const report = await startProjectUpdate({ projectId: first.project.id }, async () => {}, { assessment: true });
+  const installation = await startProjectUpdate({ projectId: second.project.id }, async () => {});
+  const db = await updateStorage();
+  report.updatedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  await db.prepare("UPDATE update_runs SET data=? WHERE id=?").run(JSON.stringify(report), report.id);
+  await expireInterruptedAssessments();
+  assert.equal((await readUpdateRun(report.id))!.stage, "failed");
+  assert.equal((await readUpdateRun(installation.id))!.stage, "queued");
+  assert.equal((await db.prepare("SELECT scope FROM update_locks WHERE run_id=?").all(report.id)).length, 0);
+  assert.ok((await db.prepare("SELECT scope FROM update_locks WHERE run_id=?").all(installation.id)).length > 0);
 });
 
 test("Moteur : échec d’un dépôt indépendant n’empêche pas le suivant ; seuls les périmètres incertains restent verrouillés", async () => {

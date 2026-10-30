@@ -4,6 +4,24 @@ Le workflow `vigie-wordpress-agents.yml` programme un contrôle toutes les cinq 
 
 ## Analyses autonomes des failles et des mises à jour
 
+### Bilan quotidien des versions stables
+
+Le workflow `vigie-daily-assessments.yml` programme chaque jour à 03 h 17 UTC (04 h 17 en hiver et 05 h 17 en été à Paris) un bilan préalable des projets actifs. Il peut aussi être lancé manuellement. GitHub Actions peut retarder son démarrage. Le plan crée au plus un bilan par projet et par jour UTC ; deux projets sont traités simultanément. Les projets archivés sont exclus. Les accès et l’environnement `vigie-maintenance` existants sont réutilisés, sans nouveau secret ni migration.
+
+Le workflow réutilise `vigie-updates.yml` avec une finalité `assessment` vérifiée avant l’exécution. Le moteur suit les mêmes étapes de préparation, puis s’arrête avant l’installation :
+
+- Node : récupération des sources, recherche de versions stables, résolution des dépendances et replis de compatibilité, scans de sécurité, constructions et scripts de tests disponibles en conteneurs isolés. Les fichiers candidats ne sont ni committés, ni déployés, ni conservés comme sources installées. La validation lourde n’est pas remplacée par un ancien reçu dans ce bilan.
+- WordPress : inspection du plan par l’agent existant ou SSH, vérification des prérequis et scans des versions candidates. Aucune demande de sauvegarde, installation ou restauration n’est envoyée. La recette métier de la candidate reste à faire sur une copie ; une comparaison de prérequis n’est pas présentée comme un test intégral du site.
+- Image Tailscale qualifiée : contrôle de la configuration et du réseau actuel, comparaison de l’empreinte stable, scan de l’image et lecture isolée de sa version. Aucun remplacement, déploiement, snapshot ni renouvellement d’autorisation n’est demandé. La reconnexion de la candidate sera contrôlée lors d’une installation explicite.
+
+Les bilans et les installations restent séparés dans l’API et l’interface. Les mêmes verrous de sources empêchent leur exécution simultanée ; un bilan interrompu sans battement depuis deux heures est libéré au prochain plan quotidien. Les blocs manuels ou non qualifiés restent signalés, sans succès inventé. Un échec d’un groupe ne supprime pas le résultat des autres.
+
+Une proposition est liée au déploiement, aux sources et à sa date. Après 24 heures, un changement de déploiement ou une maintenance plus récente, elle redevient à actualiser. Pour les blocs validés, le compteur utilise les changements retenus par le moteur et retire les simples comparaisons de catalogue ; les versions non validées restent identifiées comme telles. Les alertes de sécurité et interventions manuelles restent affichées séparément.
+
+Après une installation réussie et une observation confirmant le déploiement contrôlé, un bilan après maintenance remplace immédiatement les estimations de catalogue pour les blocs couverts. Il ne déclare pas les autres blocs à jour et n’empêche pas le prochain bilan quotidien. Une observation manquante ou différente ne produit aucun faux résultat actuel. Le bouton d’installation relance toujours ses propres contrôles ; un bilan quotidien ne lui donne aucune dispense de validation.
+
+### Contrôle horaire des versions installées
+
 Après la synchronisation de chaque hébergeur, le worker `scripts/automatic-control-worker.ts` parcourt les projets actifs de son périmètre. Il analyse chaque service au premier passage, lorsque son déploiement ou ses versions WordPress changent, puis à l’expiration d’une heure. Les déploiements des projets surveillés sont détectés par les lectures périodiques des API Vercel/Railway ; aucun webhook n’est installé dans ces projets. Ils déclenchent leur analyse au passage qui les découvre. Un déploiement intermédiaire remplacé entre deux lectures ne peut pas être garanti comme analysé.
 
 WordPress utilise un inventaire existant renouvelé par le contrôle des agents et un nouveau relevé WPVulnerability, y compris lorsque les versions n’ont pas changé. Le cœur, les extensions ordinaires et les thèmes publics identifiables sont analysés, y compris inactifs ; les composants privés, thèmes enfants et MU-plugins gardent une couverture manuelle explicite. Les informations de versions disponibles sont relevées par le connecteur WordPress. Les caches des catalogues WordPress.org, PHP.net, Node et npm sont limités à une heure. Voir [la maintenance des composants conservés](o2switch-maintenance.md).

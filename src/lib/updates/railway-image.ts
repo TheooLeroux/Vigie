@@ -17,6 +17,7 @@ import { verifyTailscaleAuthorization } from "./tailscale-auth";
 import { prepareSocksHealth, verifySocksHealth } from "./socks-health";
 import { saveUpdateSnapshot } from "./storage";
 import type { SecurityFinding, UpdateResult, UpdateRun, UpdateStage, UpdateTarget } from "./types";
+import { finishAssessment } from "./assessment";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const deployment = z.object({ id: z.uuid(), status: z.string(), meta: z.unknown() });
@@ -90,6 +91,12 @@ export async function executeRailwayImage(run: UpdateRun, target: UpdateTarget, 
     if (!gte(version, oldRuntime.version)) throw new ApiError("L’image stable ferait reculer la version Tailscale. Remplacement refusé.", 422);
     result.imageUpdate = { channel: candidate.channel, previous, candidate: candidate.reference, digest: candidate.digest, remainingFindings: result.checks.at(-1)!.findings.length, state: "ephemeral-socks", previousDevice: oldRuntime.device };
     result.warnings.push("Proxy SOCKS sortant sans volume persistant : reconnexion avec les paramètres existants ; l’identité éphémère du client peut être renouvelée.");
+    if (run.purpose === "assessment") {
+      const latest = await readConfiguration(target, dependencies.request);
+      if (latest.fingerprint !== before.fingerprint || latest.serviceInstance.source.image !== target.image || latest.serviceInstance.activeDeployments.length !== 1 || latest.serviceInstance.activeDeployments[0].id !== previousDeployment.id) throw new ApiError("La configuration a changé pendant le bilan. Proposition invalidée.", 409);
+      finishAssessment(result, same ? [] : [`Image stable Tailscale : ${oldRuntime.version} → ${version} (${candidate.digest.slice(0, 19)}…)`], "Image candidate analysée, version et réseau actuel contrôlés. La reconnexion de la candidate sera vérifiée lors du remplacement.");
+      return; // No authorization refresh, snapshot, source mutation or deployment.
+    }
     if (!same) await dependencies.authorization(before.variables);
     const latest = await readConfiguration(target, dependencies.request);
     if (latest.fingerprint !== before.fingerprint || latest.serviceInstance.source.image !== target.image || latest.serviceInstance.activeDeployments.length !== 1 || latest.serviceInstance.activeDeployments[0].id !== previousDeployment.id) throw new ApiError("La configuration a changé pendant l’analyse. Aucune image remplacée.", 409);

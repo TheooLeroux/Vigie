@@ -11,16 +11,17 @@ import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
+import { finishAssessment, wordpressAssessmentChanges } from "./assessment";
 
-export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget, result: UpdateResult, inventory: SiteInventory, progress: (stage: UpdateStage, message: string) => Promise<void>) {
-  return withLocalWordPressAgent(target, async (operation, settings) => {
+export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget, result: UpdateResult, inventory: SiteInventory, progress: (stage: UpdateStage, message: string) => Promise<void>, dependencies = { agent: withLocalWordPressAgent, scanner: freeWordPressScanner }) {
+  return dependencies.agent(target, async (operation, settings) => {
     await progress("checking", "L’agent local prépare le plan WordPress sans connexion SSH.");
     const inspection = await operation(run.id, "inspect");
     const eligibility = z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).parse(inspection.eligibility);
     if (eligibility.multisite || eligibility.fileModsDisabled || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url!).hostname.replace(/^www\./, "")) throw new ApiError("Le site ou sa configuration ne correspond pas au parcours de maintenance.");
     const proposed = agentPlan(inspection.plan);
     if (proposed.php !== inventory.php?.version) throw new ApiError("Le PHP de l’agent local diffère du PHP web. Aucun site n’a été modifié.");
-    const scan = freeWordPressScanner();
+    const scan = dependencies.scanner();
     const plan = await scan.prepare(proposed);
     checkWordPressRequirements(plan);
     const baseline = await scan(plan, false);
@@ -31,6 +32,10 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     result.warnings.push(...scan.warnings, "PHP est affiché et conservé ; sa gestion reste chez l’hébergeur. Les thèmes sont conservés.");
     result.checks.push(candidate); requireSecurityPass(candidate);
     if (scan.warnings.length && candidate.status === "passed") { candidate.status = "warning"; candidate.message += " Certains composants sont conservés et hors couverture ; détails dans le suivi."; }
+    if (run.purpose === "assessment") {
+      finishAssessment(result, wordpressAssessmentChanges(plan), "Plan de l’agent, prérequis et vulnérabilités contrôlés. La recette métier sur une copie du site reste nécessaire ; aucune sauvegarde ni installation lancée.");
+      return;
+    }
     if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) {
       result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return;
     }

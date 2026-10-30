@@ -4,7 +4,7 @@ import type { Project } from "./types";
 import type { UpdateRun } from "./updates/types";
 export async function recordedBackups(offset = 0) {
   const db = await updateStorage();
-  const rows = await db.prepare("SELECT data FROM update_runs WHERE (data LIKE ? OR data LIKE ? OR data LIKE ?) ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT ? OFFSET ?").all('%"backup":%', '%"previousCommit":%', '%"previousDeploymentId":%', 26, offset) as { data: string }[];
+  const rows = await db.prepare("SELECT data FROM update_runs WHERE COALESCE(json_extract(data,'$.purpose'),'update')<>'assessment' AND (data LIKE ? OR data LIKE ? OR data LIKE ?) ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT ? OFFSET ?").all('%"backup":%', '%"previousCommit":%', '%"previousDeploymentId":%', 26, offset) as { data: string }[];
   const projects = new Map((await list<Project>("projects", "live")).map(project => [project.id, project]));
   const items = rows.slice(0, 25).flatMap(row => {
     const run = JSON.parse(row.data) as UpdateRun;

@@ -36,6 +36,9 @@ import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
 import { assertSourceImpact } from "./source-impact";
 import { executeRailwayImage } from "./railway-image";
 import { recordCompletedImageControls } from "./image-control";
+import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges, wordpressAssessmentChanges } from "./assessment";
+import { recordAssessmentAfterUpdate } from "./assessment-after-update";
+import { imageSecurityCheck } from "./image-policy";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -141,11 +144,13 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const names = await extractArchive(archive, sourceFolder, representative.mode === "git");
     const staticProfiles = new Map<string, StaticProfile>();
+    const initialManifests = new Map<string, Record<string, any>>();
     const staticBuilds = new Map<string, StaticBuild>();
     for (const target of targets) {
       const prefix = target.root ? target.root + "/" : "";
       const local = [...new Set(names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length).split("/")[0]))];
       const manifest = local.includes("package.json") ? JSON.parse(await readFile(join(sourceFolder, prefix + "package.json"), "utf8")) : undefined;
+      if (manifest) initialManifests.set(target.id, structuredClone(manifest));
       const family = sourceFamily(local, manifest);
       if (vercelStaticTarget(target)) staticProfiles.set(target.id, await qualifyStaticSources(sourceFolder, target, names, staticFrameworks.get(target.id)!));
       if (family !== "node") throw new ApiError(`Les sources sélectionnées correspondent à ${family}. Aucun paquet n’est installé ni publié par le parcours Node ; un adaptateur dédié est nécessaire.`, 422);
@@ -158,12 +163,12 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
-    const catalogs = nodeCatalogState(fetch, Date.parse(run.createdAt));
+    const catalogs = nodeCatalogState(fetch, Date.parse(run.purpose === "assessment" ? run.startedAt || run.createdAt : run.createdAt));
     const policyHash = await nodePolicyHash();
     const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
     await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
     const previous = await completedNodeRuns(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
-    let receipt: NodeValidationReceipt | null = previous.flatMap(run => run.nodeReceipts || []).map(raw => reusableNodeReceipt(raw, key)).find(Boolean) || null;
+    let receipt: NodeValidationReceipt | null = run.purpose === "assessment" ? null : previous.flatMap(run => run.nodeReceipts || []).map(raw => reusableNodeReceipt(raw, key)).find(Boolean) || null;
     if (receipt) {
       try {
         for (const [index, target] of targets.entries()) {
@@ -340,6 +345,23 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       result.warnings = [...new Set([...result.warnings, ...warnings])];
     }
     for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root) && !vercelStaticTarget(target)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
+    if (run.purpose === "assessment") {
+      if (changes.length) await assertSourceImpact(targets, changes.map(file => file.path));
+      await refreshProjectHosting(run.projectId);
+      const current = await updateTargets(run.projectId);
+      if (targets.some(target => JSON.stringify(current.find(item => item.id === target.id)) !== JSON.stringify(target))) throw new ApiError("La configuration a changé pendant le bilan ; une nouvelle vérification est nécessaire.", 409);
+      if (representative.mode === "git") {
+        const head = await githubRequest(`/repos/${representative.repository}/git/ref/heads/${encodeURIComponent(representative.branch!)}`, githubUpdateToken(representative.repository!));
+        if (head.object.sha !== expected) throw new ApiError("Les sources ont changé pendant le bilan ; proposition invalidée.", 409);
+      } else if ((await readUpdateSource(representative.id))?.revision !== original!.revision) throw new ApiError("Les sources conservées ont changé pendant le bilan.", 409);
+      for (const [index, target] of targets.entries()) {
+        if (await providerPreflight(target, version) !== results[index].previousDeploymentId) throw new ApiError("Le déploiement a changé pendant le bilan ; proposition invalidée.", 409);
+        const manifest = JSON.parse(await readFile(join(sourceFolder, target.root, "package.json"), "utf8"));
+        finishAssessment(results[index], nodeAssessmentChanges(target, initialManifests.get(target.id)!, manifest, changes.map(file => file.path)), "Tests isolés des scripts disponibles ; les parcours métier et le déploiement de la candidate restent à vérifier lors de l’installation.");
+        if (expected) results[index].assessment!.sourceCommit = expected;
+      }
+      return; // Publication, snapshots and production checks are unreachable.
+    }
     async function verifyNode(index: number, deploymentId: string) {
       const result = results[index];
       if (vercelStaticTarget(targets[index])) {
@@ -472,6 +494,10 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
     await progress("checking", "Contrôle des versions à installer terminé ; composants manuels conservés.");
     requireSecurityPass(candidate);
     result.warnings.push(...scan.warnings);
+    if (run.purpose === "assessment") {
+      finishAssessment(result, wordpressAssessmentChanges(plan), "Prérequis et vulnérabilités des versions candidates vérifiés ; la compatibilité métier exige une recette sur une copie du site.");
+      return;
+    }
     if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) { result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return; }
     await progress("checking", "Vérification de WordPress et sauvegarde des fichiers et de la base.");
     const backupOutput = await execute(wordpressBackupScript(target.root, username, run.id, target.url!, fresh.php!.version));
@@ -542,10 +568,18 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
           if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
           else if (targets[0].mode === "image") await executeImage(run, targets[0], results[0], progress);
           else await executeGroup(run, targets, results, progress);
-          requireZeroFinalFindings(results);
+          if (run.purpose === "assessment") {
+            if (results.some(result => !assessmentResultIsSafe(result))) throw new ApiError("Le bilan préalable n’a pas produit de proposition vérifiable sans installation.", 422);
+            if (targets[0].mode === "image") for (const result of results) {
+              const before = result.checks?.find(check => check.tool === "Trivy" && check.phase === "before");
+              const candidate = result.checks?.findLast(check => check.tool === "Trivy" && check.phase === "candidate");
+              if (!before || !candidate || candidate.scope !== result.imageUpdate?.candidate) throw new ApiError("Le bilan image n’est pas lié à l’empreinte candidate analysée.", 422);
+              requireSecurityPass(imageSecurityCheck("candidate", candidate.scope, candidate.findings, before.findings));
+            } else requireZeroFinalFindings(results);
+          } else requireZeroFinalFindings(results);
           if (results.some(result => result.stage !== "completed")) throw new ApiError("Le résultat final du service n’est pas confirmé.", 502);
         } catch (error) {
-          const stage = failureStage(results, error);
+          const stage = run.purpose === "assessment" ? "failed" : failureStage(results, error);
           const reason = error instanceof ApiError ? error.message : "Le traitement de ce groupe a échoué. Les informations de récupération sont conservées.";
           for (const result of results.filter(result => result.stage !== "completed" || result.checks?.some(check => check.status === "blocked"))) { result.stage = stage; result.message = reason; }
           // A rejected final security guard also revokes a provisional success.
@@ -557,7 +591,13 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       if (failures.length) {
         run.stage = run.results.some(result => result.stage === "attention") ? "attention" : "failed";
         run.message = `${run.results.filter(result => result.stage === "completed").length} service(s) terminé(s), ${run.results.filter(result => result.stage !== "completed").length} service(s) non confirmé(s). ${failures.join(" ")} Les groupes indépendants ont été traités ; le succès global n’est pas confirmé.`;
-        await log("live", "updates.failed", run.message, run.projectId);
+        await log("live", run.purpose === "assessment" ? "updates.assessment_failed" : "updates.failed", run.message, run.projectId);
+        return;
+      }
+      if (run.purpose === "assessment") {
+        run.stage = "completed";
+        run.message = "Bilan préalable terminé. Aucun composant installé ni déployé.";
+        await log("live", "updates.assessed", run.message, run.projectId);
         return;
       }
       requireZeroFinalFindings(run.results);
@@ -573,10 +613,10 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
     });
   } catch (error) {
     const published = run.results.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && run.results.some(result => ["publishing", "verifying", "attention"].includes(result.stage)));
-    run.stage = published ? "attention" : "failed";
+    run.stage = run.purpose === "assessment" ? "failed" : published ? "attention" : "failed";
     run.message = error instanceof ApiError ? error.message : "Une étape de mise à jour a échoué. Les informations de récupération sont conservées.";
     for (const result of run.results.filter(result => result.stage !== "completed" && result.stage !== "attention")) { result.stage = run.stage; result.message = run.message; }
-    await withAuditActor(run.actor, () => log("live", "updates.failed", run.message, run.projectId));
+    await withAuditActor(run.actor, () => log("live", run.purpose === "assessment" ? "updates.assessment_failed" : "updates.failed", run.message, run.projectId));
   } finally {
     clearInterval(heartbeat);
     await writes;
@@ -590,7 +630,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       }
     });
   }
-  const observedTargets = run.targets.filter(target => run.results.some(result => result.targetId === target.id && (result.stage === "completed" || target.mode === "image" && result.stage === "attention")));
+  const observedTargets = run.purpose === "assessment" ? [] : run.targets.filter(target => run.results.some(result => result.targetId === target.id && (result.stage === "completed" || target.mode === "image" && result.stage === "attention")));
   if (observedTargets.length) {
     await afterComplete(observedTargets);
     const pending = await recordCompletedImageControls(run);
@@ -600,6 +640,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       await writeUpdateRun(run);
     }
   }
+  try { await recordAssessmentAfterUpdate(run); }
+  catch { /* A failed observation never turns a completed installation into a claim of current versions. */ }
   return true;
 }
 async function refreshUpdateInventories(targets: UpdateTarget[]) {

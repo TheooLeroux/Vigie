@@ -128,6 +128,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false }
     return () => { alive.current = false; controller.abort(); queue.dispose(); unsubscribe(); };
   }, [refresh, subscribe, projectId]);
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
+  const assessmentActive = !!state?.assessment && activeUpdateStages.includes(state.assessment.stage);
   const available = state?.targets.filter(target => !target.unavailable && (!target.capability || target.capability.status === "automatic" && target.capability.adapter)) || [];
   const unresolved = latest?.stage === "attention";
   const newerObservation = latest?.stage === "failed" && state?.currentSecurity?.some(item => !item.error && item.check && Date.parse(item.check.checkedAt) > Date.parse(latest.updatedAt));
@@ -139,7 +140,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false }
   }
   return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
     <div className="updates-heading"><div>{!embedded && <h2>Mettre le projet à jour</h2>}<p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
-      <button className="button primary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
+      <button className="button primary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
     </div>
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
@@ -150,7 +151,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false }
     {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
     {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
     </details>}
-    {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
+    {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
     {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
     <ManagedNodeNotice run={latest} />
     {!!latest?.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}

@@ -90,6 +90,8 @@ Ce script est une opération locale d’administration. Avant de l’appliquer, 
 
 ## Mises à jour en un clic
 
+Un bilan quotidien recherche et valide les propositions stables avant installation, via le même moteur de préparation, sans installer ni publier les candidats. Le bloc Mises à jour sépare ces résultats des simples versions repérées dans les catalogues, des interventions manuelles et de l’historique des installations. Une maintenance réussie actualise immédiatement le bilan des blocs dont le déploiement est confirmé. Voir [la cadence, les contrôles et les limites](docs/controle-hebergements.md#bilan-quotidien-des-versions-stables).
+
 La [matrice des capacités de maintenance](docs/matrice-capacites-maintenance.md) distingue, pour les configurations du parc, la détection actuelle, les mises à jour envisageables, les conditions de retour arrière et les blocages par projet. C'est un état de référence daté, pas un moteur de mise à jour activé ni une autorisation d'intervenir. Les sauvegardes et restaurations du parc restent à qualifier avant toute automatisation des écritures.
 
 Le nouveau parcours est intégré à chaque fiche projet : **Tout mettre à jour**, progression et résultat, sans écran PR ni choix de versions obligatoire. Il vise Node LTS et les dépendances stables des applications Vercel/Railway, ainsi que WordPress, ses extensions et ses thèmes sur o2switch. Les mises à jour majeures sont incluses lorsque la validation réussit. Voir [le périmètre, l’activation et les limites](docs/mises-a-jour.md).

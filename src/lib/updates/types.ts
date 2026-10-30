@@ -48,6 +48,7 @@ export type UpdateCheck = {
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
 export type ManagedNode = { provider: "vercel"; version: string; latestLts: string; branchLatest?: string; migrationAvailable?: boolean; updatePending: boolean; securityUpdate: boolean | null; checkedAt: string };
 export type UpdateResult = {
+  assessment?: { changes: string[]; limitation?: string; sourceCommit?: string };
   targetId: string;
   name: string;
   stage: UpdateStage;
@@ -64,6 +65,9 @@ export type UpdateResult = {
   imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; networkChecks?: import("./socks-health").SocksHealthProof[]; rollbackDeploymentId?: string };
 };
 export type UpdateRun = {
+  purpose?: "assessment";
+  assessmentOrigin?: "maintenance";
+  assessmentSources?: Record<string, string>;
   nodeReceipts?: import("./node-current").NodeValidationReceipt[];
   id: string;
   projectId: string;
@@ -80,6 +84,7 @@ export type UpdateRun = {
   excludedTargets?: { targetId: string; name: string; reason: string }[];
 };
 export type UpdateState = {
+  assessment?: UpdateRun | null;
   automaticControls?: import("../automatic-control-state").AutomaticControl[];
   currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string; securityCoverage?: import("../automatic-control-state").SecurityCoverageDetails }[];
   enabled: boolean;

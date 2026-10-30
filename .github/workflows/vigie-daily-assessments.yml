@@ -1,0 +1,51 @@
+name: Vigie daily stable version assessments
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: vigie-daily-assessments
+  cancel-in-progress: false
+jobs:
+  plan:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      runs: ${{ steps.plan.outputs.runs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Préparer les bilans sans demander d’installation
+        id: plan
+        run: node --import tsx scripts/daily-assessment-worker.ts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_UPDATES_GITHUB_TOKENS: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKENS }}
+          VIGIE_UPDATES_GITHUB_TOKEN_JANSSEN76140: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKEN_JANSSEN76140 }}
+          VIGIE_UPDATES_REPOSITORIES: ${{ vars.VIGIE_MAINTENANCE_REPOSITORIES }}
+          VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED: ${{ vars.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED }}
+          VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app
+  assess:
+    needs: plan
+    if: needs.plan.outputs.runs != '[]' && needs.plan.outputs.runs != ''
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        run_id: ${{ fromJSON(needs.plan.outputs.runs) }}
+    uses: ./.github/workflows/vigie-updates.yml
+    with:
+      run_id: ${{ matrix.run_id }}
+      assessment: true
+    secrets: inherit

@@ -17,6 +17,8 @@ import { currentWordPressSecurity } from "./wordpress-current-security";
 import { readAutomaticControl } from "../automatic-control-storage";
 import { allowsAutomaticMaintenance } from "./capabilities";
 import { refreshProjectHosting } from "./refresh-hosting";
+import { observedProjectDetail } from "../project-observations";
+import { controlSource } from "../automatic-control-state";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -27,17 +29,19 @@ export function updatesDisabledReason() {
 }
 export async function projectUpdates(projectId: string): Promise<UpdateState> {
   const targets = await updateTargets(projectId);
-  const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
-  return { enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, automaticControls: (await Promise.all(targets.map(target => readAutomaticControl(target.id)))).filter(item => item !== null), currentSecurity: await Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))), runs: rows.map(row => {
+  const db = await updateStorage();
+  const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND COALESCE(json_extract(data,'$.purpose'),'update')<>'assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
+  const daily = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND json_extract(data,'$.purpose')='assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 1").get(projectId) as { data: string } | undefined;
+  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, automaticControls: (await Promise.all(targets.map(target => readAutomaticControl(target.id)))).filter(item => item !== null), currentSecurity: await Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))), runs: rows.map(row => {
     const run = JSON.parse(row.data) as UpdateRun;
     delete run.nodeReceipts;
     return run;
   }) };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
-export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate) {
+export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate, options: { assessment?: boolean } = {}) {
   const input = startSchema.parse(raw);
-  if (!updatesEnabled()) throw new ApiError("Le service de mise à jour n’est pas encore activé.", 503);
+  if (!options.assessment && !updatesEnabled()) throw new ApiError("Le service de mise à jour n’est pas encore activé.", 503);
   await refreshProjectHosting(input.projectId);
   const all = await updateTargets(input.projectId);
   const targets = input.targetIds ? input.targetIds.map(id => {
@@ -45,10 +49,20 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
     if (!target) throw new ApiError("Ce service ne fait pas partie de ce projet.", 404);
     return target;
   }) : all.filter(allowsAutomaticMaintenance);
-  if (!targets.length || targets.length > 30 || new Set(targets.map(target => target.id)).size !== targets.length || targets.some(target => target.unavailable)) throw new ApiError(targets.find(target => target.unavailable)?.unavailable || "Choisissez entre 1 et 30 services distincts pouvant être mis à jour.");
+  if ((!targets.length && !options.assessment) || targets.length > 30 || new Set(targets.map(target => target.id)).size !== targets.length || targets.some(target => target.unavailable)) throw new ApiError(targets.find(target => target.unavailable)?.unavailable || "Choisissez entre 1 et 30 services distincts pouvant être mis à jour.");
   const now = new Date().toISOString();
   const candidate: UpdateRun = { id: randomUUID(), projectId: input.projectId, stage: "queued", createdAt: now, updatedAt: now, actor: auditActor() || { name: "Équipe Vigie", email: "" }, targets, results: [], excludedTargets: all.filter(target => !targets.some(selected => selected.id === target.id)).map(target => ({ targetId: target.id, name: target.name, reason: target.unavailable || (input.targetIds ? "Service non sélectionné pour cette maintenance." : target.capability?.reason) || "Service non sélectionné." })), message: "La mise à jour des services compatibles va démarrer." };
   const db = await updateStorage();
+  if (options.assessment) {
+    candidate.purpose = "assessment";
+    candidate.actor = { name: "Bilan quotidien Vigie", email: "" };
+    candidate.message = "Recherche quotidienne de versions stables, sans installation.";
+    const detail = await observedProjectDetail(input.projectId, "live");
+    candidate.assessmentSources = Object.fromEntries(targets.flatMap(target => {
+      const source = controlSource(target, detail);
+      return source ? [[target.id, source.identity]] : [];
+    }));
+  }
   const { run, created } = await transaction(async () => {
     if (isPostgres()) await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(input.projectId);
     if ((await requireProject(input.projectId, "live")).lifecycle !== "active") throw new ApiError("Projet archivé.", 409);
@@ -57,15 +71,21 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
       if (setup && setup.state !== "ready") throw new ApiError("L’installation automatique de l’agent doit se terminer avant la mise à jour. Rechargez le suivi.", 409);
     }
     const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=?").all(input.projectId) as { data: string }[];
-    const existing = rows.map(row => JSON.parse(row.data) as UpdateRun).find(run => activeUpdateStages.includes(run.stage));
+    const recorded = rows.map(row => JSON.parse(row.data) as UpdateRun);
+    const existing = recorded.find(run => activeUpdateStages.includes(run.stage));
+    if (existing?.purpose === "assessment" && !options.assessment) throw new ApiError("Un bilan préalable est en cours. Attendez sa fin avant de lancer une installation.", 409);
     if (existing) return { run: existing, created: false };
+    if (options.assessment) {
+      const today = recorded.find(run => run.purpose === "assessment" && run.assessmentOrigin !== "maintenance" && run.createdAt.slice(0, 10) === now.slice(0, 10));
+      if (today) return { run: today, created: false };
+    }
     if (rows.some(row => (JSON.parse(row.data) as UpdateRun).stage === "attention")) throw new ApiError("Une publication précédente doit être vérifiée avant de lancer une nouvelle mise à jour.", 409);
     await db.prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(candidate.id, candidate.projectId, candidate.stage, JSON.stringify(candidate));
     for (const scope of [...new Set(targets.map(updateScope))].sort()) {
       const lock = await db.prepare("INSERT INTO update_locks(scope,run_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING").run(scope, candidate.id);
       if (!lock.changes) throw new ApiError("Une mise à jour utilise déjà ces sources. Son suivi reste disponible sur le projet concerné.", 409);
     }
-    await log("live", "updates.started", "Mise à jour du projet demandée.", input.projectId);
+    await log("live", options.assessment ? "updates.assessment_started" : "updates.started", options.assessment ? "Bilan quotidien demandé, sans installation." : "Mise à jour du projet demandée.", input.projectId);
     return { run: candidate, created: true };
   });
   if (created) {

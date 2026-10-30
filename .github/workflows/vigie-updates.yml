@@ -1,6 +1,15 @@
 name: Vigie updates
 run-name: vigie-update-${{ inputs.run_id }}
 on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: string
+      assessment:
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       run_id:
@@ -38,6 +47,7 @@ jobs:
         run: node --import tsx scripts/update-worker.ts
         env:
           VIGIE_UPDATE_RUN_ID: ${{ inputs.run_id }}
+          VIGIE_UPDATE_EXPECT_PURPOSE: ${{ inputs.assessment && 'assessment' || 'update' }}
           VIGIE_UPDATES_ENABLED: "1"
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
