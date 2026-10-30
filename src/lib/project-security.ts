@@ -19,6 +19,7 @@ export type ProjectVulnerability = {
   key: string; id: string; aliases: string[]; targetId: string; service: string;
   package: string; version: string; severity: SecurityFinding["severity"]; usage: NonNullable<SecurityFinding["usage"]>;
   kind: NonNullable<SecurityFinding["kind"]>; checkedAt: string; explanation?: string;
+  title?: string; fixedVersions?: string[]; url?: string;
 };
 const securityTools = new Set(["OSV", "WPScan", "WPVulnerability", "Trivy"]);
 const severityOrder = ["critical", "high", "moderate", "low", "unknown"];
@@ -55,6 +56,9 @@ export function normalizedVulnerabilities(evidence: ProjectHealth["securityEvide
       severity: finding.severity, usage: finding.usage || "unknown",
       kind: confirmed.length ? "vulnerability" as const : finding.kind || "unconfirmed" as const,
       checkedAt: entries.map(item => item.checkedAt).sort().at(-1)!, explanation: finding.explanation,
+      title: finding.title || entries.find(item => item.finding.title)?.finding.title,
+      fixedVersions: finding.fixedVersions,
+      url: finding.url || entries.find(item => item.finding.url)?.finding.url,
     };
   }).sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity) || a.key.localeCompare(b.key));
 }

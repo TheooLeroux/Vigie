@@ -45,7 +45,7 @@
 .project-tabs {
   display: flex;
   gap: 28px;
-  margin: 28px 0 24px;
+  margin: 18px 0 20px;
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
 }
@@ -78,7 +78,7 @@
 .health-details p { margin-top: 10px; color: var(--muted); }
 .project-health-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 .project-health-card {
@@ -107,10 +107,50 @@
 .project-health-card.warning { border-color: var(--amber); border-top-width: 3px; }
 .project-health-card.warning .project-health-title > svg { color: var(--amber); }
 html[data-theme="dark"] .project-health-card.danger .project-health-title > svg { color: #ff9aa4; }
+.security-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; }
+.security-panel-heading .security-coverage-summary { margin: 0; justify-content: flex-end; }
+.project-security-card .security-severities { margin: 0; gap: 6px; }
+.project-security-card .security-coverage-note { color: var(--muted); font-size: 11px; }
+.security-findings-group { width: 100%; min-width: 0; }
+.project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
+.project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
+.project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }
+.security-finding > summary { display: flex; align-items: center; gap: 12px; padding: 11px 0; list-style: none; cursor: pointer; }
+.security-finding > summary::-webkit-details-marker { display: none; }
+.security-finding > summary::after { content: "›"; color: var(--muted); font-size: 20px; }
+.security-finding[open] > summary::after { transform: rotate(90deg); }
+.security-finding > summary:hover .security-finding-content > strong { text-decoration: underline; text-underline-offset: 3px; }
+.security-finding > summary:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; border-radius: 4px; }
+.security-finding-content { display: grid; flex: 1; gap: 4px; min-width: 0; }
+.security-finding-content > strong { color: var(--ink); font-size: 12px; line-height: 1.5; }
+.security-finding-content > span, .security-finding-reference { color: var(--muted); font-size: 11px; }
+.security-version { font-variant-numeric: tabular-nums; }
+.security-finding-reference { flex-shrink: 0; }
+.security-severity, .security-severities > .security-severity { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 68px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--text); font-size: 10px; font-weight: 600; }
+.security-severity.critical, .security-severity.high { color: #a42c3a; background: #fcecef; border-color: #edc6cd; }
+.security-severity.critical { color: #8c1e31; background: #f9dde3; border-color: #dea6b1; }
+.security-severity.moderate { color: #85601e; background: #fcf3df; border-color: #e7d5ad; }
+html[data-theme="dark"] .security-severity.high { color: #ffb0b8; background: #3b242b; border-color: #6c3b46; }
+html[data-theme="dark"] .security-severity.critical { color: #ffc0ca; background: #512731; border-color: #95505f; }
+html[data-theme="dark"] .security-severity.moderate { color: var(--warning); background: var(--warning-bg); border-color: #675333; }
+.security-finding-body { display: grid; gap: 8px; padding: 0 0 15px 80px; }
+.project-health-card .security-finding-body a { justify-self: start; margin: 0; padding: 0; text-decoration: underline; }
+.project-health-card .security-secondary { margin-top: 0; border-top: 1px solid var(--line); padding-top: 6px; }
+.security-history { width: 100%; }
+.security-history > p + small, .security-history > small + p { display: block; margin-top: 6px; }
+.security-more { margin-top: 8px; }
+.project-maintenance-card > .health-details { margin-top: 0; }
 #project-updates, #project-technical { scroll-margin-top: 88px; }
 @media (max-width: 760px) {
   .project-health-summary { grid-template-columns: 1fr; gap: 12px; }
   .project-health-card { padding: 17px; }
+  .security-panel-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .security-panel-heading .security-coverage-summary { justify-content: flex-start; }
+  .security-finding > summary { flex-wrap: wrap; gap: 8px; position: relative; padding-right: 18px; }
+  .security-finding-content { flex-basis: calc(100% - 82px); }
+  .security-finding-reference { display: none; }
+  .security-finding > summary::after { position: absolute; right: 0; top: 14px; }
+  .security-finding-body { padding-left: 0; }
 }
 .project-intro {
   max-width: 850px;

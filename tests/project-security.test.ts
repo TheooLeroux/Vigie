@@ -50,6 +50,26 @@ test("Compteur : fusion transitive des alias sans confondre composants, versions
   assert.deepEqual(entries[0].aliases, ["CVE-2026-0001", "CVE-2026-0002", "GHSA-ONE", "GHSA-TWO"]);
 });
 
+test("Fiche : intitulé et correction du signalement conservés, failles les plus graves visibles en premier", () => {
+  const base = healthCheck().findings[0];
+  const { detail, state } = fixture([
+    ...Array.from({ length: 6 }, (_, index) => ({ ...base, id: `GHSA-low-${index}`, aliases: [], severity: "low" as const, package: `library-${index}` })),
+    { ...base, id: "GHSA-critical", aliases: [], severity: "critical", title: "Exécution de code à distance", fixedVersions: ["1.2.3"], url: "https://example.test/advisory" },
+  ]);
+  const security = projectSecurity(detail, state);
+  assert.equal(security.vulnerabilities[0].title, "Exécution de code à distance");
+  assert.deepEqual(security.vulnerabilities[0].fixedVersions, ["1.2.3"]);
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(html, /7 failles connues/);
+  assert.match(html, /Correction :/);
+  assert.match(html, /1\.2\.3/);
+  assert.match(html, /href="https:\/\/example.test\/advisory"/);
+  assert.ok(html.indexOf("Exécution de code à distance") < html.indexOf("library-0"));
+  assert.ok(html.indexOf("library-0") < html.indexOf("Voir les 2 autres signalements"));
+  assert.ok(html.indexOf("Voir les 2 autres signalements") < html.indexOf("library-5"));
+  assert.doesNotMatch(html, /<details[^>]*open/);
+});
+
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {
   const { detail, state, report } = fixture([]);
   report.warnings.push("Le code métier n’est pas analysé.", "Catalogue de mises à jour indisponible.");

@@ -33,7 +33,7 @@ Les projets s’actualisent via [Neon Realtime](docs/projets-realtime.md), sans 
 - Fiches projets, environnements et services.
 - Ajout en deux parcours : lier un site déjà détecté chez un hébergeur, ou créer une fiche de zéro. Le second parcours crée une fiche Vigie, sans provisionner de service distant.
 - Connexions regroupées par hébergeur, avec sélection o2switch, Vercel ou Railway.
-- Fiche projet répartie en quatre onglets : vue d’ensemble avec sécurité et mise à jour en un clic, relevés techniques et hébergement, informations et services, historique. Les listes de composants, rapports et réglages se déplient à la demande ; les traitements en cours et les blocages restent visibles.
+- Fiche projet répartie en quatre onglets : vue d’ensemble, technique, informations et historique. La vue d’ensemble présente d’abord les failles par gravité (cinq visibles, les suivantes à déplier), avec composant, service, intitulé et détails des correctifs référencés, puis un bloc unique pour le bilan et le lancement des mises à jour. Les preuves de couverture, rapports et réglages se déplient à la demande ; les traitements en cours et les blocages restent visibles.
 - Liste unique des projets et journal attribué au membre connecté.
 - Activité avec recherche, filtres par projet/type/date et pagination des 100 dernières actions chargées.
 - Backup affiche « Coming soon ».

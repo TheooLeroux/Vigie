@@ -97,7 +97,7 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
-export function ProjectUpdates({ projectId, request, onState }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void }) {
+export function ProjectUpdates({ projectId, request, onState, embedded = false }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void; embedded?: boolean }) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true);
   const refreshing = useRef(false);
@@ -137,19 +137,20 @@ export function ProjectUpdates({ projectId, request, onState }: { projectId: str
     catch (error) { setError(error instanceof Error ? error.message : "La mise à jour n’a pas démarré."); }
     finally { setBusy(false); }
   }
-  return <section id="project-updates" className="panel project-updates" aria-label="Mises à jour du projet">
-    <div className="updates-heading"><div><h2>Mettre le projet à jour</h2><p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
+  return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
+    <div className="updates-heading"><div>{!embedded && <h2>Mettre le projet à jour</h2>}<p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
       <button className="button primary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
     </div>
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
-    {state && <UpdateReadiness state={state} />}
+    {state && (!embedded || !state.enabled || !state.targets.length || state.targets.some(target => target.unavailable)) && <UpdateReadiness state={state} />}
     {state?.targets.some(target => target.provider !== "o2switch") && <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>}
-    {state && <MaintenanceScope targets={state.targets} />}
+    {state?.targets.some(target => target.capability) && <details className="updates-details"><summary>Périmètre et conditions de maintenance</summary><MaintenanceScope targets={state.targets} />
     {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
-    {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
     {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
+    </details>}
+    {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
     {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
     <ManagedNodeNotice run={latest} />
     {!!latest?.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}

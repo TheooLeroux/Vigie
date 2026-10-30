@@ -642,8 +642,8 @@ function WorkspaceContent({
           ))}
         </div>
         <div className="project-content project-tab-panel" id="project-panel-overview" role="tabpanel" aria-labelledby="project-tab-overview" hidden={projectTab !== "overview"} tabIndex={0}>
-          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} />
+          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable}
+            maintenance={<ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} embedded />} />
         </div>
         <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
           <section

@@ -9,12 +9,23 @@ const usageLabels = { runtime: "Dépendance de production", build: "Développeme
 const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
 
 function Findings({ items }: { items: ProjectVulnerability[] }) {
-  return <ul className="security-findings">{items.map(item => <li key={item.key}>
-    <strong>{item.package} {item.version}</strong> · {item.id}
-    <small>{item.service} · {severityLabels[item.severity]} · {usageLabels[item.usage]}</small>
-    {item.explanation && <small>{item.explanation}</small>}
-    <small>Signalement relevé le {date(item.checkedAt)}</small>
+  const rows = (entries: ProjectVulnerability[]) => <ul className="security-findings">{entries.map(item => <li key={item.key}>
+    <details className="security-finding">
+      <summary>
+        <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
+        <span className="security-finding-content"><strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong><span>{item.package} <span className="security-version">{item.version}</span> · {item.service}</span></span>
+        <span className="security-finding-reference">{item.id}</span>
+      </summary>
+      <div className="security-finding-body">
+        {item.explanation && <p>{item.explanation}</p>}
+        <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) référencée(s) {item.fixedVersions.join(", ")}. La compatibilité reste à valider avant installation.</> : "aucune version correctrice indiquée dans ce rapport. Consulter le signalement pour déterminer la marche à suivre."}</p>
+        <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
+        <small>Références : {item.aliases.join(" · ") || item.id}</small>
+        {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
+      </div>
+    </details>
   </li>)}</ul>;
+  return <div className="security-findings-group">{rows(items.slice(0, 5))}{items.length > 5 && <details className="health-details security-more"><summary>Voir les {items.length - 5} autres signalements</summary>{rows(items.slice(5))}</details>}</div>;
 }
 
 export function ProjectSecurityPanel({ detail, updates, health, unavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean }) {
@@ -22,23 +33,22 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
   const historical = security.lastKnown;
   const hasAlerts = security.count > 0 || security.signals.length > 0 || security.alerts.length > 0;
   const loading = updates === undefined;
+  const secondarySummary = [security.signals.length > 0 ? `${security.signals.length} signalement(s) à confirmer` : "", security.alerts.length > 0 ? `${security.alerts.length} autre(s) alerte(s)` : ""].filter(Boolean).join(" · ");
   const Icon = hasAlerts ? ShieldAlert : security.known ? ShieldCheck : CircleHelp;
-  return <article className={`project-health-card ${hasAlerts ? "danger" : "neutral"}`}>
-    <div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité</span><h2>{hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
-    <p>{historical ? `${historical.count} vulnérabilité(s) relevée(s) lors des derniers contrôles enregistrés.` : security.count || security.known || security.partial ? `${security.count} vulnérabilité(s) connue(s) sur les composants analysés.` : loading ? "Chargement des derniers contrôles…" : "Le nombre de vulnérabilités ne peut pas encore être établi."}</p>
-    {historical && <div><small>Contrôles du {date(historical.checkedAt)}{historical.latestCheckedAt !== historical.checkedAt ? ` au ${date(historical.latestCheckedAt)}` : ""} · {historical.analyzedServices}/{historical.totalServices} service(s) analysé(s){historical.partial ? " · périmètre partiel" : ""}.</small><p>Ces résultats restent consultables, mais ne confirment pas l’état actuel. Les prochains contrôles les actualiseront automatiquement.</p><details className="health-details"><summary>Voir le dernier rapport enregistré</summary>{historical.vulnerabilities.length > 0 ? <Findings items={historical.vulnerabilities} /> : <p>Aucune vulnérabilité n’avait été signalée dans le périmètre de ces contrôles.</p>}{historical.signals.length > 0 && <><h3>Signalements à confirmer dans ce rapport</h3><Findings items={historical.signals} /></>}</details></div>}
-    <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
-    {!security.known && <small>Couverture partielle ou indisponible : les composants non analysés restent à vérifier.</small>}
-    {(security.signals.length > 0 || security.alerts.length > 0) && <p>{security.signals.length} signalement(s) à confirmer · {security.alerts.length} autre(s) alerte(s), hors compteur de vulnérabilités.</p>}
-    {security.count > 0 && <div className="security-severities">{Object.entries(security.severityCounts).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity}>{count} {severityLabels[severity as keyof typeof severityLabels].toLowerCase()}</span>)}</div>}
-    <details className="health-details">
-      <summary>{hasAlerts ? "Voir les alertes" : "Périmètre du contrôle"}</summary>
-      {security.count > 0 && <><h3>Vulnérabilités connues</h3><Findings items={security.vulnerabilities} /></>}
+  return <article className={`project-health-card project-security-card ${hasAlerts ? "danger" : "neutral"}`}>
+    <div className="security-panel-heading"><div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité</span><h2>{security.count > 0 ? `${security.count} faille${security.count > 1 ? "s" : ""} connue${security.count > 1 ? "s" : ""}` : hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
+      <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
+    </div>
+    {security.count > 0 && <div className="security-severities" aria-label="Répartition par gravité">{Object.entries(security.severityCounts).filter(([, count]) => count > 0).map(([severity, count]) => <span className={`security-severity ${severity}`} key={severity}>{count} {severityLabels[severity as keyof typeof severityLabels].toLowerCase()}{count > 1 ? "s" : ""}</span>)}</div>}
+    {!security.known && <p className="security-coverage-note">Couverture partielle ou indisponible : les composants non analysés restent à vérifier.</p>}
+    {security.count > 0 && <Findings items={security.vulnerabilities} />}
+    {historical && <div className="security-history"><p><strong>{historical.count} vulnérabilité(s)</strong> relevée(s) lors des derniers contrôles enregistrés.</p><small>Contrôles du {date(historical.checkedAt)}{historical.latestCheckedAt !== historical.checkedAt ? ` au ${date(historical.latestCheckedAt)}` : ""} · {historical.analyzedServices}/{historical.totalServices} service(s) analysé(s){historical.partial ? " · périmètre partiel" : ""}.</small><p>Ces résultats restent consultables, mais ne confirment pas l’état actuel.</p><details className="health-details"><summary>Voir le dernier rapport enregistré</summary>{historical.vulnerabilities.length > 0 ? <Findings items={historical.vulnerabilities} /> : <p>Aucune vulnérabilité n’avait été signalée dans le périmètre de ces contrôles.</p>}{historical.signals.length > 0 && <><h3>Signalements à confirmer dans ce rapport</h3><Findings items={historical.signals} /></>}</details></div>}
+    {(security.signals.length > 0 || security.alerts.length > 0) && <details className="health-details security-secondary">
+      <summary>{secondarySummary} · hors compteur de vulnérabilités</summary>
       {security.signals.length > 0 && <><h3>Signalements à confirmer</h3><Findings items={security.signals} /></>}
       {security.alerts.length > 0 && <><h3>Support et autres alertes</h3><ul>{security.alerts.map(item => <li key={item}>{item}</li>)}</ul></>}
-      <p>Une même vulnérabilité est comptée une fois par composant, version et service. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>
-    </details>
-    <details className="health-details" open={!security.known && !loading}>
+    </details>}
+    <details className="health-details security-secondary">
       <summary>Couverture et actions par service</summary>
       {!security.services.length && <p>Aucun service rattaché ne fournit de périmètre analysable. Relier le projet à son hébergement et identifier ses sources ou son inventaire.</p>}
       <div className="security-service-list">{security.services.map(service => <section className="security-service" key={service.id}>
@@ -54,6 +64,7 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
         {service.checkedAt && <small>Dernier rapport enregistré : {date(service.checkedAt)}. {!["covered", "partial"].includes(service.status) ? "Ce rapport ne valide pas l’état actuel." : ""}</small>}
       </section>)}</div>
       <p>Le périmètre couvert concerne les composants identifiés ci-dessus. Le code métier, les secrets, la configuration et les couches d’hébergement non inventoriées demandent des contrôles complémentaires.</p>
+      <p>Une même vulnérabilité est comptée une fois par composant, version et service. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>
       <p>Contrôle automatique toutes les heures et après détection d’un nouveau déploiement. Les erreurs techniques sont réessayées après cinq minutes.</p>
       {security.checkedAt && <p>Tous les services sont couverts ; le plus ancien contrôle date du {date(security.checkedAt)}.</p>}
       {unavailable && <p>Contrôle à actualiser ou indisponible. Les informations déjà connues restent affichées.</p>}

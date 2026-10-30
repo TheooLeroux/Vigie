@@ -65,7 +65,7 @@ test("WordPress : WPVulnerability après installation montre les alertes applica
   ];
   assert.equal(projectHealth(detail, state).security.length, 2);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
-  assert.match(html, /Alertes de sécurité/);
+  assert.match(html, /2 failles connues/);
   assert.doesNotMatch(html, /Aucune alerte connue|plugins\/rejected|plugins\/webtoffee/);
   inventory.wordpress!.version = "7.1.4";
   assert.equal(projectHealth(detail, state).security.length, 1);

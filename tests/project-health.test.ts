@@ -39,7 +39,8 @@ test("Résumé projet : candidats rejetés exclus, réserves acceptées conserv�
   assert.equal(projectHealth(detail, current).security.length, 1);
   assert.match(projectHealth(detail, current).security[0], /CVE-2026-12345/);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: current }));
-  assert.match(html, /<summary>Voir les alertes<\/summary>/);
+  assert.match(html, /1 faille connue/);
+  assert.match(html, /class="security-finding"/);
   assert.match(html, /CVE-2026-12345/);
   assert.equal(projectHealth(detail, healthUpdates([healthCheck({ findings: [{ ...healthCheck().findings[0], scope: "another-service" }] })])).security.length, 0);
   detail.railway![0].services[0].activeDeployments[0].evidence!.imageDigest = "sha256:" + "c".repeat(64);
