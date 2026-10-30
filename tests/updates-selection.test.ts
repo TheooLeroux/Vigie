@@ -72,6 +72,23 @@ test("Sélection : une combinaison refusée n’interdit pas ses versions dans u
   assert.deepEqual(result.versions, { a: "1.0.0", b: "2.0.0" });
 });
 
+test("Sélection : la récupération cible l’API défaillante sans reculer les paquets indépendants", async () => {
+  const transport = registry({ grid: [{ version: "2.2.0" }, { version: "2.1.0" }, { version: "1.6.0" }, { version: "1.5.0" }], unrelated: [{ version: "9.0.0" }, { version: "8.0.0" }, { version: "7.0.0" }] });
+  const result = await compatibleVersions({ dependencies: { grid: "1.5.0", unrelated: "7.0.0" } }, "24.14.0", transport, {}, {}, {
+    rejectedCombinations: [{ grid: "2.2.0", unrelated: "9.0.0" }], preferredRanges: { grid: "^1.5.0" },
+  });
+  assert.deepEqual(result.versions, { grid: "1.6.0", unrelated: "9.0.0" });
+});
+
+test("Sélection : une préférence de récupération n’exclut pas les autres branches sûres", async () => {
+  const transport = registry({ grid: [{ version: "2.2.0" }, { version: "2.1.0" }, { version: "1.5.0" }], unrelated: [{ version: "9.0.0" }] }, ["grid@1.5.0"]);
+  const result = await compatibleVersions({ dependencies: { grid: "1.5.0", unrelated: "9.0.0" } }, "24.14.0", transport, {}, {}, {
+    screen: items => checkPackageVersions(items, transport),
+    rejectedCombinations: [{ grid: "2.2.0", unrelated: "9.0.0" }], preferredRanges: { grid: "^1.5.0" },
+  });
+  assert.deepEqual(result.versions, { grid: "2.1.0", unrelated: "9.0.0" });
+});
+
 test("Sélection : épuise son budget explicitement et conserve les contraintes de plateforme", async () => {
   const transport = registry({ lib: [{ version: "3.0.0", os: ["darwin"] }, { version: "2.0.0", cpu: ["!x64"] }, { version: "1.0.0", os: ["linux"], cpu: ["x64"], libc: ["glibc"] }] });
   assert.equal((await compatibleVersions({ dependencies: { lib: "^1" } }, "24.14.0", transport, {}, {}, { platform: { os: "linux", cpu: "x64", libc: "glibc" } })).versions.lib, "1.0.0");
@@ -156,7 +173,7 @@ test("Moteur : préfiltre avant installation, ne reteste pas une combinaison ref
   const folder = await mkdtemp(join(tmpdir(), "vigie-selection-"));
   const installed: string[] = [], validated: string[] = [], scanned: string[] = [];
   const transport = registry({ lib: ["3.0.0", "2.2.0", "2.1.0", "1.0.0"].map(version => ({ version })) }, ["lib@3.0.0"]);
-  await writeFile(join(folder, "package.json"), JSON.stringify({ name: "fixture", dependencies: { lib: "^1" }, scripts: { test: "node test.js" } }));
+  await writeFile(join(folder, "package.json"), JSON.stringify({ name: "fixture", dependencies: { lib: "^2" }, scripts: { test: "node test.js" } }));
   await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { lib: "^1" } }, "node_modules/lib": { version: "1.0.0" } } }));
   const currentVersion = async () => JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies.lib as string;
   const runtime: NodeValidationRuntime = {
@@ -183,5 +200,32 @@ test("Moteur : préfiltre avant installation, ne reteste pas une combinaison ref
     assert.deepEqual(installed, ["2.2.0", "2.1.0"]);
     assert.deepEqual(validated, ["2.2.0", "2.1.0"]);
     assert.deepEqual(scanned, ["2.2.0", "2.1.0"]);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Moteur : une rupture majeure identifiée revient en deux essais à une API compatible et rescannée", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "vigie-api-recovery-"));
+  const attempts: Record<string, string>[] = [], scans: Record<string, string>[] = [];
+  const current = async () => JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies as Record<string, string>;
+  const transport = registry({ grid: [{ version: "2.2.0" }, { version: "2.1.0" }, { version: "1.6.0" }, { version: "1.5.0" }], unrelated: Array.from({ length: 20 }, (_, n) => ({ version: `9.0.${19 - n}` })) });
+  await writeFile(join(folder, "package.json"), JSON.stringify({ name: "fixture", dependencies: { grid: "1.5.0", unrelated: "9.0.0" }, scripts: { test: "node test.js" } }));
+  await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {} }));
+  const runtime: NodeValidationRuntime = { image: async () => "sha256:" + "a".repeat(64), execute: async (_command, args) => {
+    if (args[0] === "rm") return "";
+    if (args.at(-1)!.includes("--package-lock-only")) {
+      const versions = await current();
+      await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: versions }, ...Object.fromEntries(Object.entries(versions).map(([name, version]) => [`node_modules/${name}`, { version }])) } }));
+    } else {
+      const versions = await current(); attempts.push(versions);
+      if (versions.grid.startsWith("2.")) throw new DependencyValidationError("Missing export", ["grid"]);
+    }
+    return "";
+  } };
+  try {
+    await prepareNodeSources(folder, [""], ["package.json", "package-lock.json"], "24.14.0", transport, [], { limits: new Map(), attempt: 0, runtime }, {
+      resolved: async () => { scans.push(await current()); }, image: async () => {}, validated: async () => {},
+    });
+    assert.deepEqual(attempts, [{ grid: "2.2.0", unrelated: "9.0.19" }, { grid: "1.6.0", unrelated: "9.0.19" }]);
+    assert.deepEqual(scans, attempts);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

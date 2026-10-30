@@ -71,7 +71,8 @@ async function prepareServices(folder: string, roots: string[], names: string[],
   const original = await snapshotSources(folder, names);
   const temporary = await mkdtemp(join(tmpdir(), "vigie-node-services-"));
   const validations = new Set<string>();
-  const runtime = options.runtime || nodeValidationRuntime(nodeVersion);
+  const cancellation = new AbortController();
+  const runtime = { ...(options.runtime || nodeValidationRuntime(nodeVersion)), signal: options.runtime?.signal ? AbortSignal.any([options.runtime.signal, cancellation.signal]) : cancellation.signal };
   try {
     const prepared = await boundedMap(selected, limit, async root => {
       const working = await mkdtemp(join(temporary, "prepare-"));
@@ -87,7 +88,8 @@ async function prepareServices(folder: string, roots: string[], names: string[],
         const files = await changedSources(working, original, result.allowed);
         await options.progress?.(root, "prepared");
         return { root, ...result, files, elapsedMs: Math.round(performance.now() - started) };
-      } finally { await rm(working, { recursive: true, force: true }); }
+      } catch (error) { if (!cancellation.signal.aborted) cancellation.abort(error); throw cancellation.signal.reason; }
+      finally { await rm(working, { recursive: true, force: true }); }
     });
     const allowed = new Set(prepared.flatMap(result => [...result.allowed]));
     const combinedNames = [...new Set([...names, ...allowed])].filter(name => names.includes(name) || prepared.some(result => result.files.some(file => file.path === name)));
@@ -111,8 +113,9 @@ async function prepareServices(folder: string, roots: string[], names: string[],
         await options.progress?.(root, "ready");
         return { root, elapsedMs: Math.round(performance.now() - started) };
       } catch (error) {
-        if (error instanceof ApiError) throw new ApiError(`${root || "racine"} : validation de l’ensemble refusée. ${error.message}`, error.status);
-        throw error;
+        const failure = error instanceof ApiError ? new ApiError(`${root || "racine"} : validation de l’ensemble refusée. ${error.message}`, error.status) : error;
+        if (!cancellation.signal.aborted) cancellation.abort(failure);
+        throw cancellation.signal.reason;
       } finally { await rm(working, { recursive: true, force: true }); }
     });
     await changedSources(folder, original, new Set());

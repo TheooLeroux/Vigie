@@ -34,7 +34,8 @@ export function yarnPeerWarning(diagnostics: string) {
   return /\bYN(?:0002|0059|0060)\b/.test(clean) || /\b(?:unmet|incorrect) peer dependency\b/i.test(clean);
 }
 
-export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[]; diagnosticIndirectPackages?: string[]; diagnosticIndirectLocations?: Record<string, string>; peerResolution?: boolean; strictYarnPeers?: boolean } = {}): Promise<string> {
+export function runCommand(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeout?: number; signal?: AbortSignal; acceptedExitCodes?: number[]; errorMessages?: Record<string, string>; errorPatterns?: { pattern: RegExp; message: string }[]; diagnosticPackages?: string[]; diagnosticIndirectPackages?: string[]; diagnosticIndirectLocations?: Record<string, string>; peerResolution?: boolean; strictYarnPeers?: boolean } = {}): Promise<string> {
+  if (options.signal?.aborted) return Promise.reject(new ApiError("Validation interrompue après l’échec d’un service du même groupe. Aucune publication autorisée.", 499));
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env || process.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let output = "", errorOutput = "", size = 0, settled = false;
@@ -69,10 +70,14 @@ export function runCommand(command: string, args: string[], options: { cwd?: str
       tails[stream] = sample.slice(-4096);
     }
     const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new ApiError("Le traitement a dépassé son délai. Consultez le suivi avant de relancer.", 504)); }, options.timeout || 120_000);
+    const abort = () => { child.kill("SIGKILL"); finish(new ApiError("Validation interrompue après l’échec d’un service du même groupe. Aucune publication autorisée.", 499)); };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
     function finish(error?: Error) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
       if (error) reject(error); else resolve(output);
     }
     child.stdout.on("data", chunk => {

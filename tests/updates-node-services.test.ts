@@ -7,6 +7,7 @@ import { nodeServiceConcurrency, prepareNodeServices } from "../src/lib/updates/
 import type { NodeUpdateChecks } from "../src/lib/updates/node";
 import { nodeValidationRuntime } from "../src/lib/updates/node";
 import { ApiError } from "../src/lib/http";
+import { runCommand } from "../src/lib/updates/process";
 
 const checks = (): NodeUpdateChecks => ({ resolved: async () => {}, image: async () => {}, validated: async () => {} });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -166,6 +167,36 @@ test("Services : un échec attend les tâches déjà lancées avant de supprimer
     await rejection;
     await assert.rejects(stat(secondDirectory), { code: "ENOENT" });
   } finally { releaseSecond.resolve(); await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Services : un échec annule les validations actives, conserve la cause et ne lance pas le service suivant", async () => {
+  const { folder, names } = await fixture(["one", "two", "three"]), secondStarted = deferred();
+  let cancelled = false, thirdStarted = false, secondDirectory = "";
+  try {
+    await assert.rejects(prepareNodeServices(folder, ["one", "two", "three"], names, "24.22.1", checks, {
+      concurrency: 2,
+      prepare: async (working, roots, _names, _node, _transport, _docker, retry) => {
+        if (roots[0] === "one") { await secondStarted.promise; throw new ApiError("Trivy : image refusée", 422); }
+        if (roots[0] === "three") { thirdStarted = true; throw Error("must not start"); }
+        secondDirectory = working;
+        await new Promise<void>(resolve => { retry!.runtime!.signal!.addEventListener("abort", () => { cancelled = true; resolve(); }, { once: true }); secondStarted.resolve(); });
+        await stat(working);
+        throw new ApiError("interruption secondaire", 499);
+      },
+      validate: async () => { throw Error("must not validate"); },
+    }), /Trivy : image refusée/);
+    assert.equal(cancelled, true);
+    assert.equal(thirdStarted, false);
+    await assert.rejects(stat(secondDirectory), { code: "ENOENT" });
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Processus : une annulation interrompt une commande active et refuse un nouveau lancement", async () => {
+  const cancellation = new AbortController();
+  const running = runCommand(process.execPath, ["-e", "setInterval(()=>{},1000)"], { signal: cancellation.signal });
+  cancellation.abort();
+  await assert.rejects(running, /Validation interrompue/);
+  await assert.rejects(runCommand("must-not-exist", [], { signal: cancellation.signal }), /Validation interrompue/);
 });
 
 for (const layout of ["nested", "local", "workspace"]) {

@@ -67,6 +67,9 @@ export async function verifiedPeerConflicts(conflicts: PeerConflict[], selected:
 export type VersionSelectionOptions = {
   screen?: (items: PackageIdentity[]) => Promise<Set<string>>;
   rejectedCombinations?: Record<string, string>[];
+  // Recover packages implicated in an API failure before changing unrelated
+  // releases. These are search preferences, never exclusions or security waivers.
+  preferredRanges?: Record<string, string>;
   platform?: { os: string; cpu: string; libc?: string };
   searchBudget?: number;
 };
@@ -146,7 +149,7 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
     // Once one package needs alternatives, expand its entire peer component.
     // Otherwise a valid first answer can hide a fresher coordinated solution.
     const rejectedNames = new Set((options.rejectedCombinations || []).flatMap(combination => Object.keys(combination)));
-    const incomplete = components.filter(component => component.some(name => expanded.has(name) || rejectedNames.has(name))).flat().filter(name => !expanded.has(name));
+    const incomplete = components.filter(component => component.some(name => expanded.has(name) || rejectedNames.has(name) || !!options.preferredRanges?.[name])).flat().filter(name => !expanded.has(name));
     if (incomplete.length) {
       await mapConcurrent(incomplete, 8, expand);
       await screen();
@@ -164,11 +167,13 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
       conflicts.add(name); conflicts.add(other);
       return false;
     }
-    type Score = [number, number];
-    const cost = (name: string, item: PackageVersion): Score => [Number(item.version !== latest.get(name)!.version), ranks.get(name)!.get(item.version)!];
-    const less = (a: Score, b: Score) => a[0] < b[0] || a[0] === b[0] && a[1] < b[1];
+    type Score = [number, number, number];
+    const costs = new Map([...domains].map(([name, items]) => [name, new Map(items.map(item => [item.version, [Number(!!options.preferredRanges?.[name] && !satisfies(item.version, options.preferredRanges[name])), Number(item.version !== latest.get(name)!.version), ranks.get(name)!.get(item.version)!] as Score]))]));
+    const cost = (name: string, item: PackageVersion) => costs.get(name)!.get(item.version)!;
+    const less = (a: Score, b: Score) => a[0] < b[0] || a[0] === b[0] && (a[1] < b[1] || a[1] === b[1] && a[2] < b[2]);
+    for (const [name, items] of domains) items.sort((a, b) => { const x = cost(name, a), y = cost(name, b); return less(x, y) ? -1 : less(y, x) ? 1 : 0; });
     function solve(names: string[]): Map<string, PackageVersion> | null {
-      let best: Map<string, PackageVersion> | null = null, score: Score = [Infinity, Infinity];
+      let best: Map<string, PackageVersion> | null = null, score: Score = [Infinity, Infinity, Infinity];
       const assigned = new Map<string, PackageVersion>();
       function search(remaining: string[], current: Score) {
         if (++attempts > budget) throw new ApiError(`Budget de recherche épuisé (${budget} états). Recherche incomplète ; aucun optimum affirmé ni changement publié.`, 422);
@@ -185,20 +190,20 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
         const lower: Score = [...current];
         for (const choice of choices) {
           const minimum = cost(choice.name, choice.items[0]);
-          lower[0] += minimum[0]; lower[1] += minimum[1];
+          lower[0] += minimum[0]; lower[1] += minimum[1]; lower[2] += minimum[2];
         }
         if (!less(lower, score)) return;
         choices.sort((a, b) => a.items.length - b.items.length || a.name.localeCompare(b.name));
         const choice = choices[0];
         for (const item of choice.items) {
-          const delta = cost(choice.name, item), next: Score = [current[0] + delta[0], current[1] + delta[1]];
+          const delta = cost(choice.name, item), next: Score = [current[0] + delta[0], current[1] + delta[1], current[2] + delta[2]];
           if (!less(next, score)) continue;
           assigned.set(choice.name, item);
           search(remaining.filter(name => name !== choice.name), next);
           assigned.delete(choice.name);
         }
       }
-      search(names, [0, 0]);
+      search(names, [0, 0, 0]);
       return best;
     }
     // Independent peer components cannot repair one another. Solving them
@@ -224,5 +229,5 @@ export async function compatibleVersions(manifest: Record<string, any>, nodeVers
     if (Array.isArray(next.devEngines.runtime) || next.devEngines.runtime.name !== "node") throw new ApiError("La configuration des moteurs exige une adaptation manuelle.");
     next.devEngines.runtime.version = next.engines.node;
   }
-  return { manifest: next, warnings, versions, selection: { objective: "latest-count-then-release-distance" as const, states: attempts, expandedCatalogs: expanded.size, screenedVersions: options.screen ? screened.size : 0 } };
+  return { manifest: next, warnings, versions, selection: { objective: Object.keys(options.preferredRanges || {}).length ? "api-recovery-then-latest-count-then-release-distance" as const : "latest-count-then-release-distance" as const, states: attempts, expandedCatalogs: expanded.size, screenedVersions: options.screen ? screened.size : 0 } };
 }

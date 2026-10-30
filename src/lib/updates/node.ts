@@ -15,6 +15,7 @@ import { stableVersion } from "./versions";
 import { withPlanningSession } from "./planning";
 import { checkPackageVersions } from "./advisories";
 import { requireStrictYarnConfiguration } from "./manager-policy";
+import { minVersion, satisfies, validRange } from "semver";
 
 const maxRemediationProposals = 24;
 const maxValidationRetries = 12;
@@ -119,7 +120,7 @@ export type NodeUpdateChecks = {
 };
 type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
-export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void>; execute?: typeof runCommand };
+export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void>; execute?: typeof runCommand; signal?: AbortSignal };
 export function nodeValidationRuntime(nodeVersion: string, execute = runCommand): NodeValidationRuntime {
   let pending: Promise<string> | undefined;
   let directory: Promise<string> | undefined, disposed = false;
@@ -155,10 +156,11 @@ export function nodeValidationRuntime(nodeVersion: string, execute = runCommand)
     return id;
   })() };
 }
-type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; rejected?: Map<string, Record<string, string>[]>; priority?: string; runtime?: NodeValidationRuntime };
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; rejected?: Map<string, Record<string, string>[]>; preferences?: Map<string, Record<string, string>>; priority?: string; runtime?: NodeValidationRuntime };
 function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
   const execute = runtime.execute || runCommand;
   return async (root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) => {
+    runtime.signal?.throwIfAborted();
     const name = `vigie-check-${crypto.randomUUID()}`;
     try {
       const downloads = await runtime.downloads?.(root);
@@ -167,7 +169,7 @@ function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
       // remain private to each container. Nothing crosses update executions.
       const cacheMount = downloads ? ["--mount", `type=bind,source=${downloads},target=/vigie-npm-content`] : [];
       const cacheSetup = downloads ? "mkdir -p /tmp/npm/_cacache; ln -s /vigie-npm-content /tmp/npm/_cacache/content-v2; " : "";
-      await execute("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), ...cacheMount, "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${cacheSetup}${commands}`], { timeout: 12 * 60_000, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, strictYarnPeers: /-- yarn (?:install|run)\b/.test(commands), errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
+      await execute("docker", ["run", "--name", name, "--rm", "--read-only", "--tmpfs=/tmp:rw,exec,nosuid,size=1g", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=3g", "--cpus=2", "--pids-limit=512", `--user=${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`, "--env=HOME=/tmp", "--env=CI=true", "--env=npm_config_cache=/tmp/npm", "--env=npm_config_engine_strict=true", ...Object.entries(environment).map(([key, value]) => `--env=${key}=${value}`), ...cacheMount, "--mount", `type=bind,source=${resolve(folder)},target=/app`, "--workdir", `/app${root ? `/${root}` : ""}`, await runtime.image(), "sh", "-c", `set -eu; ${cacheSetup}${commands}`], { timeout: 12 * 60_000, signal: runtime.signal, diagnosticPackages, diagnosticIndirectPackages, diagnosticIndirectLocations, peerResolution, strictYarnPeers: /-- yarn (?:install|run)\b/.test(commands), errorPatterns: [{ pattern: /\bERESOLVE\b|ERR_PNPM_PEER_DEP_ISSUES/, message: "Les nouvelles versions de dépendances sont incompatibles entre elles. Mise à jour non publiée : une adaptation du projet est nécessaire." }] });
     } finally { await execute("docker", ["rm", "--force", name]).catch(() => {}); }
   };
 }
@@ -211,6 +213,7 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
   });
 }
 async function prepareSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch, requiredDockerRoots: string[], retry: PreparationRetry, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
+  retry.runtime?.signal?.throwIfAborted();
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
   retry = { ...retry, remediation, resolution, rejected: retry.rejected || new Map(), indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
@@ -256,7 +259,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     const learned = resolution.learned.get(resolutionKey(root)) || {};
     for (const [name, ranges] of Object.entries(learned)) limits[name] = Object.hasOwn(limits, name) ? [limits[name], ranges].flat() : ranges;
     let upgraded: Awaited<ReturnType<typeof compatibleVersions>>;
-    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits, { screen: items => checkPackageVersions(items, transport), rejectedCombinations: retry.rejected!.get(root), platform: { os: "linux", cpu: process.arch, libc: "glibc" } }); }
+    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits, { screen: items => checkPackageVersions(items, transport), rejectedCombinations: retry.rejected!.get(root), preferredRanges: retry.preferences?.get(root), platform: { os: "linux", cpu: process.arch, libc: "glibc" } }); }
     catch (error) {
       if (!(error instanceof CompatibilitySelectionError) || !Object.keys(learned).length || !Object.keys(remediation.constraints.get(root) || {}).length) throw error;
       await changedSources(folder, initialSources, allowed);
@@ -269,7 +272,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       return result;
     }
     warnings.push(...upgraded.warnings);
-    warnings.push(`${root || "racine"} : sélection optimisée, priorité au nombre de dernières versions stables puis au recul minimal ; ${upgraded.selection.screenedVersions} versions préanalysées, ${upgraded.selection.states} états explorés.`);
+    warnings.push(`${root || "racine"} : sélection optimisée, ${Object.keys(retry.preferences?.get(root) || {}).length ? "priorité à la récupération des API signalées, puis aux dernières versions stables" : "priorité au nombre de dernières versions stables puis au recul minimal"} ; ${upgraded.selection.screenedVersions} versions préanalysées, ${upgraded.selection.states} états explorés.`);
     for (const name of Object.keys(remediation.constraints.get(root) || {})) if (upgraded.versions[name]) remediation.tried.add(`${root}:${name}@${upgraded.versions[name]}`);
     const content = JSON.stringify(upgraded.manifest, null, 2) + "\n";
     await remember(path);
@@ -513,12 +516,21 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       if (!(error instanceof DependencyValidationError)) throw error;
       const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
       if (!rejectCombination(check, candidate)) throw error;
+      const preferences = new Map(retry.preferences), preferred = { ...preferences.get(check.root) };
+      for (const name of error.packages) {
+        const original = check.original.dependencies?.[name] || check.original.devDependencies?.[name] || check.original.optionalDependencies?.[name];
+        const minimum = typeof original === "string" && validRange(original) ? minVersion(original) : null;
+        const selected = candidate.dependencies?.[name] || candidate.devDependencies?.[name] || candidate.optionalDependencies?.[name];
+        if (minimum && stableVersion(selected) && !satisfies(selected, `^${minimum.version}`)) preferred[name] = `^${minimum.version}`;
+      }
+      preferences.set(check.root, preferred);
       await security?.remediating?.(`${check.root || "racine"} : combinaison précise écartée après refus des tests (${error.packages.join(", ")}) ; aucune branche entière exclue. Nouvelle résolution, nouveau scan et tests obligatoires.`);
+      if (Object.keys(preferred).length) await security?.remediating?.(`${check.root || "racine"} : recherche ciblée sur ${Object.keys(preferred).join(", ")} ; priorité à la dernière version sûre de la branche initiale après rupture d’API. Les autres branches restent admissibles et tous les contrôles sont conservés.`);
       for (const [name, content] of originalVersions) {
         if (content === null) await rm(join(folder, name), { force: true });
         else await writeFile(join(folder, name), content);
       }
-      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1, remediation, resolution }, security);
+      const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1, remediation, resolution, preferences }, security);
       result.warnings.push(...warnings, `${check.root || "racine"} : combinaison refusée mémorisée ; autre ensemble choisi et validé sans exclure une branche entière.`);
       return result;
     }
