@@ -26,6 +26,7 @@ export type SecurityFinding = {
   severity: "critical" | "high" | "moderate" | "low" | "unknown";
   scope?: string;
   fixedVersions?: string[];
+  packageManager?: "apk";
   title?: string;
   url?: string;
   explanation?: string;

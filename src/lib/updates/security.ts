@@ -14,7 +14,7 @@ const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().min(1).max(200)).max(200).optional() });
 const vulnerability = z.object({ id: identifier, aliases: z.array(identifier).max(100).optional(), database_specific: z.object({ severity: z.string().optional() }).passthrough().optional() }).passthrough();
 const osvSchema = z.object({ results: z.array(z.object({ source: z.object({ path: z.string() }), packages: z.array(z.object({ package: z.object({ name: identifier, version: z.string().max(200).optional(), ecosystem: z.string().optional() }), vulnerabilities: z.array(vulnerability).nullish(), groups: z.array(z.object({ ids: z.array(identifier), max_severity: z.string().optional() })).nullish() })) })) });
-const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string(), FixedVersion: z.string().optional() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), EOSL: z.boolean().optional(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
+const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Class: z.string().optional(), Type: z.string().optional(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string(), FixedVersion: z.string().optional() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), EOSL: z.boolean().optional(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
 
 export function severity(value: unknown): SecurityFinding["severity"] {
   const label = typeof value === "string" ? value.toLowerCase() : "";
@@ -41,7 +41,8 @@ export function parseTrivy(raw: string, baseline = false) {
   if (endOfLife && !baseline) throw new ApiError("L’image utilise une distribution système en fin de support. Publication annulée.");
   const findings: SecurityFinding[] = report.Results.flatMap(result => (result.Vulnerabilities || []).map(entry => {
     const fixedVersions = [...new Set(entry.FixedVersion?.split(",").map(version => version.trim()).filter(version => /^[a-z0-9][a-z0-9.+:~_-]{0,199}$/i.test(version)))].slice(0, 200);
-    return findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity), ...(fixedVersions.length ? { fixedVersions } : {}) });
+    const finding = findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity), ...(fixedVersions.length ? { fixedVersions } : {}) });
+    return report.Metadata.OS?.Family === "alpine" && result.Class === "os-pkgs" && result.Type === "alpine" ? { ...finding, packageManager: "apk" as const } : finding;
   }));
   if (endOfLife) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
   return findings;

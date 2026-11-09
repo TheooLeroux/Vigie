@@ -107,6 +107,14 @@ test("Trivy : paquets système et arrêt sur rapport incomplet ou système hors 
   assert.ok(parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", EOSL: true } } }), true).some(item => item.id === "EOL-OS"));
   assert.equal(dockerRuntimeBase("FROM node:20-bookworm AS build\nFROM node:22-slim\n"), "node:22-slim");
 });
+
+test("Trivy : seuls les paquets système Alpine identifiés reçoivent le gestionnaire apk", () => {
+  const vulnerability = { VulnerabilityID: "CVE-2026-4738", PkgName: "zlib", InstalledVersion: "1.3.2-r1", Severity: "MEDIUM", FixedVersion: "1.4-r0" };
+  const target = { Target: "image", Type: "alpine", Class: "os-pkgs", Vulnerabilities: [vulnerability] };
+  const report = { SchemaVersion: 2, Metadata: { OS: { Family: "alpine" } }, Results: [target, { ...target, Class: "lang-pkgs", Type: "npm" }] };
+  assert.deepEqual(parseTrivy(JSON.stringify(report)).map(finding => finding.packageManager), ["apk", undefined]);
+  assert.equal(parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian" } } }))[0].packageManager, undefined);
+});
 test("OSV : seuls les manifestes et verrous sont fournis, jamais les sources ou secrets du worker", async () => {
   const folder = await mkdtemp(join(tmpdir(), "vigie-security-test-"));
   const previous = process.env.VIGIE_UPDATES_WPSCAN_TOKEN;

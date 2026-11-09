@@ -44,10 +44,10 @@ export function nodeAssessmentChanges(target: UpdateTarget, before: Record<strin
 }
 
 export function assessmentResultIsSafe(result: UpdateResult) {
-  const finalOsv = result.checks?.findLast(check => check.tool === "OSV" && check.phase === "candidate");
+  const finalScans = new Map(result.checks?.filter(check => check.phase === "candidate" && ["OSV", "Trivy"].includes(check.tool)).map(check => [check.tool, check]));
   return result.stage === "completed" && !!result.assessment && !result.commit && !result.deploymentId && !result.backup
     && !!result.checks?.some(check => check.phase === "candidate")
-    && !result.checks.some(check => check.status === "blocked" && (check.tool !== "OSV" || check.phase !== "candidate" || check === finalOsv));
+    && !result.checks.some(check => check.status === "blocked" && (check.phase !== "candidate" || (finalScans.get(check.tool) || check) === check));
 }
 
 export function wordpressAssessmentChanges(plan: { wordpress: { current: string; target: string }; plugins: { slug: string; current: string; target: string }[] }) {

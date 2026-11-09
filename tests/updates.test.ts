@@ -15,6 +15,7 @@ import { projectUpdates, startProjectUpdate, configureUpdateSource } from "../sr
 import { updateTargets, sourceRoot } from "../src/lib/updates/targets";
 import { completedNodeRuns, readUpdateRun, readUpdateSource, updateStorage } from "../src/lib/updates/storage";
 import { executeUpdate, publishGitVersions } from "../src/lib/updates/executor";
+import { repairAlpineDockerfile } from "../src/lib/updates/dockerfile";
 import { latestNode, upgradeManifest, managerCommands, snapshotSources, changedSources, prepareNodeSources } from "../src/lib/updates/node";
 import { runCommand, DependencyValidationError } from "../src/lib/updates/process";
 import { wordpressBackupScript, wordpressUpdateScript, shellQuote } from "../src/lib/updates/wordpress";
@@ -369,7 +370,8 @@ test("Node : dernière LTS maintenue et dernières dépendances stables ; les pa
 
 test("Git : un Dockerfile ne peut publier que des changements de versions vérifiés contre le commit source", async () => {
   const { target } = await fixture();
-  const expected = "a".repeat(40), original = 'FROM node:20-slim\nEXPOSE 8080\nCMD ["node","server.js"]\n';
+  const expected = "a".repeat(40);
+  let original = 'FROM node:20-slim\nEXPOSE 8080\nCMD ["node","server.js"]\n';
   let writes = 0;
   const transport: typeof fetch = async (input, options) => {
     const path = String(input);
@@ -385,6 +387,15 @@ test("Git : un Dockerfile ne peut publier que des changements de versions vérif
   writes = 0;
   await assert.rejects(publishGitVersions(target.repository!, "main", expected, [{ path: "docs/Dockerfile", content: candidate + "RUN echo unexpected\n" }], transport), /uniquement modifier les versions/);
   assert.equal(writes, 0);
+  original = original.replace("node:20-slim", "node:26.13.0-alpine");
+  const repair = { base: original, findings: [{ id: "CVE-2026-4738", aliases: [], package: "zlib", version: "1.3.2-r1", severity: "moderate" as const, packageManager: "apk" as const, fixedVersions: ["1.4-r0"] }] };
+  const path = "docs/Dockerfile", content = repairAlpineDockerfile(repair)!;
+  const evidence = new Map([[path, repair]]);
+  await assert.rejects(publishGitVersions(target.repository!, "main", expected, [{ path, content }], transport), /correctif Alpine validé/);
+  await assert.rejects(publishGitVersions(target.repository!, "main", expected, [{ path, content: content + "RUN echo unexpected\n" }], transport, evidence), /correctif Alpine validé/);
+  assert.equal(writes, 0);
+  assert.equal(await publishGitVersions(target.repository!, "main", expected, [{ path, content }], transport, evidence), "b".repeat(40));
+  assert.equal(writes, 3);
 });
 test("Node : gestionnaires identifiés, références non stables et chemins dangereux refusés", () => {
   assert.equal(managerCommands({}, ["package-lock.json"]).lock, "package-lock.json");

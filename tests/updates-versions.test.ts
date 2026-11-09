@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { compatibleVersions, verifiedPeerConflicts, type PackageVersion } from "../src/lib/updates/versions";
 import { npmPeerConflicts, PeerResolutionError, runCommand } from "../src/lib/updates/process";
-import { dockerBaseAlternatives, dockerPackages, rewriteDockerfile, versionOnlyDockerfile } from "../src/lib/updates/dockerfile";
+import { dockerBaseAlternatives, dockerPackages, repairAlpineDockerfile, rewriteDockerfile, validatedDockerfileChange, versionOnlyDockerfile } from "../src/lib/updates/dockerfile";
 import { prepareNodeSources } from "../src/lib/updates/node";
 import { nodeTestProfile } from "../src/lib/updates/node-test-profile";
 
@@ -150,4 +150,26 @@ test("Profil de test NesAppli : valeurs factices locales uniquement, aucune réc
   assert.ok(!("DATABASE_URL" in profile.environment) && !("GITHUB_TOKEN" in profile.environment) && !("VIGIE_CONNECTOR_ENCRYPTION_KEY" in profile.environment));
   assert.equal(nodeTestProfile(manifest, "unrelated schema"), null);
   assert.equal(nodeTestProfile({ name: "other" }, schema), null);
+});
+test("Docker Alpine : correction bornée au dernier stage et réutilisable lors d’un nouveau correctif", () => {
+  const base = "FROM node:26.13.0-alpine AS build\r\nFROM node:26.13.0-alpine AS runner\r\nUSER node\r\n";
+  const finding = { id: "CVE-2026-4738", aliases: [], package: "zlib", version: "1.3.2-r1", severity: "moderate" as const, packageManager: "apk" as const, fixedVersions: ["1.4-r0"] };
+  const repair = { base, findings: [finding] };
+  const patched = repairAlpineDockerfile(repair)!;
+  assert.equal(patched, base.replace("AS runner\r\n", "AS runner\r\n# Vigie: correctifs de sécurité Alpine\r\nRUN apk add --no-cache --upgrade 'zlib>=1.4-r0'\r\n"));
+  assert.equal(validatedDockerfileChange(base, patched), false);
+  assert.equal(validatedDockerfileChange(base, patched, repair), true);
+  assert.equal(validatedDockerfileChange(base, patched + "RUN echo unexpected\r\n", repair), false);
+  assert.equal(validatedDockerfileChange(base.replace("USER node", "USER 1000"), patched, repair), false);
+  assert.equal(repairAlpineDockerfile({ base: patched, findings: [finding] }), null);
+  const next = { base: patched, findings: [{ ...finding, fixedVersions: ["1.4-r2"] }, { ...finding, fixedVersions: ["1.4-r10"] }] };
+  assert.equal(repairAlpineDockerfile(next), patched.replace("1.4-r0", "1.4-r10"));
+  for (const rejected of [
+    { ...finding, packageManager: undefined },
+    { ...finding, package: "zlib' && curl evil" },
+    { ...finding, fixedVersions: ["1.4-r0", "1.5-r0"] },
+    { ...finding, fixedVersions: ["1.4-r0' && curl evil"] },
+  ]) assert.equal(repairAlpineDockerfile({ base, findings: [rejected] }), null);
+  assert.equal(repairAlpineDockerfile({ ...repair, base: base.replace(/-alpine/g, "-bookworm") }), null);
+  assert.equal(repairAlpineDockerfile({ ...repair, base: base.replace("node:26.13.0-alpine AS runner", "build AS runner") }), null);
 });

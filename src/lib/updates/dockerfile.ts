@@ -7,6 +7,7 @@ import { runCommand } from "./process";
 import { stableVersion } from "./versions";
 import { compare } from "semver";
 import { SecurityPolicyError } from "./security";
+import type { SecurityFinding } from "./types";
 
 type Replacement = { start: number; end: number; name: string; suffix: string; version: string; image: boolean };
 function replacements(source: string) {
@@ -103,6 +104,53 @@ export function dockerBaseAlternatives(source: string, nodeVersion: string) {
   if (replacements(source).filter(item => item.image).every(item => item.suffix.endsWith("-slim")) && portableNodeDockerfile(source)) releases.push("alpine");
   return [...new Set(releases.map(release => rewriteDockerfile(source, nodeVersion, dockerPackages(source), release)))].filter(candidate => candidate !== source);
 }
+
+const alpineRepairMarker = "# Vigie: correctifs de sécurité Alpine";
+const apkName = /^[a-z0-9][a-z0-9.+_-]{0,63}$/;
+const apkRelease = /^\d{1,9}(?:\.\d{1,9}){0,5}-r\d{1,9}$/;
+const apkOrder = new Intl.Collator("en", { numeric: true });
+export type AlpineRepair = { base: string; findings: SecurityFinding[] };
+
+export function repairAlpineDockerfile({ base, findings }: AlpineRepair) {
+  replacements(base);
+  const finalFrom = [...base.matchAll(/^[ \t]*FROM[ \t]+[^\r\n]*(\r?\n|$)/gim)].at(-1);
+  if (!finalFrom || !/^[ \t]*FROM[ \t]+node:\d+\.\d+\.\d+-alpine(?:\d+\.\d+)?(?:[ \t]+AS[ \t]+[\w-]+)?[ \t]*\r?\n$/i.test(finalFrom[0])) return null;
+  const offset = finalFrom.index! + finalFrom[0].length;
+  const newline = finalFrom[1], tail = base.slice(offset);
+  const prefix = alpineRepairMarker + newline + "RUN apk add --no-cache --upgrade ";
+  const versions = new Map<string, string>();
+  let previous = "";
+  if (base.includes(alpineRepairMarker)) {
+    if (!tail.startsWith(prefix) || base.indexOf(alpineRepairMarker) !== offset) return null;
+    const args = tail.slice(prefix.length).split(newline)[0];
+    previous = prefix + args + newline;
+    if (!tail.startsWith(previous)) return null;
+    for (const arg of args.split(" ")) {
+      const match = arg.match(/^'([^'>]+)>=(.+)'$/);
+      if (!match || !apkName.test(match[1]) || !apkRelease.test(match[2]) || versions.has(match[1])) return null;
+      versions.set(match[1], match[2]);
+    }
+  }
+  let eligible = false;
+  for (const finding of findings) {
+    const fixed = finding.fixedVersions?.length === 1 ? finding.fixedVersions[0] : undefined;
+    if (finding.packageManager !== "apk" || !apkName.test(finding.package) || !fixed || !apkRelease.test(fixed)) continue;
+    eligible = true;
+    const floor = versions.get(finding.package);
+    if (!floor || apkOrder.compare(fixed, floor) > 0) versions.set(finding.package, fixed);
+  }
+  if (!eligible || versions.size > 32) return null;
+  const args = [...versions].sort(([first], [second]) => first.localeCompare(second)).map(([name, version]) => `'${name}>=${version}'`).join(" ");
+  const block = prefix + args + newline;
+  return block === previous ? null : base.slice(0, offset) + block + tail.slice(previous.length);
+}
+
+export function validatedDockerfileChange(original: string, proposed: string, alpineRepair?: AlpineRepair) {
+  if (!alpineRepair) return versionOnlyDockerfile(original, proposed);
+  return (original === alpineRepair.base || versionOnlyDockerfile(original, alpineRepair.base))
+    && repairAlpineDockerfile(alpineRepair) === proposed;
+}
+
 export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>, notify: (message: string) => Promise<void> = async () => {}) {
   const path = join(folder, root ? root + "/Dockerfile" : "Dockerfile"), initial = await readFile(path, "utf8");
   const candidates = [initial, ...dockerBaseAlternatives(initial, nodeVersion)];
@@ -113,7 +161,20 @@ export async function validateDockerfile(folder: string, root: string, names: st
       await notify(`Image refusée par Trivy ; essai de ${dockerRuntimeBase(candidate)}, même version Node et mêmes instructions. ${dockerRuntimeBase(candidate).includes("-alpine") ? "Dockerfile Node minimal et portable : la compatibilité Alpine reste à démontrer." : "Famille Debian conservée."} Nouvelle construction, nouveau scan et démarrage obligatoires.`);
       await writeFile(path, candidate);
     }
-    try { await validateDockerfileCandidate(folder, root, names, nodeVersion, inspectImage); return; }
+    try {
+      try { await validateDockerfileCandidate(folder, root, names, nodeVersion, inspectImage); return; }
+      catch (error) {
+        if (!(error instanceof SecurityPolicyError) || error.check.tool !== "Trivy") throw error;
+        const repair = { base: candidate, findings: error.check.blockers || error.check.findings };
+        const patched = repairAlpineDockerfile(repair);
+        if (!patched) throw error;
+        await notify("Correctif Alpine proposé à partir du scan. Reconstruction, nouveau scan Trivy et démarrage de contrôle.");
+        await writeFile(path, patched);
+        await validateDockerfileCandidate(folder, root, names, nodeVersion, inspectImage);
+        await notify("Correctif Alpine validé par Trivy et par le démarrage de l’image.");
+        return repair;
+      }
+    }
     catch (error) {
       await writeFile(path, initial);
       if (!(error instanceof SecurityPolicyError) || error.check.tool !== "Trivy") throw error;

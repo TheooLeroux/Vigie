@@ -54,6 +54,11 @@ test("Bilan NES App : un contrôle final avec réserve distingue la correction d
   assert.equal(assessmentResultIsSafe(result), false);
   result.checks.push(final);
   assert.equal(assessmentResultIsSafe(result), true);
+  const blockedImage = securityCheck("Trivy", "candidate", "Image finale", [{ ...glob, package: "zlib", version: "1.3.2-r1" }]);
+  result.checks.push(blockedImage);
+  assert.equal(assessmentResultIsSafe(result), false);
+  result.checks.push(securityCheck("Trivy", "candidate", "Image finale", []));
+  assert.equal(assessmentResultIsSafe(result), true);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /Failles npm corrigées dans la proposition.*glob \(CVE-2026-118773\)/);
   assert.match(html, /Failles npm qui resteraient après la mise à jour/);

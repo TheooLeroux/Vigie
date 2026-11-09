@@ -22,7 +22,7 @@ import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } fr
 import { executeLocalWordPress } from "./wordpress-agent-execution";
 import { remainingNpmFindings, type UpdateRun, type UpdateTarget, type UpdateResult, type UpdateStage, type UpdateCheck, type SecurityFinding } from "./types";
 import { npmResidualPolicy } from "./node-security";
-import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, versionOnlyDockerfile } from "./dockerfile";
+import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, validatedDockerfileChange, type AlpineRepair } from "./dockerfile";
 import { requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck, SecurityPolicyError } from "./security";
 import { nodeCatalogState } from "./node-catalog-state";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
@@ -46,7 +46,7 @@ const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
 async function extractArchive(archive: string, folder: string, github = false): Promise<string[]> {
   return JSON.parse(await runCommand("python3", [archiveScript, github ? "extract-github" : "extract", archive, folder]));
 }
-export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch) {
+export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>) {
   if (!files.length || files.some(file => !/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|\.nvmrc|\.node-version|Dockerfile)$/.test(file.path) || file.path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\\\x00-\x1f]/.test(file.path))) throw new ApiError("La publication doit se limiter aux versions et aux fichiers de verrouillage.");
   if (!repositoryAllowed(repository)) throw new ApiError("Ce dépôt n’est pas autorisé pour la mise à jour.");
   const token = githubUpdateToken(repository);
@@ -55,7 +55,7 @@ export async function publishGitVersions(repository: string, branch: string, exp
   if (head.object.sha !== expected) throw new ApiError("Le dépôt a changé pendant les tests. Aucun changement n’a été écrasé.", 409);
   for (const file of files.filter(file => /(^|\/)Dockerfile$/.test(file.path))) {
     const original = await githubRequest(`/repos/${repository}/contents/${file.path.split("/").map(encodeURIComponent).join("/")}?ref=${expected}`, token, "GET", undefined, transport);
-    if (original.type !== "file" || original.encoding !== "base64" || typeof original.content !== "string" || typeof original.size !== "number" || original.size > 64_000 || !versionOnlyDockerfile(Buffer.from(original.content, "base64").toString("utf8"), file.content)) throw new ApiError("Le Dockerfile doit uniquement modifier les versions Node et des paquets npm, sans changer ses instructions.");
+    if (original.type !== "file" || original.encoding !== "base64" || typeof original.content !== "string" || typeof original.size !== "number" || original.size > 64_000 || !validatedDockerfileChange(Buffer.from(original.content, "base64").toString("utf8"), file.content, alpineRepairs?.get(file.path))) throw new ApiError("Le Dockerfile doit uniquement modifier les versions autorisées ou appliquer un correctif Alpine validé.");
   }
   const commit = await githubRequest(`/repos/${repository}/git/commits/${expected}`, token, "GET", undefined, transport);
   const tree = await githubRequest(`/repos/${repository}/git/trees`, token, "POST", { base_tree: commit.tree.sha, tree: files.map(file => ({ ...file, mode: "100644", type: "blob" })) }, transport);
@@ -309,6 +309,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     await catalogs.packages([...currentPackages]);
     await progress("updating", "Analyse complète nécessaire : actualisation de Node et des dépendances, puis validation isolée.");
     let runtimeRefreshed = false;
+    const alpineRepairs = new Map<string, AlpineRepair>();
     const runtime = nodeValidationRuntime(version, async (command, args, options) => {
       if (!runtimeRefreshed) { await runCommand("docker", ["pull", `node:${version}-bookworm`], { timeout: 5 * 60_000 }); runtimeRefreshed = true; }
       return runCommand(command, args, options);
@@ -319,6 +320,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       return {
       baseline,
       retain: findings => npmPolicy.retain(workingFolder, findings),
+      alpineRepaired: (root, repair) => { alpineRepairs.set(root ? `${root}/Dockerfile` : "Dockerfile", repair); },
       resolved: async resolvedNames => {
         await recordOsv("candidate", "Dépendances verrouillées", await scanSources(resolvedNames), selectedRoots, workingFolder);
       },
@@ -475,7 +477,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     await progress("publishing", "Publication de la nouvelle version.");
     if (representative.mode === "git") {
       for (const result of results) result.previousCommit = expected;
-      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes);
+      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes, fetch, alpineRepairs);
       for (const result of results) result.commit = commit;
     } else {
       const packed = join(temporary, "updated.zip"), clean = join(temporary, "deploy");
