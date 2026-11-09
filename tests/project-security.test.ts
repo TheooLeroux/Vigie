@@ -72,7 +72,7 @@ test("Fiche : intitulé et correction du signalement conservés, failles les plu
   assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
 
-test("Fiche : le motif documenté est visible sans ouvrir la faille et reste lié au déploiement analysé", () => {
+test("Fiche : le pictogramme annonce un motif lié au déploiement analysé, visible dans le détail", () => {
   const base = healthCheck().findings[0];
   const { detail, state, target, report } = fixture([
     { ...base, fixedVersions: ["1.2.3"] },
@@ -88,8 +88,10 @@ test("Fiche : le motif documenté est visible sans ouvrir la faille et reste li�
   assert.equal(html.match(/<article\b/g)?.length, 1);
   assert.match(html, /aria-label="Failles du projet"/);
   const summaries = [...html.matchAll(/<details class="security-finding"><summary>(.*?)<\/summary>/g)].map(match => match[1]);
-  const blockedSummary = summaries.find(summary => summary.includes("La faille bloque la proposition de mise à jour"));
-  assert.match(blockedSummary || "", /security-finding-reason.*La dépendance parente impose encore cette version/);
+  const blockedSummary = summaries.find(summary => summary.includes("security-finding-reason"));
+  assert.match(blockedSummary || "", /Motif disponible/);
+  assert.doesNotMatch(blockedSummary || "", /La dépendance parente impose encore cette version/);
+  assert.match(html, /<div class="security-finding-body">.*La faille bloque la proposition de mise à jour.*La dépendance parente impose encore cette version/);
   assert.equal(summaries.filter(summary => summary.includes("security-finding-reason")).length, 1);
 
   assessment.results[0] = { ...assessment.results[0], stage: "completed", assessment: { changes: ["Autres dépendances mises à jour"] }, checks: [healthCheck({ npmRetained: blocked.findings })] };

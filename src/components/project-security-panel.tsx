@@ -19,17 +19,20 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
         <summary>
           <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
           <span className="security-finding-content">
-            <strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong>
+            <strong>
+              {item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}
+              {reason && <span className="security-finding-reason" title="Voir pourquoi la faille persiste">
+                <CircleAlert size={13} aria-hidden="true" />
+                <span className="sr-only"> · Motif disponible</span>
+              </span>}
+            </strong>
             <span>{item.package} <span className="security-version">{item.version}</span></span>
-            {reason && <span className="security-finding-reason">
-              <CircleAlert size={15} aria-hidden="true" />
-              <span><strong>{reason.label}</strong>{reason.detail && <span>{reason.detail}</span>}</span>
-            </span>}
           </span>
           <span className="security-finding-reference">{item.id}</span>
         </summary>
         <div className="security-finding-body">
-          {item.explanation && <p>{item.explanation}</p>}
+          {reason && <div><p><strong>{reason.label}</strong></p>{reason.detail && <p>{reason.detail}</p>}</div>}
+          {item.explanation && item.explanation !== reason?.detail && <p>{item.explanation}</p>}
           <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) correctrice(s) indiquée(s) dans le rapport : {item.fixedVersions.join(", ")}.</> : "aucune version correctrice indiquée dans ce rapport."}</p>
           <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
           <small>Références : {item.aliases.join(" · ") || item.id}</small>
