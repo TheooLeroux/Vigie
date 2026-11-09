@@ -30,6 +30,20 @@ async function proposal(folder: string, roots: string[]) {
   return { allowed: new Set([path]), warnings: [`${root}: prepared`] };
 }
 
+test("Services : seul le railpack.json attesté peut passer le filtre des configurations personnalisées", async () => {
+  const { folder } = await fixture([]);
+  const path = "frontend/railpack.json";
+  const names = [path];
+  const trusted = { ...checks(), railpackCaddyPins: new Set([path]) };
+  try {
+    await mkdir(join(folder, "frontend"));
+    await writeFile(join(folder, path), '{"packages":{"caddy":"2.11.9"}}');
+    await assert.rejects(prepareNodeSources(folder, ["frontend"], names, "26.13.0"), /configuration frontend\/railpack\.json/);
+    await assert.rejects(prepareNodeSources(folder, ["frontend"], names, "26.13.0", fetch, [], undefined, trusted), /Sources Node introuvables/);
+    await assert.rejects(prepareNodeSources(folder, ["frontend"], [...names, "mise.toml"], "26.13.0", fetch, [], undefined, trusted), /configuration mise\.toml/);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
 test("npm : un repli du verrou ne contraint pas la combinaison directe choisie après un échec des tests", async () => {
   const { folder, names } = await fixture([""]);
   const manifestFile = join(folder, "package.json"), lockFile = join(folder, "package-lock.json");

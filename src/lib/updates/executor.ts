@@ -42,7 +42,7 @@ import { recordCompletedImageControls } from "./image-control";
 import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges, wordpressAssessmentChanges } from "./assessment";
 import { recordAssessmentAfterUpdate } from "./assessment-after-update";
 import { imageSecurityCheck } from "./image-policy";
-import { caddyConfig, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
+import { caddyConfig, caddyPinVersion, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -179,6 +179,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
+    const railpackCaddyPins = new Set<string>();
     const caddyCandidates = new Map<string, CaddyChange>();
     const caddyChanges = new Map<string, CaddyChange>();
     const caddyTested = new Map<string, CaddyFingerprint>();
@@ -190,10 +191,16 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         if (!deployed) continue;
         const prefix = target.root ? target.root + "/" : "";
         if (deployed.commit !== expected || names.includes(prefix + "Dockerfile")) continue;
-        if (!release) { results[index].warnings.push("Catalogue Caddy indisponible ; recherche de version reportée."); continue; }
         try {
           const path = prefix + "railpack.json";
-          const change = caddyVersionChange(deployed.current, release.version, names.includes(path) ? await readFile(join(sourceFolder, path), "utf8") : undefined);
+          const previous = names.includes(path) ? await readFile(join(sourceFolder, path), "utf8") : undefined;
+          if (previous !== undefined && caddyPinVersion(previous) === deployed.current && targets.every(other => {
+            if (other.root !== target.root) return !other.root.startsWith(prefix);
+            const proof = caddyDeployments.get(other.id);
+            return proof?.commit === expected && proof.current === deployed.current;
+          })) railpackCaddyPins.add(path);
+          if (!release) { results[index].warnings.push("Catalogue Caddy indisponible ; recherche de version reportée."); continue; }
+          const change = caddyVersionChange(deployed.current, release.version, previous);
           if (change) caddyCandidates.set(target.id, change);
         } catch (error) {
           if (!(error instanceof ApiError)) throw error;
@@ -372,6 +379,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const selectedResults = results.filter((_, index) => selectedRoots.includes(targets[index].root));
       return {
       baseline,
+      railpackCaddyPins,
       retain: findings => npmPolicy.retain(workingFolder, findings),
       alpineRepaired: (root, repair) => { alpineRepairs.set(root ? `${root}/Dockerfile` : "Dockerfile", repair); },
       resolved: async resolvedNames => {

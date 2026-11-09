@@ -114,6 +114,7 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
 }
 export type NodeUpdateChecks = {
   baseline?: readonly SecurityFinding[];
+  railpackCaddyPins?: ReadonlySet<string>;
   resolved: (names: string[]) => Promise<void>;
   retain?: (findings: SecurityFinding[]) => Promise<boolean>;
   alpineRepaired?: (root: string, repair: AlpineRepair) => void;
@@ -231,7 +232,8 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     if (!/(^|\/)(Dockerfile|mise\.toml|\.tool-versions|railpack\.json)$/.test(name)) return false;
     const directory = name.includes("/") ? name.slice(0, name.lastIndexOf("/")) : "";
     const applicable = !directory || roots.some(root => root === directory || root.startsWith(directory + "/"));
-    return applicable && !(name.endsWith("Dockerfile") && roots.includes(directory));
+    const qualified = roots.includes(directory) && (name.endsWith("Dockerfile") || security?.railpackCaddyPins?.has(name));
+    return applicable && !qualified;
   });
   if (custom) throw new ApiError(`La configuration ${custom} doit être vérifiée avant l’automatisation.`);
   const rootManifest = names.includes("package.json") ? JSON.parse(await readFile(join(folder, "package.json"), "utf8")) : null;

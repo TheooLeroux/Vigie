@@ -26,14 +26,14 @@ export function railpackCaddyVersion(evidence: RailwayDeploymentEvidence | null)
     : undefined;
 }
 
+export function caddyPinVersion(content: string) {
+  try { return config.parse(JSON.parse(content)).packages.caddy; }
+  catch { throw new ApiError("Configuration Railpack personnalisée : la mise à jour de Caddy nécessite une validation dédiée.", 422); }
+}
+
 export function caddyVersionChange(current: string, latest: string, previous?: string): CaddyChange | null {
   if (!stableVersion(current) || !stableVersion(latest) || !gt(latest, current)) return null;
-  if (previous !== undefined) {
-    let parsed;
-    try { parsed = config.parse(JSON.parse(previous)); }
-    catch { throw new ApiError("Configuration Railpack personnalisée : la mise à jour de Caddy nécessite une validation dédiée.", 422); }
-    if (gt(parsed.packages.caddy, latest)) throw new ApiError("La version Caddy déjà demandée est supérieure à la candidate.", 422);
-  }
+  if (previous !== undefined && gt(caddyPinVersion(previous), latest)) throw new ApiError("La version Caddy déjà demandée est supérieure à la candidate.", 422);
   return { previous, current, version: latest };
 }
 
