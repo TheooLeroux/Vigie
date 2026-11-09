@@ -638,14 +638,12 @@ export function RailwayInventoryPanel({
                         </span>
                       </summary>
                       <div className="railway-service-title">
-                        <a
-                          className="record-link"
+                        <OutLink
+                          className="record-secondary"
                           href={`https://railway.com/project/${item.id}/service/${s.id}?environmentId=${env.id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
                         >
                           Ouvrir dans Railway
-                        </a>
+                        </OutLink>
                       </div>
                       <p>
                         {s.domains.length
