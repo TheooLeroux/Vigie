@@ -1,4 +1,5 @@
 "use client";
+import { deploymentObservationLifetime, observationIsFresh } from "@/lib/observation-freshness";
 import "./railway.css";
 import { useEffect, useState } from "react";
 import {
@@ -545,37 +546,53 @@ export function RailwayInventoryPanel({
 }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
-  const stale = Date.now() - Date.parse(item.observedAt) > 24 * 60 * 60 * 1000;
+  const [observationTime, setObservationTime] = useState(Date.now);
+  const stale = !observationIsFresh(item.observedAt, deploymentObservationLifetime, observationTime);
+  const showRefresh = item.configured && (stale || Boolean(error || item.connectionError));
+
+  useEffect(() => {
+    const now = Date.now();
+    setObservationTime(now);
+    if (!observationIsFresh(item.observedAt, deploymentObservationLifetime, now)) return;
+    const expiresAt = Date.parse(item.observedAt) + deploymentObservationLifetime;
+    const timer = window.setTimeout(() => setObservationTime(expiresAt), expiresAt - now);
+    return () => window.clearTimeout(timer);
+  }, [item.observedAt]);
+
+  async function refreshObservations() {
+    setBusy(true);
+    try {
+      await request(`railway/${item.connectionId}/sync`, "POST", {});
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      await onRefresh().catch(() => {});
+      setBusy(false);
+    }
+  }
+
+  const refreshButton = <button
+    className="button secondary"
+    disabled={busy || !item.configured}
+    onClick={() => void refreshObservations()}
+  >
+    {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+    Actualiser les relevés
+  </button>;
   return (
     <section className="panel railway-inventory">
       <div className="panel-heading">
         <div>
           <h2>Railway · {item.name}</h2>
-          <p>Relevé du {formatDate(item.observedAt)}</p>
-        </div>
-        <button
-          className="button secondary"
-          disabled={busy || !item.configured}
-          onClick={async () => {
-            setBusy(true);
-            setError("");
-            try {
-              await request(`railway/${item.connectionId}/sync`, "POST", {});
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              await onRefresh().catch(() => {});
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? (
-            <Loader2 size={14} className="spin" />
-          ) : (
-            <RefreshCw size={14} />
+          {showRefresh || !item.configured ? <p>Relevé du {formatDate(item.observedAt)}</p> : (
+            <details className="railway-observation-details">
+              <summary>Relevé du {formatDate(item.observedAt)}</summary>
+              {refreshButton}
+            </details>
           )}
-          Actualiser les relevés
-        </button>
+        </div>
+        {showRefresh && refreshButton}
       </div>
       <div className="connection-body">
         {(error || item.connectionError) && (
@@ -597,8 +614,7 @@ export function RailwayInventoryPanel({
         )}
         {stale && (
           <p className="notice">
-            Ce relevé a plus de 24 heures. Actualisez-le pour vérifier la
-            situation.
+            Le relevé a expiré. Les informations affichées datent de la dernière collecte réussie.
           </p>
         )}
         {item.environments.map((env) => (

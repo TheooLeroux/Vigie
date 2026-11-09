@@ -49,11 +49,14 @@
   gap: 16px;
   align-items: center;
 }
-.railway-inventory > .panel-heading p {
+.railway-inventory > .panel-heading p,
+.railway-observation-details {
   font-size: 11px;
   margin-top: 6px;
   color: var(--muted);
 }
+.railway-observation-details > summary { cursor: pointer; }
+.railway-observation-details > .button { margin-top: 8px; }
 .railway-environment {
   margin-top: 24px;
 }
