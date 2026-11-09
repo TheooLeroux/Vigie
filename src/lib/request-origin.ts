@@ -15,7 +15,11 @@ export function trustedRequestOrigin(request: Request): string | null {
     if (local && process.env.NODE_ENV !== "production")
       return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host) && url.protocol === "http:"
         ? `http://${host}` : null;
-    return configured.protocol === "https:" && host === configured.host && protocol === "https:"
-      ? configured.origin : null;
+    // Vercel invokes Cron Jobs on the production deployment's generated host.
+    // The scheduled route separately verifies its bearer secret.
+    const cronHost = vercel && process.env.VERCEL_ENV === "production" && request.method === "GET" &&
+      url.pathname === "/api/maintenance/security-watch" ? process.env.VERCEL_URL : undefined;
+    return configured.protocol === "https:" && protocol === "https:" && (host === configured.host || host === cronHost)
+      ? `https://${host}` : null;
   } catch { return null; }
 }

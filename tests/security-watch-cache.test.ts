@@ -37,4 +37,15 @@ test("Surveillance planifiée : authentification, déclenchement automatique et 
   assert.deepEqual(snapshot.watch.coverage, { projects: 0, fullyCovered: 0 });
   await refreshSecurityWatchSnapshot(AbortSignal.abort());
   assert.deepEqual(await readSecurityWatchSnapshot(), snapshot);
+
+  process.env.BETTER_AUTH_URL = "https://vigie.example.test";
+  process.env.VERCEL = "1";
+  process.env.VERCEL_ENV = "production";
+  process.env.VERCEL_URL = "vigie-deployment.vercel.app";
+  const deployment = (host: string, authorization?: string) => new Request(`https://${host}/api/maintenance/security-watch`, {
+    headers: authorization ? { authorization } : {},
+  });
+  assert.equal((await GET(deployment(process.env.VERCEL_URL))).status, 401);
+  assert.equal((await GET(deployment("another-deployment.vercel.app", `Bearer ${secret}`))).status, 403);
+  assert.equal((await GET(deployment(process.env.VERCEL_URL, `Bearer ${secret}`))).status, 204);
 });
