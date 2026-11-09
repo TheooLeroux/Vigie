@@ -38,7 +38,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ProjectSummaries, useProjectSummary } from "./project-summaries";
 import { ProjectRealtime, ProjectRealtimeStatus, useProjectRealtime } from "./project-realtime";
 import { createRefreshQueue } from "@/lib/project-realtime";
-import { observedInventory } from "@/lib/project-summary";
 import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
 import { SecurityWatchPanel, securityWatchCacheKey } from "./security-watch-panel";
@@ -79,7 +78,6 @@ const defaultView = "security";
 const projectTabs = [
   { id: "overview", label: "Vue d’ensemble" },
   { id: "technical", label: "Technique" },
-  { id: "information", label: "Informations" },
   { id: "history", label: "Historique" },
 ] as const;
 type ProjectTab = (typeof projectTabs)[number]["id"];
@@ -165,11 +163,11 @@ function needsInfo(p: Project, services: Service[]) {
     s.some((s) => !s.technology || !s.provider || (!!s.runtime && !s.version))
   );
 }
-function Status({ project, data, detail }: { project: Project; data: WorkspaceData; detail?: ProjectDetail }) {
+function Status({ project, data }: { project: Project; data: WorkspaceData }) {
   const { summary, loading } = useProjectSummary(project.id);
-  if (observedInventory(detail) || summary?.observed) return <span className="badge sage">Relevé technique enregistré</span>;
-  if (!detail && loading) return <span className="badge neutral">Inventaire en cours…</span>;
-  if (!detail && !loading && (!summary || !summary.inventoryKnown)) return <span className="badge neutral">Inventaire non vérifiable</span>;
+  if (summary?.observed) return <span className="badge sage">Relevé technique enregistré</span>;
+  if (loading) return <span className="badge neutral">Inventaire en cours…</span>;
+  if (!summary?.inventoryKnown) return <span className="badge neutral">Inventaire non vérifiable</span>;
   const serviceIds = new Set(
     data.services.filter((s) => s.projectId === project.id).map((s) => s.id),
   );
@@ -631,6 +629,18 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               <OutLink href={p.url} className="site-url">
                 {domain(p.url)}
               </OutLink>
+              {p.description.trim() && <p className="project-intro" title={p.description}>{p.description}</p>}
+              {(p.criticality !== "standard" || p.tags.length > 0) && (
+                <div className="project-header-meta">
+                  {p.criticality !== "standard" && (
+                    <span className="project-header-criticality">
+                      <ShieldCheck size={14} aria-hidden="true" />
+                      {p.criticality === "critical" ? "Criticité élevée" : "Projet important"}
+                    </span>
+                  )}
+                  {p.tags.map(tag => <span className="plain-tag" key={tag}>{tag}</span>)}
+                </div>
+              )}
             </div>
           </div>
           <div className="heading-actions">
@@ -766,29 +776,15 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               </div>
             </details>
           )}
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
-            <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
-          </ProjectUpdates>
-        </div>
-        <div className="project-content project-tab-panel" id="project-panel-information" role="tabpanel" aria-labelledby="project-tab-information" hidden={projectTab !== "information"} tabIndex={0}>
-          <section className="panel project-information">
-            <h2>À propos du projet</h2>
-            <p className="project-intro">{p.description || "Aucune description renseignée."}</p>
-            <div className="detail-meta">
-              <Status project={p} data={data!} detail={detail} />
-              <span><ShieldCheck size={14} />{p.criticality === "critical" ? "Criticité élevée" : p.criticality === "important" ? "Projet important" : "Criticité standard"}</span>
-              {p.tags.map(tag => <span className="plain-tag" key={tag}>{tag}</span>)}
-            </div>
-          </section>
           <details className="panel project-section">
             <summary>
-              Environnements & services{" "}
-              <span>{detail.services.length} service(s)</span>
+              Environnements et services manuels{" "}
+              <span>{detail.services.length} service{detail.services.length > 1 ? "s" : ""}</span>
             </summary>
             <div className="panel-heading">
               <div>
-                <h2>Environnements & services</h2>
-                <p>Les composants qui font fonctionner ce projet.</p>
+                <h2>Environnements et services manuels</h2>
+                <p>Les services et environnements ajoutés à la fiche.</p>
               </div>
               <button
                 className="button secondary small"
@@ -860,6 +856,18 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               Ajouter un service
             </button>
           </details>
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
+            <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
+          </ProjectUpdates>
+        </div>
+        <div className="project-content project-tab-panel" id="project-panel-history" role="tabpanel" aria-labelledby="project-tab-history" hidden={projectTab !== "history"} tabIndex={0}>
+          <ActivityPanel
+            items={detail.activity}
+            request={api}
+            projectId={p.id}
+            onProject={openProject}
+            scoped
+          />
           <section className="panel project-review">
             <div>
               <h2>Revue de la fiche</h2>
@@ -898,15 +906,6 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               Marquer comme relue
             </button>
           </section>
-        </div>
-        <div className="project-content project-tab-panel" id="project-panel-history" role="tabpanel" aria-labelledby="project-tab-history" hidden={projectTab !== "history"} tabIndex={0}>
-            <ActivityPanel
-              items={detail.activity}
-              request={api}
-              projectId={p.id}
-              onProject={openProject}
-              scoped
-            />
         </div>
       </>
     );

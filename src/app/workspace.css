@@ -69,9 +69,6 @@
   border-radius: 4px;
 }
 .project-tab-panel[hidden] { display: none; }
-.project-information { padding: 24px; }
-.project-information h2 { font-size: 16px; margin-bottom: 14px; }
-.project-information .detail-meta { margin: 20px 0 0; flex-wrap: wrap; }
 .health-details { width: 100%; margin-top: auto; font-size: 12px; }
 .health-details > summary { padding: 6px 0; cursor: pointer; color: var(--text); }
 .health-details[open] > summary { margin-bottom: 8px; }
@@ -212,12 +209,18 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   .security-finding-body { padding-left: 0; }
 }
 .project-intro {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   max-width: 850px;
   color: var(--text);
-  white-space: pre-line;
+  font-size: 12px;
   overflow-wrap: anywhere;
-  margin-bottom: 4px;
+  overflow: hidden;
+  margin-top: 6px;
 }
+.project-header-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 7px; }
+.project-header-criticality { display: inline-flex; align-items: center; gap: 5px; color: var(--text); font-size: 11px; }
 .project-monitoring {
   display: grid;
   gap: 18px;
@@ -742,7 +745,6 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 @media (max-width: 650px) {
   .project-tabs { gap: 18px; margin: 22px 0 20px; }
   .project-tabs > button { font-size: 12px; }
-  .project-information { padding: 20px 17px; }
   .discovery-item {
     flex-direction: column;
     align-items: stretch;
