@@ -20,7 +20,8 @@ import { refreshProjectHosting } from "./refresh-hosting";
 import { observedProjectDetail } from "../project-observations";
 import { controlSource } from "../automatic-control-state";
 import { railwayState } from "../railway";
-import { railpackImageIdentity, railpackImageReport } from "./railpack-image-report";
+import { railpackImageIdentity, railpackImageReport, sameRailpackImage } from "./railpack-image-report";
+import { readRailpackScan } from "./railpack-image-control";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -40,13 +41,27 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
     delete run.nodeReceipts;
     return run;
   });
-  const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null)
-    .filter(identity => !runs.some(run => railpackImageReport(run, identity)));
-  const [railpackImageReports, automaticControls, currentSecurity] = await Promise.all([
-    readRailpackImageReports(projectId, identities),
+  const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null);
+  const [imageScans, automaticControls, currentSecurity] = await Promise.all([
+    Promise.all(identities.map(async identity => {
+      const scan = await readRailpackScan(identity.targetId);
+      return scan && sameRailpackImage(scan, identity) ? scan : undefined;
+    })),
     Promise.all(targets.map(target => readAutomaticControl(target.id))),
     Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))),
   ]);
+  const missing = identities.filter((identity, index) => !imageScans[index]?.report && !runs.some(run => railpackImageReport(run, identity)));
+  const archived = await readRailpackImageReports(projectId, missing);
+  const railpackImageReports = identities.flatMap((identity, index) => {
+    const scan = imageScans[index];
+    if (scan?.report) return [{ ...scan.report, ...(scan.error ? { error: scan.error } : {}) }];
+    const fallback = archived.find(report => sameRailpackImage(report, identity));
+    if (fallback || scan?.error) {
+      const report = fallback || runs.map(run => railpackImageReport(run, identity)).find(item => item !== null);
+      if (report) return [{ ...report, ...(scan?.error ? { error: scan.error } : {}) }];
+    }
+    return [];
+  });
   return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });

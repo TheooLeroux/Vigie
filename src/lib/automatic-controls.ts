@@ -16,6 +16,8 @@ import { scanVercelSources } from "./updates/vercel-source-monitor";
 import { scanHostingSources } from "./updates/hosting-source-monitor";
 import { scanRailwaySources } from "./updates/railway-source-monitor";
 import { GitHubAccessError } from "./updates/github";
+import { railpackImageIdentity } from "./updates/railpack-image-report";
+import { railpackScanDue, readRailpackScan, refreshRailpackImage } from "./updates/railpack-image-control";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string) {
@@ -23,6 +25,8 @@ export async function automaticControlsNeeded(provider: UpdateTarget["provider"]
     const detail = await observedProjectDetail(project.id, "live");
     for (const target of (await updateTargets(project.id)).filter(target => target.provider === provider)) {
       if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force, forceRevision)) return true;
+      const image = railpackImageIdentity(target, detail.railway);
+      if (image && railpackScanDue(image, await readRailpackScan(target.id), Date.now(), force, forceRevision)) return true;
     }
   }
   return false;
@@ -50,7 +54,9 @@ export async function scanAutomaticTarget(target: UpdateTarget, source: NonNulla
   return { checks: [observation.check], updates: [], warnings: observation.warnings, securityCoverage: observation.securityCoverage };
 }
 
-export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan: scanAutomaticTarget, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log }) {
+const defaultControls = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan: scanAutomaticTarget, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log, scanRailpack: refreshRailpackImage };
+
+export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies: Omit<typeof defaultControls, "scanRailpack"> & { scanRailpack?: typeof refreshRailpackImage } = defaultControls) {
   const result = { checked: 0, failed: 0, deferred: 0, limited: 0 };
   const attemptRevision = options.forceRevision || (/^[a-f0-9]{40}$/i.test(process.env.GITHUB_SHA || "") ? process.env.GITHUB_SHA : undefined);
   await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId)), 3, async project => {
@@ -60,6 +66,11 @@ export async function reconcileAutomaticControls(options: { force?: boolean; for
         const release = await dependencies.claim(target.id);
         if (!release) { result.deferred++; continue; }
         try {
+          const railpack = dependencies.scanRailpack && railpackImageIdentity(target, detail.railway);
+          if (railpack) {
+            const image = await dependencies.scanRailpack!(target, railpack, options.force, attemptRevision).catch(() => "failed" as const);
+            if (image) result[image]++;
+          }
           const source = controlSource(target, detail);
           const identity = source?.identity || "unavailable";
           const previous = await dependencies.read(target.id);
@@ -95,6 +106,6 @@ export async function reconcileAutomaticControls(options: { force?: boolean; for
       }
     } catch { result.failed++; }
   });
-  if (result.checked || result.failed || result.limited) await dependencies.log("live", "hosting.automatic_control", `Contrôle automatique : ${result.checked} service(s) vérifié(s), ${result.limited} couverture(s) limitée(s), ${result.failed} échec(s), ${result.deferred} différé(s).`);
+  if (result.checked || result.failed || result.limited) await dependencies.log("live", "hosting.automatic_control", `Contrôle automatique : ${result.checked} analyse(s) réussie(s), ${result.limited} couverture(s) limitée(s), ${result.failed} échec(s), ${result.deferred} différé(s).`);
   return result;
 }

@@ -14,6 +14,9 @@ import { observedProjectDetail } from "../src/lib/project-observations";
 import { forcedControlRevision } from "../src/lib/control-force";
 import { updateTargets } from "../src/lib/updates/targets";
 import type { VercelProject } from "../src/lib/vercel-types";
+import { railpackImageIdentity } from "../src/lib/updates/railpack-image-report";
+import { readRailpackScan, refreshRailpackImage } from "../src/lib/updates/railpack-image-control";
+import type { RailpackInventory } from "../src/lib/updates/railpack-image-scan";
 
 function fixture() {
   const detail = healthFixture(), target = healthUpdates().runs[0].targets[0];
@@ -23,6 +26,41 @@ function fixture() {
   const report: AutomaticControl = { targetId: target.id, identity: source.identity, attemptedAt: at, checkedAt: at, checks: [healthCheck({ phase: "before", checkedAt: at })], updates: ["library 1.0.0 → 2.0.0"], warnings: [] };
   return { detail, target, source, report };
 }
+
+test("Railpack : le scan image suit sa propre cadence et réutilise uniquement l’inventaire attesté", async () => {
+  const { detail, target, report } = fixture();
+  target.id = randomUUID();
+  report.targetId = target.id;
+  const service = detail.railway![0].services[0];
+  service.builder = "RAILPACK";
+  const deployment = service.activeDeployments[0];
+  deployment.evidence!.staticSite = true;
+  deployment.evidence!.packages.push({ name: "caddy", version: "2.11.9", usage: "runtime" });
+  report.identity = controlSource(target, detail)!.identity;
+  const identity = railpackImageIdentity(target, detail.railway)!;
+  const inventory = { sbom: "attesté", debian: "13", osRelease: "os", dpkgStatus: "dpkg" };
+  const check = healthCheck({ tool: "Trivy", phase: "before" });
+  const received: (RailpackInventory | undefined)[] = [];
+  const scan = async (_target: UpdateTarget, _image: typeof identity, cached?: RailpackInventory) => {
+    received.push(cached);
+    return { check, inventory };
+  };
+  const result = await reconcileAutomaticControls({}, {
+    projects: async () => [detail.project], detail: async () => detail, targets: async () => [target],
+    scan: async () => { throw new Error("Le scan npm est encore frais"); },
+    read: async () => report, write: async () => assert.fail("Le scan npm n’a pas à être remplacé"),
+    claim: async () => async () => {}, log: async () => {},
+    scanRailpack: (service, image, force, revision) => refreshRailpackImage(service, image, force, revision, scan),
+  });
+  assert.equal(result.checked, 1);
+  assert.equal(await refreshRailpackImage(target, identity, false, undefined, scan), null);
+  assert.equal(await refreshRailpackImage(target, identity, true, undefined, scan), "checked");
+  assert.deepEqual(received, [undefined, inventory]);
+  assert.equal(await refreshRailpackImage(target, identity, true, undefined, async () => { throw Error("Trivy indisponible"); }), "failed");
+  assert.equal((await readRailpackScan(target.id))?.report?.check.checkedAt, check.checkedAt);
+  assert.equal(await refreshRailpackImage(target, { ...identity, deploymentId: "nouveau" }, false, undefined, scan), "checked");
+  assert.equal(received.at(-1), undefined);
+});
 
 test("Contrôle autonome : une image publique identifiée est analysée même sans dépôt Git", async () => {
   const { detail, target } = fixture();

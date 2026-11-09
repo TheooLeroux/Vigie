@@ -90,9 +90,9 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   const railpack = railpackImageIdentity(target, detail.railway);
   const railpackReport = railpack && activeRailpackImageReport(target, detail, state);
   const imageCheckedAt = railpackReport?.check.checkedAt;
-  const imageLimitation = imageCheckedAt && Date.now() - Date.parse(imageCheckedAt) >= controlInterval
+  const imageLimitation = railpackReport?.error || (imageCheckedAt && Date.now() - Date.parse(imageCheckedAt) >= controlInterval
     ? "Le rapport image correspond toujours au déploiement actif. Un nouveau scan est nécessaire pour prendre en compte les avis publiés depuis."
-    : undefined;
+    : undefined);
   const scope = railpackReport ? "Dépendances verrouillées et paquets de l’image Railpack" : control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
   const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage, railpackImageCheckedAt: imageCheckedAt };
   const outcome = (status: CoverageStatus, reason: string, action: string, extra: Partial<ServiceCoverage> = {}): ServiceCoverage => ({ ...base, status, reason, action, ...extra });

@@ -5,7 +5,12 @@ import type { ProjectDetail } from "../types";
 import type { UpdateCheck, UpdateRun, UpdateState, UpdateTarget } from "./types";
 
 export type RailpackImageIdentity = { targetId: string; projectId: string; deploymentId: string; imageDigest: string; commit: string; caddy: string };
-export type RailpackImageReport = RailpackImageIdentity & { check: UpdateCheck };
+export type RailpackImageReport = RailpackImageIdentity & { check: UpdateCheck; error?: string };
+
+export function sameRailpackImage(a: RailpackImageIdentity, b: RailpackImageIdentity) {
+  return a.targetId === b.targetId && a.projectId === b.projectId && a.deploymentId === b.deploymentId &&
+    a.imageDigest === b.imageDigest && a.commit === b.commit && a.caddy === b.caddy;
+}
 
 export function railpackImageIdentity(target: UpdateTarget, railway: ProjectDetail["railway"]): RailpackImageIdentity | null {
   if (target.provider !== "railway" || target.mode !== "git") return null;
@@ -40,7 +45,6 @@ export function railpackImageReport(run: UpdateRun, identity: RailpackImageIdent
 export function activeRailpackImageReport(target: UpdateTarget, detail: ProjectDetail, state?: UpdateState | null) {
   const identity = railpackImageIdentity(target, detail.railway);
   if (!identity) return null;
-  const report = state?.railpackImageReports?.find(item => item.targetId === target.id && item.projectId === target.projectId && item.deploymentId === identity.deploymentId &&
-    item.imageDigest === identity.imageDigest && item.commit === identity.commit && item.caddy === identity.caddy);
+  const report = state?.railpackImageReports?.find(item => sameRailpackImage(item, identity));
   return report || state?.runs.map(run => railpackImageReport(run, identity)).find(item => item !== null) || null;
 }
