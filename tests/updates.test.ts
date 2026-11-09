@@ -13,7 +13,8 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveVercelConnection, applyVercelSnapshot, linkVercelProject } from "../src/lib/vercel";
 import { projectUpdates, startProjectUpdate, configureUpdateSource } from "../src/lib/updates/service";
 import { updateTargets, sourceRoot } from "../src/lib/updates/targets";
-import { completedNodeRuns, readUpdateRun, readUpdateSource, updateStorage } from "../src/lib/updates/storage";
+import { nodeRunsWithReceipts, readUpdateRun, readUpdateSource, updateStorage } from "../src/lib/updates/storage";
+import { nodeReceiptGroupCompleted, type NodeValidationReceipt } from "../src/lib/updates/node-current";
 import { executeUpdate, publishGitVersions } from "../src/lib/updates/executor";
 import { repairAlpineDockerfile } from "../src/lib/updates/dockerfile";
 import { latestNode, upgradeManifest, managerCommands, snapshotSources, changedSources, prepareNodeSources } from "../src/lib/updates/node";
@@ -155,17 +156,19 @@ test("Moteur : une technologie non qualifiée reste hors de la sélection automa
   assert.equal(stored.stage, "completed");
   assert.match(stored.message, /seuls les services sélectionnés sont couverts/);
 });
-test("Reprises Node : seuls les traitements terminés du bon projet sont éligibles, les références restent internes", async () => {
+test("Reprises Node : un groupe validé peut être repris malgré l’échec d’un groupe indépendant", async () => {
   const { project } = await fixture(), other = await fixture();
   const db = await updateStorage(), hashes = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
-  for (const [projectId, stage] of [[project.id, "completed"], [project.id, "attention"], [project.id, "failed"], [other.project.id, "completed"]]) {
+  const deployments: NodeValidationReceipt["deployments"] = ["frontend", "backend"].map(targetId => ({ targetId, deploymentId: "active", imageDigest: "sha256:" + hashes[0], source: "railpack", usage: "runtime" }));
+  for (const [projectId, stage, backend] of [[project.id, "completed", "completed"], [project.id, "attention", "attention"], [project.id, "failed", "completed"], [project.id, "updating", "completed"], [other.project.id, "completed", "completed"]]) {
     const id = randomUUID();
-    const data = { id, projectId, stage, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nodeReceipts: [{ sourceHash: hashes[0], targetsHash: hashes[1], policyHash: hashes[2] }] };
+    const results = [{ targetId: "frontend", stage: "completed" }, { targetId: "backend", stage: backend }, { targetId: "tailscale", stage }];
+    const data = { id, projectId, stage, results, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nodeReceipts: [{ sourceHash: hashes[0], targetsHash: hashes[1], policyHash: hashes[2], deployments }] };
     await db.prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(id, projectId, stage, JSON.stringify(data));
   }
-  const runs = await completedNodeRuns(project.id, hashes);
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].stage, "completed");
+  const runs = await nodeRunsWithReceipts(project.id, hashes);
+  assert.deepEqual(runs.map(run => run.stage).sort(), ["attention", "completed", "failed"]);
+  assert.deepEqual(runs.filter(run => nodeReceiptGroupCompleted(run.nodeReceipts![0], run.results)).map(run => run.stage).sort(), ["completed", "failed"]);
   assert.equal((await projectUpdates(project.id)).runs.some(run => "nodeReceipts" in run), false);
 });
 test("Mises à jour : le verrou couvre le dépôt partagé et pas seulement le service", async () => {

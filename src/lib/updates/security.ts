@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, lstat } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { valid } from "semver";
+import { gte, valid } from "semver";
 import { ApiError } from "../http";
 import { runCommand } from "./process";
 import { createHash } from "node:crypto";
@@ -58,6 +58,26 @@ export function sameScopedFinding(first: SecurityFinding, second: SecurityFindin
     && first.severity === second.severity && [first.id, ...first.aliases].some(id => id === second.id || second.aliases.includes(id));
 }
 
+function sameCaddyAdvisory(previous: SecurityFinding, candidate: SecurityFinding) {
+  return previous.scope === candidate.scope && previous.id === candidate.id && previous.package === candidate.package &&
+    previous.severity === candidate.severity && (previous.version === candidate.version ||
+      !!valid(previous.version) && !!valid(candidate.version) && gte(candidate.version, previous.version));
+}
+
+export function caddyImageSecurity(scope: string, previous: SecurityFinding[], findings: SecurityFinding[]): UpdateCheck {
+  const check = securityCheck("Trivy", "candidate", scope, findings);
+  if (!findings.length) return check;
+  const caddyRetained: SecurityFinding[] = [], blockers: SecurityFinding[] = [];
+  for (const finding of findings) {
+    const original = previous.find(item => sameCaddyAdvisory(item, finding));
+    if (original) caddyRetained.push({ ...finding, explanation: `Déjà présent dans l’image active vérifiée (${original.package} ${original.version}).` });
+    else blockers.push(finding);
+  }
+  if (blockers.length) return { ...check, blockers, message: `Caddy : ${blockers.length} alerte(s) nouvelle(s) ou aggravée(s) bloquent l’image candidate.` };
+  return { ...check, status: "warning", findings: caddyRetained, blockers: undefined, caddyRetained,
+    message: `Caddy : aucune alerte nouvelle ou aggravée. ${caddyRetained.length} signalement(s) de l’image active restent à corriger.` };
+}
+
 export class SecurityPolicyError extends ApiError {
   constructor(readonly check: UpdateCheck) { super(`${check.tool} : ${check.message}`, 422); }
 }
@@ -76,9 +96,15 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
     for (const check of latest.values()) {
       if (verifiedImageResiduals(result, check)) continue;
       const baseline = result.checks?.findLast(item => item.tool === "OSV" && item.phase === "before")?.findings || [];
+      const caddyBaseline = result.checks?.findLast(item => item.tool === "Trivy" && item.phase === "before")?.findings || [];
+      const caddyProof = result.checks?.findLast(item => item.tool === "Caddy" && item.phase === "before" && item.status === "passed")?.caddyEvidence;
       const findings = check.findings.filter(finding => {
         if (check.phase === "before") return true;
         if (check.tool === "WPVulnerability") return !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version);
+        if (check.tool === "Trivy" && check.status === "warning" && check.caddyRetained) {
+          return !caddyProof || caddyProof.deploymentId !== result.previousDeploymentId || !caddyBaseline.some(item => sameCaddyAdvisory(item, finding)) ||
+            !check.caddyRetained.some(item => item.explanation && item.version === finding.version && sameCaddyAdvisory(item, finding));
+        }
         if (check.tool !== "OSV" || check.status !== "warning") return true;
         return !baseline.some(item => sameScopedFinding(item, finding)) || !check.npmRetained?.some(item => item.explanation && sameScopedFinding(item, finding));
       });

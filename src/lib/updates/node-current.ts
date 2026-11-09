@@ -5,7 +5,7 @@ import { z } from "zod";
 import { officialNodeImageDigest, unchangedNodeCatalogs, type NodeCatalogEntry } from "./node-catalog-state";
 import { runCommand } from "./process";
 import type { SourceFile } from "./node";
-import type { SecurityFinding, UpdateCheck, UpdateTarget } from "./types";
+import type { SecurityFinding, UpdateCheck, UpdateResult, UpdateTarget } from "./types";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -18,6 +18,13 @@ const receiptSchema = z.object({
   validationImage: digest,
   deployments: z.array(z.object({ targetId: z.string().max(300), deploymentId: z.string().max(300), imageDigest: digest, source: z.enum(["container", "railpack"]), usage: z.enum(["runtime", "build"]) })).min(1).max(30),
   securityHash: hex,
+  npmRetained: z.array(z.object({
+    id: z.string().max(200), aliases: z.array(z.string().max(200)).max(100),
+    package: z.string().max(200), version: z.string().max(200), scope: z.string().max(1000),
+    severity: z.enum(["critical", "high", "moderate", "low", "unknown"]),
+    kind: z.enum(["vulnerability", "supply-chain", "unconfirmed"]).optional(),
+    explanation: z.string().trim().min(1).max(20_000),
+  })).max(500).optional(),
   imageSecurity: z.array(z.object({ root: z.string().max(1000), hash: hex })).max(30),
   validations: z.array(z.object({ targetId: z.string().max(300), checkedAt: z.string().datetime(), scope: z.string().max(1000), status: z.enum(["passed", "warning"]), message: z.string().max(20_000) })).min(1).max(30),
   warnings: z.array(z.object({ targetId: z.string().max(300), messages: z.array(z.string().max(20_000)).max(500) })).max(30),
@@ -42,15 +49,25 @@ export async function nodePolicyHash(folder = process.cwd()) {
   return hash({ files, node: process.version, platform: process.platform, arch: process.arch, os: process.env.ImageOS || "", image: process.env.ImageVersion || "" });
 }
 
+function hasReusableSecurity(receipt: NodeValidationReceipt) {
+  const empty = nodeSecurityHash([]);
+  const hasNpmFindings = receipt.securityHash !== empty;
+  return hasNpmFindings === Boolean(receipt.npmRetained?.length) && receipt.imageSecurity.every(image => image.hash === empty);
+}
+
 export function reusableNodeReceipt(raw: unknown, key: NodeCurrentKey, now = Date.now()) {
   const parsed = receiptSchema.safeParse(raw);
   if (!parsed.success) return null;
   const receipt = parsed.data, age = now - Date.parse(receipt.validatedAt);
-  if (receipt.securityHash !== nodeSecurityHash([]) || receipt.imageSecurity.some(image => image.hash !== nodeSecurityHash([]))) return null;
+  if (!hasReusableSecurity(receipt)) return null;
   if (age < 0 || age > 24 * 60 * 60_000 || Object.entries(key).some(([name, value]) => receipt[name as keyof NodeCurrentKey] !== value)) return null;
   if (new Set(receipt.deployments.map(item => item.targetId)).size !== receipt.deployments.length || new Set(receipt.validations.map(item => item.targetId)).size !== receipt.validations.length) return null;
   if (receipt.deployments.some(item => !receipt.validations.some(validation => validation.targetId === item.targetId))) return null;
   return receipt;
+}
+
+export function nodeReceiptGroupCompleted(receipt: Pick<NodeValidationReceipt, "deployments">, results: UpdateResult[]) {
+  return receipt.deployments.every(proof => results.some(result => result.targetId === proof.targetId && result.stage === "completed"));
 }
 
 export async function unchangedNodeInputs(receipt: NodeValidationReceipt, transport: typeof fetch = fetch, imageDigest = officialNodeImageDigest) {
@@ -71,10 +88,10 @@ export async function checkCurrentNodeConfiguration(receipt: NodeValidationRecei
   sources: () => Promise<void>;
   catalogs: () => Promise<boolean>;
 }) {
-  if (actions.baseline.length || receipt.securityHash !== nodeSecurityHash([]) || receipt.imageSecurity.some(image => image.hash !== nodeSecurityHash([]))) return false;
+  if (!hasReusableSecurity(receipt) || nodeSecurityHash(actions.baseline) !== receipt.securityHash) return false;
   try {
     if (!await actions.images()) return false;
-    if ((await actions.finalScan()).length) return false;
+    if (nodeSecurityHash(await actions.finalScan()) !== receipt.securityHash) return false;
     await actions.sources();
     return await actions.catalogs();
   } catch { return false; }
@@ -106,5 +123,5 @@ export function nodeReceiptValidations(targets: UpdateTarget[], checks: (UpdateC
 
 export function nodeReceiptDraft(key: NodeCurrentKey, catalogs: NodeCatalogEntry[], rest: Omit<NodeValidationReceipt, keyof NodeCurrentKey | "schema" | "catalogs">) {
   const parsed = receiptSchema.safeParse({ schema: 2, ...key, catalogs, ...rest });
-  return parsed.success && parsed.data.securityHash === nodeSecurityHash([]) && parsed.data.imageSecurity.every(image => image.hash === nodeSecurityHash([])) ? parsed.data : null;
+  return parsed.success && hasReusableSecurity(parsed.data) ? parsed.data : null;
 }

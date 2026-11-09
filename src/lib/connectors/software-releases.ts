@@ -150,8 +150,8 @@ async function nodeCatalog(
     return { releases, schedule, checkedAt: new Date().toISOString() };
   });
 }
-async function caddyCatalog(
-  transport: typeof fetch,
+export async function caddyCatalog(
+  transport: typeof fetch = fetch,
 ): Promise<CaddyCatalog | null> {
   return cached("caddy:official", async () => {
     const raw = await json(CADDY_RELEASE, 1_000_000, transport),

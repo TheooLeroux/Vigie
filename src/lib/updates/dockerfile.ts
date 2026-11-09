@@ -7,9 +7,12 @@ import { runCommand } from "./process";
 import { stableVersion } from "./versions";
 import { compare } from "semver";
 import { SecurityPolicyError } from "./security";
+import { officialNodeImageDigest } from "./node-catalog-state";
 import type { SecurityFinding } from "./types";
 
 type Replacement = { start: number; end: number; name: string; suffix: string; version: string; image: boolean };
+export type DockerNodeBase = { image: string; digest: string };
+type InspectDockerImage = (image: string, bases: DockerNodeBase[] | null) => Promise<void>;
 function replacements(source: string) {
   if (source.length > 64_000 || /^\s*#\s*(syntax|escape)\s*=/im.test(source) || /\\\r?\n/.test(source) || /^\s*(ARG|ADD|ONBUILD)\b/im.test(source) || /--(mount|network|security)=/i.test(source)) throw new ApiError("Ce Dockerfile utilise des instructions qui nécessitent une validation dédiée.");
   const changes: Replacement[] = [], stages = new Set<string>();
@@ -55,6 +58,15 @@ export function dockerRuntimeBase(source: string) {
 }
 export function dockerNodeBases(source: string) {
   return [...new Set(replacements(source).filter(item => item.image).map(item => source.slice(item.start, item.end)))];
+}
+export async function pinnedDockerNodeBases(source: string, imageDigest = officialNodeImageDigest) {
+  const bases = await Promise.all(dockerNodeBases(source).map(async image => ({ image, digest: await imageDigest(image) })));
+  const digests = new Map(bases.map(({ image, digest }) => [image, digest]));
+  const dockerfile = replacements(source).filter(item => item.image).reverse().reduce((result, item) => {
+    const image = source.slice(item.start, item.end);
+    return result.slice(0, item.end) + "@" + digests.get(image) + result.slice(item.end);
+  }, source);
+  return { dockerfile, bases };
 }
 export function rewriteDockerfile(source: string, nodeVersion: string, versions: Record<string, string>, release?: "trixie" | "bookworm" | "alpine") {
   if (!stableVersion(nodeVersion)) throw new ApiError("Version Node invalide pour le Dockerfile.");
@@ -151,7 +163,7 @@ export function validatedDockerfileChange(original: string, proposed: string, al
     && repairAlpineDockerfile(alpineRepair) === proposed;
 }
 
-export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>, notify: (message: string) => Promise<void> = async () => {}) {
+export async function validateDockerfile(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: InspectDockerImage, notify: (message: string) => Promise<void> = async () => {}) {
   const path = join(folder, root ? root + "/Dockerfile" : "Dockerfile"), initial = await readFile(path, "utf8");
   const candidates = [initial, ...dockerBaseAlternatives(initial, nodeVersion)];
   let failure: unknown;
@@ -183,7 +195,7 @@ export async function validateDockerfile(folder: string, root: string, names: st
   }
   throw failure;
 }
-export async function validateDockerfileCandidate(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: (image: string) => Promise<void>) {
+export async function validateDockerfileCandidate(folder: string, root: string, names: string[], nodeVersion: string, inspectImage?: InspectDockerImage) {
   const prefix = root ? root + "/" : "", source = await readFile(join(folder, prefix + "Dockerfile"), "utf8");
   replacements(source);
   const expose = [...source.matchAll(/^\s*EXPOSE\s+(\d+)(?:\/tcp)?\s*$/gim)].at(-1);
@@ -202,8 +214,19 @@ export async function validateDockerfileCandidate(folder: string, root: string, 
       await mkdir(dirname(destination), { recursive: true });
       await copyFile(origin, destination);
     }
-    await runCommand("docker", ["build", "--pull", "--tag", image, "--file", join(context, "Dockerfile"), context], { env, timeout: 15 * 60_000 });
-    await inspectImage?.(image);
+    // BuildKit can resolve FROM without creating a local image tag to inspect.
+    // Pin the build input itself for the receipt, preserving the source context.
+    const pinned = inspectImage ? await pinnedDockerNodeBases(source).catch(() => null) : null;
+    let dockerfile = join(context, "Dockerfile");
+    if (pinned) {
+      dockerfile = join(temporary, "Dockerfile");
+      await writeFile(dockerfile, pinned.dockerfile);
+      if (names.includes(prefix + "Dockerfile.dockerignore")) {
+        await copyFile(join(context, "Dockerfile.dockerignore"), dockerfile + ".dockerignore");
+      }
+    }
+    await runCommand("docker", ["build", "--pull", "--tag", image, "--file", dockerfile, context], { env, timeout: 15 * 60_000 });
+    await inspectImage?.(image, pinned?.bases ?? null);
     const server = await readFile(join(context, "server.js"), "utf8").catch(() => "");
     const gatedDocs = server.includes("process.env.DOCS_COOKIE_SECRET") && server.includes("process.env.DOCS_GATE_URL") && server.includes("/healthz");
     const fixtureEnv = gatedDocs ? ["--env=DOCS_COOKIE_SECRET=vigie-isolated-validation-not-a-production-secret", "--env=DOCS_GATE_URL=https://vigie.invalid/api/auth/docs-gate", "--env=PUBLIC_DOCS_URL=https://vigie.invalid"] : [];

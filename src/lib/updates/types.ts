@@ -34,7 +34,7 @@ export type SecurityFinding = {
   usage?: "runtime" | "build" | "unknown";
 };
 export type UpdateCheck = {
-  tool: "OSV" | "Trivy" | "WPScan" | "WPVulnerability" | "Validation" | "Node" | "Static";
+  tool: "OSV" | "Trivy" | "WPScan" | "WPVulnerability" | "Validation" | "Node" | "Static" | "Caddy";
   phase: "before" | "candidate" | "after";
   checkedAt: string;
   scope: string;
@@ -43,8 +43,10 @@ export type UpdateCheck = {
   findings: SecurityFinding[];
   nodeEvidence?: { version: string; deploymentId: string; imageDigest?: string; source: "container" | "railpack" | "vercel-function"; usage: "runtime" | "build"; instances?: string[]; projectId?: string; commit?: string | null; region?: string };
   staticEvidence?: { projectId: string; deploymentId: string; commit: string | null; artifactHash: string; fileCount: number; buildNodeVersion: string };
+  caddyEvidence?: { version: string; deploymentId: string; imageDigest: string; instances: string[]; packagesHash: string; binaryHash: string };
   blockers?: SecurityFinding[];
   npmRetained?: SecurityFinding[];
+  caddyRetained?: SecurityFinding[];
   wordpressRetained?: { package: string; version: string }[];
 };
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };

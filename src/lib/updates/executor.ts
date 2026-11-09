@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, readFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,23 +10,24 @@ import { synchronizeVercel } from "../vercel";
 import { synchronizeRailway } from "../railway";
 import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
+import { caddyCatalog } from "../connectors/software-releases";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { changedSources, latestNode, nodeValidationRuntime, snapshotSources, type NodeUpdateChecks } from "./node";
 import { NodePreparationError, prepareNodeServices } from "./node-services";
 import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, readRailwayInstance, waitForDeployment } from "./providers";
 import { activeNodeImage, confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
-import { completedNodeRuns, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { nodeRunsWithReceipts, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { createUpdateProgressTracker } from "./progress";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import { executeLocalWordPress } from "./wordpress-agent-execution";
 import { remainingNpmFindings, type UpdateRun, type UpdateTarget, type UpdateResult, type UpdateStage, type UpdateCheck, type SecurityFinding } from "./types";
 import { npmResidualPolicy } from "./node-security";
-import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, validatedDockerfileChange, type AlpineRepair } from "./dockerfile";
-import { requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck, SecurityPolicyError } from "./security";
+import { dockerRuntimeBase, validateDockerfileCandidate, validatedDockerfileChange, type AlpineRepair, type DockerNodeBase } from "./dockerfile";
+import { caddyImageSecurity, requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck, SecurityPolicyError } from "./security";
 import { nodeCatalogState } from "./node-catalog-state";
-import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
+import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptGroupCompleted, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs } from "./node-current";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
 import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
@@ -40,14 +42,19 @@ import { recordCompletedImageControls } from "./image-control";
 import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges, wordpressAssessmentChanges } from "./assessment";
 import { recordAssessmentAfterUpdate } from "./assessment-after-update";
 import { imageSecurityCheck } from "./image-policy";
+import { caddyConfig, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
 async function extractArchive(archive: string, folder: string, github = false): Promise<string[]> {
   return JSON.parse(await runCommand("python3", [archiveScript, github ? "extract-github" : "extract", archive, folder]));
 }
-export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>) {
-  if (!files.length || files.some(file => !/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|\.nvmrc|\.node-version|Dockerfile)$/.test(file.path) || file.path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\\\x00-\x1f]/.test(file.path))) throw new ApiError("La publication doit se limiter aux versions et aux fichiers de verrouillage.");
+export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>, caddyChanges?: ReadonlyMap<string, CaddyChange>) {
+  if (!files.length || files.some(file => !/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|\.nvmrc|\.node-version|Dockerfile|railpack\.json)$/.test(file.path) || file.path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\\\x00-\x1f]/.test(file.path))) throw new ApiError("La publication doit se limiter aux versions et aux fichiers de verrouillage.");
+  for (const file of files.filter(file => /(^|\/)railpack\.json$/.test(file.path))) {
+    const change = caddyChanges?.get(file.path);
+    if (!change || !caddyVersionChange(change.current, change.version, change.previous) || file.content !== caddyConfig(change)) throw new ApiError("Le fichier Railpack doit uniquement fixer la version Caddy validée.");
+  }
   if (!repositoryAllowed(repository)) throw new ApiError("Ce dépôt n’est pas autorisé pour la mise à jour.");
   const token = githubUpdateToken(repository);
   if (!token) throw new ApiError("Accès GitHub manquant.");
@@ -106,8 +113,12 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const latestLts = await latestNode();
   const runtimeChecks: (UpdateCheck | null)[] = [];
   const staticFrameworks = new Map<string, string>();
+  const caddyDeployments = new Map<string, { current: string; commit: string | null }>();
   for (const [index, target] of targets.entries()) {
-    results[index].previousDeploymentId = await providerPreflight(target, latestLts);
+    results[index].previousDeploymentId = await providerPreflight(target, latestLts, undefined, evidence => {
+      const current = railpackCaddyVersion(evidence);
+      if (current && evidence && target.mode === "git") caddyDeployments.set(target.id, { current, commit: evidence.commit });
+    });
     await checkNodeEndpoint(target);
     if (workerTarget(target)) results[index].warnings.push("Traitement en arrière-plan : les tests isolés et le processus Node actif sont contrôlés. Aucun résultat de tâche, envoi externe ou parcours métier n’est certifié par la seule présence du processus.");
     if (vercelStaticTarget(target)) {
@@ -126,6 +137,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       requireSecurityPass(check);
     }
   }
+  const caddyRelease = caddyDeployments.size ? caddyCatalog().catch(() => null) : null;
   const plan = await nodeValidationPlan(targets, runtimeChecks, latestLts);
   const version = plan.version;
   for (const [index, target] of targets.entries()) {
@@ -167,12 +179,46 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
+    const caddyCandidates = new Map<string, CaddyChange>();
+    const caddyChanges = new Map<string, CaddyChange>();
+    const caddyTested = new Map<string, CaddyFingerprint>();
+    const caddyObserved = new Map<string, NonNullable<UpdateCheck["caddyEvidence"]>>();
+    if (caddyDeployments.size) {
+      const release = await caddyRelease;
+      for (const [index, target] of targets.entries()) {
+        const deployed = caddyDeployments.get(target.id);
+        if (!deployed) continue;
+        const prefix = target.root ? target.root + "/" : "";
+        if (deployed.commit !== expected || names.includes(prefix + "Dockerfile")) continue;
+        if (!release) { results[index].warnings.push("Catalogue Caddy indisponible ; recherche de version reportée."); continue; }
+        try {
+          const path = prefix + "railpack.json";
+          const change = caddyVersionChange(deployed.current, release.version, names.includes(path) ? await readFile(join(sourceFolder, path), "utf8") : undefined);
+          if (change) caddyCandidates.set(target.id, change);
+        } catch (error) {
+          if (!(error instanceof ApiError)) throw error;
+          results[index].warnings.push(error.message);
+        }
+      }
+      const unqualifiedRoots = new Set(targets.flatMap(target => {
+        const candidate = caddyCandidates.get(target.id);
+        return candidate && targets.some(other => other.root === target.root && caddyCandidates.get(other.id)?.current !== candidate.current) ? [target.root] : [];
+      }));
+      for (const [index, target] of targets.entries()) {
+        if (unqualifiedRoots.has(target.root) && caddyCandidates.delete(target.id)) {
+          results[index].warnings.push("Caddy : le même répertoire alimente un autre service sans candidate commune qualifiée.");
+        }
+      }
+    }
     const catalogs = nodeCatalogState(fetch, Date.parse(run.purpose === "assessment" ? run.startedAt || run.createdAt : run.createdAt));
     const policyHash = await nodePolicyHash();
     const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
     await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
-    const previous = await completedNodeRuns(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
-    let receipt: NodeValidationReceipt | null = run.purpose === "assessment" ? null : previous.flatMap(run => run.nodeReceipts || []).map(raw => reusableNodeReceipt(raw, key)).find(Boolean) || null;
+    const previous = run.purpose === "assessment" || caddyCandidates.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
+    let receipt = previous.flatMap(prior => (prior.nodeReceipts || []).flatMap(raw => {
+      const saved = reusableNodeReceipt(raw, key);
+      return saved && nodeReceiptGroupCompleted(saved, prior.results || []) ? [saved] : [];
+    })).at(0) ?? null;
     if (receipt) {
       try {
         for (const [index, target] of targets.entries()) {
@@ -206,10 +252,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
       requireSecurityPass(check);
     }
-    async function recordOsv(phase: "before" | "candidate", scope: string, scan: Awaited<ReturnType<typeof nodeScan>>, selectedRoots = roots, workingFolder = sourceFolder) {
+    async function recordOsv(phase: "before" | "candidate", scope: string, scan: Awaited<ReturnType<typeof nodeScan>>, selectedRoots = roots, workingFolder = sourceFolder, policy = npmPolicy) {
       const checkFindings = (label: string, findings: SecurityFinding[]) => phase === "before"
         ? securityCheck("OSV", phase, label, findings)
-        : npmPolicy.check(workingFolder, label, findings);
+        : policy.check(workingFolder, label, findings);
       for (const [index, target] of targets.entries()) {
         if (!selectedRoots.includes(target.root)) continue;
         const findings = scan.findings.filter(finding => finding.scope === target.root);
@@ -235,14 +281,15 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         return true;
       } catch { return false; }
     }));
-    const npmPolicy = await npmResidualPolicy(sourceFolder, names, baseline.filter(finding => {
+    const qualifiedBaseline = baseline.filter(finding => {
       const matches = targets.flatMap((target, index) => target.root === finding.scope ? [scopedBaseline[index]] : []);
       return matches.length > 0 && matches.every(Boolean);
-    }));
+    });
+    const npmPolicy = await npmResidualPolicy(sourceFolder, names, qualifiedBaseline);
     await recordOsv("before", "Dépendances verrouillées", baselineScan);
     const imageBaselines = new Map<string, SecurityFinding[]>();
     const imageSecurity = new Map<string, string>();
-    const imageReferences = new Map<string, { image: string; digest: string }[] | null>();
+    const imageReferences = new Map<string, DockerNodeBase[] | null>();
     for (const root of [...new Set(roots)]) {
       const dockerfile = (root ? root + "/" : "") + "Dockerfile";
       if (!names.includes(dockerfile)) continue;
@@ -257,51 +304,57 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     if (receipt && nodeSecurityHash(baseline) === receipt.securityHash) {
       await progress("checking", "Configuration inchangée : contrôle frais de sécurité et des images avant réutilisation de la validation.");
       const reference = receipt;
+      const receiptPolicy = await npmResidualPolicy(sourceFolder, names, qualifiedBaseline);
+      const currentImages = new Map<string, SecurityFinding[]>();
+      let freshScan: Awaited<ReturnType<typeof nodeScan>> | undefined;
       const current = await checkCurrentNodeConfiguration(receipt, {
         baseline,
         images: async () => {
-          let unchanged = true;
-          requireSecurityPass(securityCheck("OSV", "candidate", "Configuration déjà validée", baseline, baseline));
+          await receiptPolicy.retain(sourceFolder, reference.npmRetained || []);
+          requireSecurityPass(await receiptPolicy.check(sourceFolder, "Configuration déjà validée", baseline));
           for (const root of [...new Set(roots)]) {
             const file = (root ? root + "/" : "") + "Dockerfile";
             if (!names.includes(file)) continue;
-            await validateDockerfileCandidate(sourceFolder, root, names, version, async image => {
-              const findings = (await scanImage(image)).map(entry => ({ ...entry, scope: root }));
-              await record(securityCheck("Trivy", "candidate", `Image Docker actuelle : ${root || "racine"}`, findings, [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root));
-              if (nodeSecurityHash(findings) !== reference.imageSecurity.find(item => item.root === root)?.hash) unchanged = false;
+            await validateDockerfileCandidate(sourceFolder, root, names, version, async (image, bases) => {
+              if (!bases?.every(base => reference.images.some(item => item.image === base.image && item.digest === base.digest))) throw new ApiError("Les images de base du Dockerfile ont changé.");
+              currentImages.set(root, (await scanImage(image)).map(entry => ({ ...entry, scope: root })));
             });
+            if (nodeSecurityHash(currentImages.get(root)!) !== reference.imageSecurity.find(item => item.root === root)?.hash) return false;
           }
-          return unchanged;
+          return true;
         },
         finalScan: async () => {
-          const final = await nodeScan(names, true);
-          await recordOsv("candidate", "Contrôle final frais de la configuration actuelle", final);
-          return final.findings;
+          freshScan = await nodeScan(names, true);
+          return freshScan.findings;
         },
         sources: async () => { await changedSources(sourceFolder, before, new Set()); },
         catalogs: () => unchangedNodeInputs(reference),
       });
-      if (current) {
+      if (current && freshScan) {
         const currentTargets = await updateTargets(run.projectId);
         if (targets.some(target => JSON.stringify(currentTargets.find(item => item.id === target.id)) !== JSON.stringify(target))) throw new ApiError("La configuration du projet a changé pendant la vérification. Validation annulée.");
         if (representative.mode === "git") {
           const head = await githubRequest(`/repos/${representative.repository}/git/ref/heads/${encodeURIComponent(representative.branch!)}`, githubUpdateToken(representative.repository!));
           if (head.object.sha !== expected) throw new ApiError("Le dépôt a changé pendant la vérification. La validation précédente ne peut pas être réutilisée.", 409);
         } else if ((await readUpdateSource(representative.id))?.revision !== original!.revision) throw new ApiError("Les sources ont changé pendant la vérification. Validation annulée.", 409);
+        await recordOsv("candidate", "Contrôle final frais de la configuration actuelle", freshScan, roots, sourceFolder, receiptPolicy);
+        for (const [root, findings] of currentImages) {
+          await record(securityCheck("Trivy", "candidate", `Image Docker actuelle : ${root || "racine"}`, findings), results.filter((_, index) => targets[index].root === root));
+        }
         await verifyNodeServices(results, async index => {
           const target = targets[index], result = results[index];
           await confirmDeployedNode(target, result, { deploymentId: result.previousDeploymentId!, commit: expected || undefined }, version, progress);
           const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after")?.nodeEvidence;
           if (!sameNodeReceiptProof(reference, target.id, proof)) throw new ApiError("L’image active ou le type de preuve Node a changé pendant la vérification. Validation non réutilisable.", 422);
           await checkNodeEndpoint(target);
-          const validation = receipt!.validations.find(item => item.targetId === target.id)!;
+          const validation = reference.validations.find(item => item.targetId === target.id)!;
           result.checks!.push({ tool: "Validation", phase: "candidate", checkedAt: validation.checkedAt, scope: validation.scope, status: validation.status, findings: [], message: `Validation du ${validation.checkedAt} réutilisée pour les mêmes sources, catalogues et environnement ; scripts non réexécutés. ${validation.message}` });
-          result.warnings = [...new Set([...result.warnings, ...(receipt!.warnings.find(item => item.targetId === target.id)?.messages || [])])];
+          result.warnings = [...new Set([...result.warnings, ...(reference.warnings.find(item => item.targetId === target.id)?.messages || [])])];
           result.stage = "completed";
           result.message = nodeCompletionMessage(target, result, true);
         });
         run.nodeReceipts ||= [];
-        run.nodeReceipts.push(receipt); // Keep the original heavy-validation age.
+        run.nodeReceipts.push(reference); // Keep the original heavy-validation age.
         return;
       }
     }
@@ -324,13 +377,11 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       resolved: async resolvedNames => {
         await recordOsv("candidate", "Dépendances verrouillées", await scanSources(resolvedNames), selectedRoots, workingFolder);
       },
-      image: async (root, image) => {
+      image: async (root, image, bases) => {
         const findings = (await scanImage(image)).map(entry => ({ ...entry, scope: root }));
         await record(securityCheck("Trivy", "candidate", `Image Docker finale : ${root || "racine"}`, findings, [...baseline, ...(imageBaselines.get(root) || [])]), results.filter((_, index) => targets[index].root === root));
         imageSecurity.set(root, nodeSecurityHash(findings));
-        const file = (root ? root + "/" : "") + "Dockerfile";
-        const references = await Promise.all(dockerNodeBases(await readFile(join(workingFolder, file), "utf8")).map(image => nodeImageReceipt(image, image)));
-        imageReferences.set(root, references.every(Boolean) ? references as { image: string; digest: string }[] : null);
+        imageReferences.set(root, bases);
       },
       reused: message => progress("updating", message),
       validated: async (root, scripts) => {
@@ -376,6 +427,45 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         ? ` Durées du service : préparation ${Math.round(timing.prepareMs / 1000)} s ; validation assemblée ${Math.round(timing.validateMs / 1000)} s. Préparation et validation de tous les services : ${Math.round(preparationMs / 1000)} s écoulées (tâches parallèles).`
         : ` Préparation et validation : ${Math.round(preparationMs / 1000)} s.`;
     }
+    for (const [index, target] of targets.entries()) {
+      const candidate = caddyCandidates.get(target.id);
+      if (!candidate) continue;
+      const path = (target.root ? target.root + "/" : "") + "railpack.json";
+      if (caddyChanges.has(path)) continue;
+      const started = performance.now();
+      const cacheKey = randomUUID();
+      const selected = results.filter((_, i) => targets[i].root === target.root);
+      await progress("updating", `${target.name} : construction de l’image Railpack candidate pour Caddy ${candidate.version}.`);
+      const buildNames = [...new Set([...names, ...prepared.allowed])];
+      let findings: SecurityFinding[] = [], previous: SecurityFinding[] = [];
+      const tested = await validateRailpackCaddy(sourceFolder, target.root, buildNames, candidate.version, async image => {
+        findings = (await scanImage(image)).map(finding => ({ ...finding, scope: target.root }));
+      }, cacheKey);
+      if (findings.length) {
+        await progress("updating", `${target.name} : comparaison Trivy avec l’image Caddy ${candidate.current} active.`);
+        const baseline = await validateRailpackCaddy(sourceFolder, target.root, buildNames, candidate.current, async image => {
+          previous = (await scanImage(image)).map(finding => ({ ...finding, scope: target.root }));
+        }, cacheKey);
+        for (const [i, service] of targets.entries()) if (service.root === target.root) {
+          const active = await verifyRailwayCaddy(service, { deploymentId: results[i].previousDeploymentId!, commit: expected }, version, caddyCandidates.get(service.id)!.current);
+          const proof = active.caddyEvidence!;
+          if (baseline.packagesHash !== proof.packagesHash || baseline.binaryHash !== proof.binaryHash || tested.packagesHash !== proof.packagesHash) {
+            throw new ApiError("Les paquets Debian ou le binaire de référence diffèrent de l’image active. Les alertes Caddy ne peuvent pas être comparées avec certitude.", 422);
+          }
+          caddyObserved.set(service.id, proof);
+          await record({ ...active, phase: "before" }, [results[i]]);
+        }
+        await record(securityCheck("Trivy", "before", `Image active Caddy ${candidate.current} reproduite`, previous), selected);
+      }
+      await record(caddyImageSecurity(`Image Railpack Caddy ${candidate.version}`, previous, findings), selected);
+      await writeFile(join(sourceFolder, path), caddyConfig(candidate));
+      prepared.allowed.add(path);
+      caddyChanges.set(path, candidate);
+      caddyTested.set(target.root, tested);
+      await record({ tool: "Caddy", phase: "candidate", scope: target.root, status: "passed", checkedAt: new Date().toISOString(), findings: [],
+        message: `Caddy ${candidate.current} → ${candidate.version} : plan Railpack, image, scan Trivy et démarrage HTTP validés en ${Math.round(performance.now() - started)} ms.`,
+      }, selected);
+    }
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
     await recordOsv("candidate", "Contrôle final frais avant publication", finalScan);
@@ -420,7 +510,6 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
     }
     async function rememberValidation() {
-      if (results.some(result => remainingNpmFindings(result).length)) return;
       try {
         const catalogEntries = await catalogs.snapshot();
         const validationImage = await runtime.image();
@@ -435,7 +524,9 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         if (deployments.length !== targets.length || validations.length !== targets.length) return;
         const saved = nodeReceiptDraft({ ...key, sourceHash: nodeSourceHash(await snapshotSources(sourceFolder, [...new Set([...names, ...changes.map(file => file.path)])])) }, catalogEntries, {
           validatedAt: new Date(Math.min(...validations.map(item => Date.parse(item.checkedAt)))).toISOString(), images, validationImage, deployments, validations,
-          securityHash: nodeSecurityHash(finalScan.findings), imageSecurity: [...imageSecurity].map(([root, hash]) => ({ root, hash })),
+          securityHash: nodeSecurityHash(finalScan.findings),
+          npmRetained: results.flatMap(remainingNpmFindings).flatMap(finding => finding.scope !== undefined && finding.explanation ? [{ ...finding, scope: finding.scope, explanation: finding.explanation }] : []),
+          imageSecurity: [...imageSecurity].map(([root, hash]) => ({ root, hash })),
           warnings: results.map(result => ({ targetId: result.targetId, messages: result.warnings })),
         });
         if (!saved || !await unchangedNodeImages(saved)) return;
@@ -462,8 +553,19 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     for (const [index, target] of targets.entries()) {
       const current = currentTargets.find(item => item.id === target.id);
       if (!current || current.unavailable || JSON.stringify(current) !== JSON.stringify(target)) throw new ApiError("La configuration du projet a changé pendant les tests. Publication annulée.");
-      const currentDeployment = await providerPreflight(target, version);
+      const caddy = caddyCandidates.get(target.id);
+      let observedCaddy: string | undefined, observedImage: string | null | undefined;
+      const currentDeployment = await providerPreflight(target, version, undefined, evidence => {
+        observedCaddy = railpackCaddyVersion(evidence);
+        observedImage = evidence?.imageDigest;
+      });
       if (currentDeployment !== results[index].previousDeploymentId) throw new ApiError("Un autre déploiement a eu lieu pendant les tests. Publication annulée pour ne pas l’écraser.");
+      if (caddy) {
+        if (!currentDeployment || observedCaddy !== caddy.current) throw new ApiError("La construction Railpack a changé pendant les tests. Publication Caddy annulée.", 409);
+        const proof = caddyObserved.get(target.id);
+        if (proof && proof.imageDigest !== observedImage) throw new ApiError("L’image Caddy active a changé pendant les contrôles.", 409);
+        if (!proof) await verifyRailwayCaddy(target, { deploymentId: currentDeployment, commit: expected }, version, caddy.current);
+      }
       if (vercelStaticTarget(target)) {
         const observed = await staticPreflight(target, { deploymentId: currentDeployment! });
         if ((observed.framework || target.capability?.staticFramework) !== staticFrameworks.get(target.id)) throw new ApiError("Le framework Vercel a changé pendant la validation ; publication annulée.", 409);
@@ -477,7 +579,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     await progress("publishing", "Publication de la nouvelle version.");
     if (representative.mode === "git") {
       for (const result of results) result.previousCommit = expected;
-      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes, fetch, alpineRepairs);
+      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes, fetch, alpineRepairs, caddyChanges);
       for (const result of results) result.commit = commit;
     } else {
       const packed = join(temporary, "updated.zip"), clean = join(temporary, "deploy");
@@ -507,6 +609,13 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       });
       if (!result.deploymentId) throw new ApiError("Déploiement introuvable pour vérifier la version Node exacte.");
       await verifyNode(index, result.deploymentId);
+      const caddy = caddyCandidates.get(target.id);
+      if (caddy) {
+        const check = await verifyRailwayCaddy(target, { deploymentId: result.deploymentId, commit: result.commit }, version, caddy.version);
+        const tested = caddyTested.get(target.root)!;
+        if (check.caddyEvidence?.packagesHash !== tested.packagesHash || check.caddyEvidence.binaryHash !== tested.binaryHash) throw new ApiError("Le Caddy déployé ou ses paquets Debian diffèrent de l’image candidate testée.", 422);
+        await record(check, [result]);
+      }
       await checkNodeEndpoint(target);
       result.stage = "completed";
       result.message = nodeCompletionMessage(target, result);

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodeReceiptDraft, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeInputs, type NodeValidationReceipt } from "../src/lib/updates/node-current";
 import { nodeCatalogState, officialNodeImageDigest, unchangedNodeCatalogs } from "../src/lib/updates/node-catalog-state";
-import { dockerNodeBases } from "../src/lib/updates/dockerfile";
+import { dockerNodeBases, pinnedDockerNodeBases } from "../src/lib/updates/dockerfile";
 import type { SecurityFinding, UpdateTarget } from "../src/lib/updates/types";
 
 const sha = "a".repeat(64), imageDigest = "sha256:" + "b".repeat(64), startedAt = Date.parse("2026-10-27T15:00:00Z");
@@ -100,6 +100,28 @@ test("Reprise : scans finaux, intégrité et catalogues obligatoires ; chaque d�
   assert.equal(await checkCurrentNodeConfiguration(saved, { ...actions(), finalScan: async () => { throw new Error("scanner unavailable"); } }), false);
 });
 
+test("Reprise : une faille npm résiduelle reste documentée et impose deux scans concordants", async () => {
+  const baseline = [{ ...changed, fixedVersions: ["8.0.0"] }];
+  const saved = nodeReceiptDraft(key, [entry], {
+    ...receipt(), securityHash: nodeSecurityHash(baseline),
+    npmRetained: [{ ...baseline[0], scope: target.root, explanation: "La dépendance directe ne permet pas encore la version corrigée." }],
+  })!;
+  assert.deepEqual(reusableNodeReceipt(saved, key, startedAt), saved);
+  assert.equal(reusableNodeReceipt({ ...saved, npmRetained: [{ ...saved.npmRetained![0], explanation: " " }] }, key, startedAt), null);
+  let rescans = 0;
+  const actions = {
+    baseline, images: async () => true, finalScan: async () => { rescans++; return structuredClone(baseline); },
+    sources: async () => {}, catalogs: async () => true,
+  };
+  assert.equal(await checkCurrentNodeConfiguration(saved, actions), true);
+  assert.equal(rescans, 1);
+  for (const findings of [[], [...baseline, { ...changed, id: "OTHER" }], [{ ...baseline[0], severity: "critical" as const }], [{ ...baseline[0], fixedVersions: ["7.0.1"] }]]) {
+    assert.equal(await checkCurrentNodeConfiguration(saved, { ...actions, baseline: findings }), false);
+    assert.equal(await checkCurrentNodeConfiguration(saved, { ...actions, finalScan: async () => findings }), false);
+  }
+  assert.equal(rescans, 1);
+});
+
 test("Production : une preuve fraîche doit conserver la version, le déploiement, l’image ET le type runtime/construction", () => {
   const saved = receipt(), proof = { version: saved.nodeVersion, ...saved.deployments[0] };
   assert.equal(sameNodeReceiptProof(saved, target.id, proof), true);
@@ -109,7 +131,11 @@ test("Production : une preuve fraîche doit conserver la version, le déploiemen
 });
 
 test("Images : toutes les bases multi-stage, une empreinte officielle liée à l’image locale, aucun jeton persisté", async () => {
-  assert.deepEqual(dockerNodeBases("FROM node:24.22.1-bookworm AS build\nFROM build AS assets\nFROM node:24.22.1-alpine\n"), ["node:24.22.1-bookworm", "node:24.22.1-alpine"]);
+  const dockerfile = "FROM node:24.22.1-bookworm AS build\nFROM build AS assets\nFROM node:24.22.1-alpine\n";
+  assert.deepEqual(dockerNodeBases(dockerfile), ["node:24.22.1-bookworm", "node:24.22.1-alpine"]);
+  const pinned = await pinnedDockerNodeBases(dockerfile, async image => image.endsWith("-alpine") ? "sha256:" + sha : imageDigest);
+  assert.equal(pinned.dockerfile, `FROM node:24.22.1-bookworm@${imageDigest} AS build\nFROM build AS assets\nFROM node:24.22.1-alpine@sha256:${sha}\n`);
+  assert.deepEqual(pinned.bases, [{ image: "node:24.22.1-bookworm", digest: imageDigest }, { image: "node:24.22.1-alpine", digest: "sha256:" + sha }]);
   const requests: { url: string; auth: string | null }[] = [];
   const transport: typeof fetch = async (url, options) => {
     requests.push({ url: String(url), auth: new Headers(options?.headers).get("authorization") });

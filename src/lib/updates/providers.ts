@@ -44,7 +44,8 @@ export async function currentSourceDeployment(target: UpdateTarget): Promise<str
   if (instance.source?.repo || instance.source?.image || sourceRoot(instance.rootDirectory) !== target.root) throw new ApiError("La source du service Railway a changé. Synchronisez sa fiche.");
   return instance.activeDeployments?.[0]?.id || null;
 }
-export async function providerPreflight(target: UpdateTarget, nodeVersion: string, readers = { instance: readRailwayInstance, railway: railwayUpdateRequest, vercel: vercelUpdateRequest }) {
+export async function providerPreflight(target: UpdateTarget, nodeVersion: string, readers = { instance: readRailwayInstance, railway: railwayUpdateRequest, vercel: vercelUpdateRequest },
+  observeRailpack?: (evidence: ReturnType<typeof deploymentEvidence>) => void) {
   if (target.provider === "vercel") {
     const remote = await readers.vercel(target, `/v9/projects/${target.remoteId}`);
     if (remote.latestDeployments?.some((deployment: any) => deployment.target === "production" && ["QUEUED", "INITIALIZING", "BUILDING"].includes(deployment.readyState || deployment.state))) throw new ApiError("Vercel déploie déjà ce projet. Attendez la fin de son déploiement.");
@@ -63,6 +64,7 @@ export async function providerPreflight(target: UpdateTarget, nodeVersion: strin
   if (Object.keys(variables.variables).some(name => /^(RAILPACK_.*COMMAND|NIXPACKS_|RAILPACK_PACKAGES)/.test(name))) throw new ApiError("Railway utilise une construction personnalisée qui doit être vérifiée.");
   if (variables.variables.RAILWAY_DOCKERFILE_PATH && variables.variables.RAILWAY_DOCKERFILE_PATH !== "Dockerfile") throw new ApiError("Le chemin Dockerfile personnalisé de Railway nécessite une validation dédiée.");
   if (variables.variables.RAILPACK_NODE_VERSION && variables.variables.RAILPACK_NODE_VERSION !== nodeVersion) throw new ApiError(`Une variable Railway impose une autre version ou une plage Node imprécise. Elle doit imposer exactement ${nodeVersion}, ou être retirée pour utiliser la version exacte des sources.`);
+  if (instance.builder === "RAILPACK" && !Object.keys(variables.variables).some(name => /^RAILPACK_|^MISE_|^RAILWAY_DOCKERFILE_PATH$/.test(name) && name !== "RAILPACK_NODE_VERSION")) observeRailpack?.(evidence);
   return instance.activeDeployments?.[0]?.id as string | undefined;
 }
 export async function deployVercelArchive(target: UpdateTarget, folder: string, names: string[], nodeVersion: string, runId: string) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { ApiError } from "../http";
 import { runCommand, DependencyValidationError, IndirectValidationError, PeerResolutionError } from "./process";
 import { compatibleVersions, CompatibilitySelectionError, verifiedPeerConflicts } from "./versions";
-import { dockerPackages, rewriteDockerfile, validateDockerfile, type AlpineRepair } from "./dockerfile";
+import { dockerPackages, rewriteDockerfile, validateDockerfile, type AlpineRepair, type DockerNodeBase } from "./dockerfile";
 import { nodeTestProfile } from "./node-test-profile";
 import { SecurityPolicyError } from "./security";
 import type { SecurityFinding } from "./types";
@@ -117,7 +117,7 @@ export type NodeUpdateChecks = {
   resolved: (names: string[]) => Promise<void>;
   retain?: (findings: SecurityFinding[]) => Promise<boolean>;
   alpineRepaired?: (root: string, repair: AlpineRepair) => void;
-  image: (root: string, image: string) => Promise<void>;
+  image: (root: string, image: string, bases: DockerNodeBase[] | null) => Promise<void>;
   validated: (root: string, scripts: string[]) => Promise<void>;
   remediating?: (message: string) => Promise<void>;
   reused?: (message: string) => Promise<void>;
@@ -570,7 +570,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
   }
   await changedSources(folder, resolvedFiles, new Set());
   for (const check of checks.filter(check => check.docker)) {
-    const repair = await validateDockerfile(folder, check.root, [...new Set([...names, ...allowed])], nodeVersion, security ? image => security.image(check.root, image) : undefined, async message => { warnings.push(message); await security?.remediating?.(`${check.root || "racine"} : ${message}`); });
+    const repair = await validateDockerfile(folder, check.root, [...new Set([...names, ...allowed])], nodeVersion, security ? (image, bases) => security.image(check.root, image, bases) : undefined, async message => { warnings.push(message); await security?.remediating?.(`${check.root || "racine"} : ${message}`); });
     if (repair) security?.alpineRepaired?.(check.root, repair);
   }
   return { allowed, warnings };
