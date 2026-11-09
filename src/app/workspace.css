@@ -108,6 +108,9 @@
 .project-health-card.warning .project-health-title > svg { color: var(--amber); }
 html[data-theme="dark"] .project-health-card.danger .project-health-title > svg { color: #ff9aa4; }
 .security-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; }
+.security-panel-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
+.security-update-action { max-width: 32ch; }
+.security-update-action .updates-error { margin-top: 6px; }
 .security-panel-heading .security-coverage-summary { margin: 0; justify-content: flex-end; }
 .project-security-card .security-severities { margin: 0; gap: 6px; }
 .project-security-card .security-coverage-note { color: var(--muted); font-size: 11px; }
@@ -201,6 +204,7 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   .project-health-summary { grid-template-columns: 1fr; gap: 12px; }
   .project-health-card { padding: 17px; }
   .security-panel-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .security-panel-actions { justify-content: flex-start; }
   .security-panel-heading .security-coverage-summary { justify-content: flex-start; }
   .security-finding > summary { flex-wrap: wrap; gap: 8px; position: relative; padding-right: 18px; }
   .security-finding-content { flex-basis: calc(100% - 82px); }

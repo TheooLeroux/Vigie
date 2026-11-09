@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
 import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
@@ -112,7 +113,14 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
-export function ProjectUpdates({ projectId, request, onState, embedded = false, children }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void; embedded?: boolean; children?: ReactNode }) {
+export function ProjectUpdates({ projectId, request, onState, embedded = false, children, overviewActionTarget }: {
+  projectId: string;
+  request: Request;
+  onState?: (projectId: string, state: UpdateState | null) => void;
+  embedded?: boolean;
+  children?: ReactNode;
+  overviewActionTarget?: HTMLDivElement | null;
+}) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true);
   const refreshing = useRef(false);
@@ -153,11 +161,17 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
     catch (error) { setError(error instanceof Error ? error.message : "La mise à jour n’a pas démarré."); }
     finally { setBusy(false); }
   }
+  const updateButton = <button className="button primary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>
+    {busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
+    {busy || active ? "Mise à jour en cours" : "Mettre à jour"}
+  </button>;
+  const errorNotice = error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>;
   return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
+    {overviewActionTarget && createPortal(<>{updateButton}{errorNotice}</>, overviewActionTarget)}
     <div className="updates-heading"><div>{!embedded && <h2>Mettre le projet à jour</h2>}<p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
-      <button className="button primary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>{busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{active ? "Mise à jour en cours" : "Mettre à jour"}</button>
+      {updateButton}
     </div>
-    {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
+    {errorNotice}
     {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
     {children}

@@ -1,3 +1,4 @@
+import type { Ref } from "react";
 import { CircleAlert, CircleHelp, ShieldAlert, ShieldCheck } from "lucide-react";
 import { projectRemediation, type RemediationReason } from "@/lib/project-remediation";
 import { coverageLabels, projectSecurity, type ProjectVulnerability } from "@/lib/project-security";
@@ -62,7 +63,7 @@ function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?:
   })}</div>;
 }
 
-export function ProjectSecurityPanel({ detail, updates, health, unavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean }) {
+export function ProjectSecurityPanel({ detail, updates, health, unavailable = false, updateActionRef }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean; updateActionRef?: Ref<HTMLDivElement> }) {
   const security = projectSecurity(detail, updates, health);
   const explain = projectRemediation(detail, updates);
   const historical = security.lastKnown;
@@ -72,7 +73,10 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
   const Icon = hasAlerts ? ShieldAlert : security.known ? ShieldCheck : CircleHelp;
   return <article className={`project-health-card project-security-card ${hasAlerts ? "danger" : "neutral"}`}>
     <div className="security-panel-heading"><div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité</span><h2>{security.count > 0 ? `${security.count} faille${security.count > 1 ? "s" : ""} connue${security.count > 1 ? "s" : ""}` : hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
-      <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
+      <div className="security-panel-actions">
+        <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
+        {updateActionRef && <div className="security-update-action" ref={updateActionRef} />}
+      </div>
     </div>
     {security.count > 0 && <div className="security-severities" aria-label="Répartition par gravité">{Object.entries(security.severityCounts).filter(([, count]) => count > 0).map(([severity, count]) => <span className={`security-severity ${severity}`} key={severity}>{count} {severityLabels[severity as keyof typeof severityLabels].toLowerCase()}{count > 1 ? "s" : ""}</span>)}</div>}
     {!security.known && <p className="security-coverage-note">Couverture partielle ou indisponible : les composants non analysés restent à vérifier.</p>}

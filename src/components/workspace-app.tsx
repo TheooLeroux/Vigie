@@ -225,6 +225,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
   const selectedRef = useRef(selected), workspaceRead = useRef(0), detailRead = useRef(0);
   selectedRef.current = selected;
   const [projectTab, setProjectTab] = useState<ProjectTab>("overview");
+  const [overviewUpdateTarget, setOverviewUpdateTarget] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null),
     [editService, setEditService] = useState<Service | undefined>(),
     [mobileNav, setMobileNav] = useState(false),
@@ -665,10 +666,10 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           ))}
         </div>
         <div className="project-content project-tab-panel" id="project-panel-overview" role="tabpanel" aria-labelledby="project-tab-overview" hidden={projectTab !== "overview"} tabIndex={0}>
-          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
+          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} updateActionRef={setOverviewUpdateTarget} />
         </div>
         <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState}>
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
             <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
           </ProjectUpdates>
           <section

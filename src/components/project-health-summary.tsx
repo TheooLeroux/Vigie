@@ -1,4 +1,5 @@
 "use client";
+import type { Ref } from "react";
 import { projectHealth } from "@/lib/project-health";
 import type { ProjectDetail } from "@/lib/types";
 import type { UpdateState } from "@/lib/updates/types";
@@ -7,9 +8,9 @@ import { DailyUpdateAssessment } from "./daily-update-assessment";
 
 type ProjectHealthProps = { detail: ProjectDetail; updates?: UpdateState | null };
 
-export function ProjectHealthSummary({ detail, updates, updatesUnavailable = false }: ProjectHealthProps & { updatesUnavailable?: boolean }) {
+export function ProjectHealthSummary({ detail, updates, updatesUnavailable = false, updateActionRef }: ProjectHealthProps & { updatesUnavailable?: boolean; updateActionRef?: Ref<HTMLDivElement> }) {
   return <section className="project-health-summary" aria-label="Failles du projet" aria-live="polite">
-    <ProjectSecurityPanel detail={detail} updates={updates} health={projectHealth(detail, updates)} unavailable={updatesUnavailable} />
+    <ProjectSecurityPanel detail={detail} updates={updates} health={projectHealth(detail, updates)} unavailable={updatesUnavailable} updateActionRef={updateActionRef} />
   </section>;
 }
 
