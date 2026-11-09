@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { caddyConfig, caddyVersionChange, parseCaddyProbe, verifyRailwayCaddy } from "../src/lib/updates/railpack-caddy";
+import { caddyConfig, caddyVersionChange, parseCaddyProbe, validatedRailpackChange, verifyRailwayCaddy } from "../src/lib/updates/railpack-caddy";
+import { planDebianFixes, verifyDebianFixes } from "../src/lib/updates/railpack-debian";
 import { publishGitVersions } from "../src/lib/updates/executor";
 import { caddyImageSecurity, requireZeroFinalFindings, securityCheck } from "../src/lib/updates/security";
 import type { SecurityFinding, UpdateCheck, UpdateTarget } from "../src/lib/updates/types";
@@ -27,8 +28,26 @@ test("Caddy : seule une version stable supérieure est planifiée et les configu
   assert.ok(caddyVersionChange("2.11.7", "2.11.9", caddyConfig({ version: "2.11.7" })));
   const path = "frontend/railpack.json";
   const rejectRemote = async () => { throw new Error("Un appel distant ne devait pas partir"); };
-  await assert.rejects(() => publishGitVersions("example/app", "main", commit, [{ path, content: caddyConfig(change) }], rejectRemote), /version Caddy validée/);
-  await assert.rejects(() => publishGitVersions("example/app", "main", commit, [{ path, content: '{"deploy":{"startCommand":"wrong"}}' }], rejectRemote, undefined, new Map([[path, change]])), /version Caddy validée/);
+  await assert.rejects(() => publishGitVersions("example/app", "main", commit, [{ path, content: caddyConfig(change) }], rejectRemote), /versions Caddy et Debian validées/);
+  await assert.rejects(() => publishGitVersions("example/app", "main", commit, [{ path, content: '{"deploy":{"startCommand":"wrong"}}' }], rejectRemote, undefined, new Map([[path, change]])), /versions Caddy et Debian validées/);
+});
+
+test("Railpack Debian : traite les correctifs ensemble, conserve les pins et exige la disparition des avis ciblés", async () => {
+  const vulnerable: SecurityFinding = { id: "CVE-2026-76844", package: "zlib1g", version: "1:1.3.1-1+b1", fixedVersions: ["1:1.3.1-1+deb13u1"], packageManager: "apt", severity: "moderate", aliases: [], scope: "frontend" };
+  const remaining = { ...vulnerable, id: "CVE-2026-99999", fixedVersions: [] };
+  const next = { ...remaining, version: vulnerable.fixedVersions![0] };
+  const upgrades = await planDebianFixes([vulnerable, remaining, { ...vulnerable, package: "golang.org/x/net", packageManager: undefined }], async (a, b) => a === next.version && b === vulnerable.version);
+  assert.deepEqual(upgrades, [{ package: "zlib1g", from: vulnerable.version, to: next.version }]);
+  const change = { current: "2.11.9", version: "2.11.9", previous: caddyConfig({ version: "2.11.9", debianPins: ["apt=3.0.4"] }), debianPins: [`zlib1g=${next.version}`] };
+  assert.ok(validatedRailpackChange(change));
+  assert.equal(validatedRailpackChange({ ...change, debianPins: ["apt=3.0.4"] }), false);
+  assert.deepEqual(JSON.parse(caddyConfig(change)).deploy.aptPackages, ["...", "apt=3.0.4", `zlib1g=${next.version}`]);
+  assert.throws(() => caddyConfig({ ...change, debianPins: ["apt=3.0.4 && echo wrong"] }), /personnalisée/);
+  assert.doesNotThrow(() => verifyDebianFixes([vulnerable, remaining], [next], upgrades));
+  assert.throws(() => verifyDebianFixes([vulnerable], [{ ...vulnerable, version: next.version }], upgrades), /non confirmés/);
+  assert.equal(caddyImageSecurity("Image candidate", [vulnerable, remaining], [next], upgrades).status, "warning");
+  assert.equal(caddyImageSecurity("Image candidate", [vulnerable, remaining], [next]).status, "blocked");
+  assert.equal(caddyImageSecurity("Image candidate", [vulnerable, remaining], [{ ...next, severity: "high" }], upgrades).status, "blocked");
 });
 
 test("Caddy : le processus actif doit correspondre au manifeste, à l’image et à l’identité du déploiement", async () => {

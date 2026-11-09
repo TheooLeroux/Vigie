@@ -43,7 +43,11 @@ export function parseTrivy(raw: string, baseline = false, scope?: "gobinary") {
   const findings: SecurityFinding[] = report.Results.flatMap(result => (result.Vulnerabilities || []).map(entry => {
     const fixedVersions = [...new Set(entry.FixedVersion?.split(",").map(version => version.trim()).filter(version => /^[a-z0-9][a-z0-9.+:~_-]{0,199}$/i.test(version)))].slice(0, 200);
     const finding = findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity), ...(fixedVersions.length ? { fixedVersions } : {}) });
-    return os?.Family === "alpine" && result.Class === "os-pkgs" && result.Type === "alpine" ? { ...finding, packageManager: "apk" as const } : finding;
+    if (result.Class === "os-pkgs" && result.Type === os?.Family) {
+      if (result.Type === "alpine") return { ...finding, packageManager: "apk" as const };
+      if (result.Type === "debian") return { ...finding, packageManager: "apt" as const };
+    }
+    return finding;
   }));
   if (endOfLife) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
   return findings;
@@ -59,24 +63,26 @@ export function sameScopedFinding(first: SecurityFinding, second: SecurityFindin
     && first.severity === second.severity && [first.id, ...first.aliases].some(id => id === second.id || second.aliases.includes(id));
 }
 
-function sameCaddyAdvisory(previous: SecurityFinding, candidate: SecurityFinding) {
+function sameCaddyAdvisory(previous: SecurityFinding, candidate: SecurityFinding, debianUpgrades?: UpdateCheck["debianUpgrades"]) {
   return previous.scope === candidate.scope && previous.id === candidate.id && previous.package === candidate.package &&
-    previous.severity === candidate.severity && (previous.version === candidate.version ||
-      !!valid(previous.version) && !!valid(candidate.version) && gte(candidate.version, previous.version));
+    previous.severity === candidate.severity && previous.packageManager === candidate.packageManager && (previous.version === candidate.version ||
+      (candidate.packageManager === "apt"
+        ? !!debianUpgrades?.some(upgrade => upgrade.package === candidate.package && upgrade.from === previous.version && upgrade.to === candidate.version)
+        : !!valid(previous.version) && !!valid(candidate.version) && gte(candidate.version, previous.version)));
 }
 
-export function caddyImageSecurity(scope: string, previous: SecurityFinding[], findings: SecurityFinding[]): UpdateCheck {
+export function caddyImageSecurity(scope: string, previous: SecurityFinding[], findings: SecurityFinding[], debianUpgrades?: UpdateCheck["debianUpgrades"]): UpdateCheck {
   const check = securityCheck("Trivy", "candidate", scope, findings);
   if (!findings.length) return check;
   const caddyRetained: SecurityFinding[] = [], blockers: SecurityFinding[] = [];
   for (const finding of findings) {
-    const original = previous.find(item => sameCaddyAdvisory(item, finding));
+    const original = previous.find(item => sameCaddyAdvisory(item, finding, debianUpgrades));
     if (original) caddyRetained.push({ ...finding, explanation: `Déjà présent dans l’image active vérifiée (${original.package} ${original.version}).` });
     else blockers.push(finding);
   }
   if (blockers.length) return { ...check, blockers, message: `Caddy : ${blockers.length} alerte(s) nouvelle(s) ou aggravée(s) bloquent l’image candidate.` };
-  return { ...check, status: "warning", findings: caddyRetained, blockers: undefined, caddyRetained,
-    message: `Caddy : aucune alerte nouvelle ou aggravée. ${caddyRetained.length} signalement(s) de l’image active restent à corriger.` };
+  return { ...check, status: "warning", findings: caddyRetained, blockers: undefined, caddyRetained, debianUpgrades,
+    message: `Railpack : aucune alerte nouvelle ou aggravée. ${caddyRetained.length} signalement(s) de l’image active restent à corriger.` };
 }
 
 export class SecurityPolicyError extends ApiError {
@@ -103,7 +109,7 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
         if (check.phase === "before") return true;
         if (check.tool === "WPVulnerability") return !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version);
         if (check.tool === "Trivy" && check.status === "warning" && check.caddyRetained) {
-          return !caddyProof || caddyProof.deploymentId !== result.previousDeploymentId || !caddyBaseline.some(item => sameCaddyAdvisory(item, finding)) ||
+          return !caddyProof || caddyProof.deploymentId !== result.previousDeploymentId || !caddyBaseline.some(item => sameCaddyAdvisory(item, finding, check.debianUpgrades)) ||
             !check.caddyRetained.some(item => item.explanation && item.version === finding.version && sameCaddyAdvisory(item, finding));
         }
         if (check.tool !== "OSV" || check.status !== "warning") return true;

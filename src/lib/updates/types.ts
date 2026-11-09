@@ -26,7 +26,7 @@ export type SecurityFinding = {
   severity: "critical" | "high" | "moderate" | "low" | "unknown";
   scope?: string;
   fixedVersions?: string[];
-  packageManager?: "apk";
+  packageManager?: "apk" | "apt";
   title?: string;
   url?: string;
   explanation?: string;
@@ -47,6 +47,7 @@ export type UpdateCheck = {
   blockers?: SecurityFinding[];
   npmRetained?: SecurityFinding[];
   caddyRetained?: SecurityFinding[];
+  debianUpgrades?: { package: string; from: string; to: string }[];
   wordpressRetained?: { package: string; version: string }[];
 };
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };

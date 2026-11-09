@@ -36,9 +36,12 @@ export function railpackImageReport(run: UpdateRun, identity: RailpackImageIdent
   const observed = proof?.caddyEvidence;
   if (observed?.deploymentId !== identity.deploymentId || observed.version !== identity.caddy || normalizeImageDigest(observed.imageDigest) !== identity.imageDigest ||
     !observed.instances.length || !/^[a-f0-9]{64}$/.test(observed.binaryHash) || !/^[a-f0-9]{64}$/.test(observed.packagesHash)) return null;
-  const scan = result?.checks?.findLast(check => check.tool === "Trivy" && check.phase === "candidate" && check.scope === `Image Railpack Caddy ${identity.caddy}`);
-  if (!scan || scan.status === "blocked" || !(Date.parse(scan.checkedAt) <= Date.parse(proof!.checkedAt))) return null;
-  const { caddyRetained: _retained, ...check } = scan;
+  const deployed = result?.checks?.findLast(check => check.tool === "Trivy" && check.phase === "after" && check.scope === "Image Railpack déployée après correctifs Debian");
+  const candidate = result?.checks?.findLast(check => check.tool === "Trivy" && check.phase === "candidate" && check.scope === `Image Railpack Caddy ${identity.caddy}`);
+  const scan = deployed && Date.parse(deployed.checkedAt) >= Date.parse(proof!.checkedAt) ? deployed
+    : candidate && Date.parse(candidate.checkedAt) <= Date.parse(proof!.checkedAt) ? candidate : undefined;
+  if (!scan || scan.status === "blocked") return null;
+  const { caddyRetained: _retained, debianUpgrades: _upgrades, ...check } = scan;
   return { ...identity, check };
 }
 

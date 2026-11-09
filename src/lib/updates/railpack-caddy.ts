@@ -11,13 +11,17 @@ import { activeNodeImage, type NodeDeploymentReference } from "./node-deployment
 import { runCommand } from "./process";
 import { readRailwayInstance } from "./providers";
 import { stableVersion } from "./versions";
+import { debianPinPattern } from "./railpack-debian";
 import type { UpdateCheck, UpdateTarget } from "./types";
 
 const railpackVersion = "0.43.0";
 const railpackFrontend = "ghcr.io/railwayapp/railpack-frontend@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc";
 const exact = z.string().regex(/^\d+\.\d+\.\d+$/);
-const config = z.strictObject({ packages: z.strictObject({ caddy: exact }) });
-export type CaddyChange = { previous?: string; current: string; version: string };
+const config = z.strictObject({
+  packages: z.strictObject({ caddy: exact }),
+  deploy: z.strictObject({ aptPackages: z.tuple([z.literal("...")], z.string().max(200).regex(debianPinPattern)) }).optional(),
+});
+export type CaddyChange = { previous?: string; current: string; version: string; debianPins?: string[] };
 export type CaddyFingerprint = { packagesHash: string; binaryHash: string };
 
 export function railpackCaddyVersion(evidence: RailwayDeploymentEvidence | null) {
@@ -26,10 +30,18 @@ export function railpackCaddyVersion(evidence: RailwayDeploymentEvidence | null)
     : undefined;
 }
 
-export function caddyPinVersion(content: string) {
-  try { return config.parse(JSON.parse(content)).packages.caddy; }
+function readCaddyConfig(content: string) {
+  try {
+    const parsed = config.parse(JSON.parse(content));
+    const pins = parsed.deploy?.aptPackages.slice(1) || [];
+    if (pins.length > 40 || new Set(pins.map(pin => pin.split("=")[0])).size !== pins.length) throw new Error("Invalid APT pins");
+    return parsed;
+  }
   catch { throw new ApiError("Configuration Railpack personnalisée : la mise à jour de Caddy nécessite une validation dédiée.", 422); }
 }
+
+export const caddyPinVersion = (content: string) => readCaddyConfig(content).packages.caddy;
+export const railpackDebianPins = (content?: string) => content === undefined ? [] : readCaddyConfig(content).deploy?.aptPackages.slice(1) || [];
 
 export function caddyVersionChange(current: string, latest: string, previous?: string): CaddyChange | null {
   if (!stableVersion(current) || !stableVersion(latest) || !gt(latest, current)) return null;
@@ -37,11 +49,20 @@ export function caddyVersionChange(current: string, latest: string, previous?: s
   return { previous, current, version: latest };
 }
 
-export function caddyConfig(change: Pick<CaddyChange, "version">) {
-  return JSON.stringify({ packages: { caddy: change.version } }, null, 2) + "\n";
+export function caddyConfig(change: Pick<CaddyChange, "version" | "previous" | "debianPins">) {
+  const pins = [...new Map([...railpackDebianPins(change.previous), ...(change.debianPins || [])].map(pin => [pin.split("=")[0], pin])).values()].sort();
+  const value = { packages: { caddy: change.version }, ...(pins.length ? { deploy: { aptPackages: ["...", ...pins] } } : {}) };
+  readCaddyConfig(JSON.stringify(value));
+  return JSON.stringify(value, null, 2) + "\n";
 }
 
-export async function validateRailpackCaddy(folder: string, root: string, names: string[], version: string, scan: (image: string) => Promise<void>, cacheKey = randomUUID()): Promise<CaddyFingerprint> {
+export function validatedRailpackChange(change: CaddyChange) {
+  if (!change.debianPins?.length) return !!caddyVersionChange(change.current, change.version, change.previous);
+  return change.current === change.version && (change.previous === undefined || caddyPinVersion(change.previous) === change.current)
+    && railpackDebianPins(caddyConfig(change)).some(pin => !railpackDebianPins(change.previous).includes(pin));
+}
+
+export async function validateRailpackCaddy(folder: string, root: string, names: string[], version: string, scan: (image: string) => Promise<void>, cacheKey = randomUUID(), previous?: string, debianPins?: string[]): Promise<CaddyFingerprint> {
   const temporary = await mkdtemp(join(tmpdir(), "vigie-caddy-"));
   const context = join(temporary, "source");
   const output = join(temporary, "plan"), planFile = join(output, "railpack-plan.json");
@@ -58,7 +79,9 @@ export async function validateRailpackCaddy(folder: string, root: string, names:
       await mkdir(dirname(destination), { recursive: true });
       await copyFile(join(folder, name), destination);
     }
-    await writeFile(join(context, "railpack.json"), caddyConfig({ version }));
+    const contents = caddyConfig({ version, previous, debianPins });
+    const pins = railpackDebianPins(contents);
+    await writeFile(join(context, "railpack.json"), contents);
     const uid = process.getuid?.() ?? 0, gid = process.getgid?.() ?? 0;
     await runCommand("docker", ["run", "--rm", "--name", container + "-plan", "--platform=linux/amd64", "--entrypoint=/railpack",
       "--user", `${uid}:${gid}`, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=512m", "--cpus=1", "--pids-limit=128",
@@ -71,8 +94,18 @@ export async function validateRailpackCaddy(folder: string, root: string, names:
     if (!plan.steps.find(step => step.name === "packages:caddy")?.commands.some(command =>
       z.object({ cmd: z.literal(`mise install-into caddy@${version} /railpack/caddy`) }).safeParse(command).success
     )) throw new ApiError("Le plan Railpack n’installe pas la version Caddy demandée.", 422);
+    if (pins.length && !plan.steps.find(step => step.name === "packages:apt:runtime")?.commands.some(command => {
+      const cmd = z.object({ cmd: z.string() }).safeParse(command);
+      return cmd.success && pins.every(pin => cmd.data.cmd.split(/[\s']/).includes(pin));
+    })) throw new ApiError("Le plan Railpack n’installe pas les correctifs Debian demandés dans l’image finale.", 422);
     await runCommand("docker", ["buildx", "build", "--load", "--platform=linux/amd64", "--tag", image,
-      "--build-arg", `BUILDKIT_SYNTAX=${railpackFrontend}`, "--build-arg", `cache-key=${cacheKey}`, "--file", planFile, context], { env, timeout: 10 * 60_000 });
+      "--build-arg", `BUILDKIT_SYNTAX=${railpackFrontend}`, "--build-arg", `cache-key=${cacheKey}`, "--file", planFile, context], {
+      env, timeout: 10 * 60_000,
+      errorPatterns: pins.length ? [{
+        pattern: /Version .+ for .+ was not found|Unable to locate package|unmet dependencies|Unable to correct problems/i,
+        message: `APT n’a pas pu installer ensemble les versions Debian demandées (${pins.join(", ")}). L’image candidate n’a pas été publiée.`,
+      }] : undefined,
+    });
     await scan(image);
     await runCommand("docker", ["run", "--detach", "--name", container, "--network=none", "--cap-drop=ALL",
       "--security-opt=no-new-privileges", "--memory=512m", "--cpus=1", "--pids-limit=128", "--env=PORT=8080", image], { env });
@@ -84,6 +117,10 @@ done
 exit 1`], { env, timeout: 20_000 });
     const installed = parseCaddyInventory((await runCommand("docker", ["exec", container, "bash", "-ec", caddyInventory], { env })).trim().split(/\r?\n/));
     if (installed.version !== version) throw new ApiError("La version du processus Caddy dans l’image diffère du plan.", 422);
+    if (pins.length) {
+      const queried = await runCommand("docker", ["exec", container, "dpkg-query", "-W", "-f=\${Package}=\${Version}\\n", ...pins.map(pin => pin.split("=")[0])], { env });
+      if (queried.trim().split(/\r?\n/).sort().join("\n") !== pins.join("\n")) throw new ApiError("Les versions Debian installées dans l’image candidate diffèrent du plan.", 422);
+    }
     return installed;
   } finally {
     await runCommand("docker", ["rm", "--force", container + "-plan"], { env }).catch(() => {});

@@ -110,7 +110,7 @@ export async function waitForDeployment(target: UpdateTarget, reference: { commi
       if (deployment) {
         await update(deployment.id);
         if (["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(deployment.status)) throw new ApiError("Le nouveau déploiement Railway n’est pas opérationnel.");
-        if (deployment.status === "SUCCESS" && instance.activeDeployments.some((item: any) => item.id === deployment.id)) return deployment.id as string;
+        if (deployment.status === "SUCCESS" && instance.activeDeployments.length === 1 && instance.activeDeployments[0].id === deployment.id) return deployment.id as string;
       }
     }
     await pause(15_000);

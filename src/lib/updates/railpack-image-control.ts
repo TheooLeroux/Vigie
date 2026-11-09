@@ -25,6 +25,10 @@ async function write(key: string, value: Scan | Inventory) {
 const scanKey = (id: string) => `railpack:scan:1:${id}`;
 const inventoryKey = (id: string) => `railpack:inventory:1:${id}`;
 export const readRailpackScan = (id: string) => read<Scan>(scanKey(id));
+export async function cachedRailpackInventory(identity: RailpackImageIdentity) {
+  const cached = await read<Inventory>(inventoryKey(identity.targetId));
+  return cached && sameRailpackImage(cached, identity) ? cached.inventory : undefined;
+}
 
 export function railpackScanDue(identity: RailpackImageIdentity, previous: Scan | undefined, now = Date.now(), force = false, revision?: string) {
   if (!previous || !sameRailpackImage(previous, identity) || force && (!revision || previous.attemptRevision !== revision)) return true;
@@ -36,8 +40,7 @@ export async function refreshRailpackImage(target: UpdateTarget, identity: Railp
   const previous = await readRailpackScan(target.id);
   if (!railpackScanDue(identity, previous, Date.now(), force, revision)) return null;
   const attempt = { ...identity, attemptedAt: new Date().toISOString(), attemptRevision: revision };
-  const inventory = await read<Inventory>(inventoryKey(target.id));
-  const cached = inventory && sameRailpackImage(inventory, identity) ? inventory.inventory : undefined;
+  const cached = await cachedRailpackInventory(identity);
   try {
     const { check, inventory: scanned } = await scan(target, identity, cached);
     if (!cached) await write(inventoryKey(target.id), { ...identity, inventory: scanned });

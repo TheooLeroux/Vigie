@@ -42,7 +42,12 @@ import { recordCompletedImageControls } from "./image-control";
 import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges, wordpressAssessmentChanges } from "./assessment";
 import { recordAssessmentAfterUpdate } from "./assessment-after-update";
 import { imageSecurityCheck } from "./image-policy";
-import { caddyConfig, caddyPinVersion, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
+import { caddyConfig, caddyPinVersion, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, validatedRailpackChange, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
+import { planDebianFixes, verifyDebianFixes } from "./railpack-debian";
+import { cachedRailpackInventory } from "./railpack-image-control";
+import { scanRailpackImage } from "./railpack-image-scan";
+import type { RailpackImageIdentity } from "./railpack-image-report";
+import { normalizeImageDigest } from "../image-reference";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
@@ -53,7 +58,7 @@ export async function publishGitVersions(repository: string, branch: string, exp
   if (!files.length || files.some(file => !/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|\.nvmrc|\.node-version|Dockerfile|railpack\.json)$/.test(file.path) || file.path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\\\x00-\x1f]/.test(file.path))) throw new ApiError("La publication doit se limiter aux versions et aux fichiers de verrouillage.");
   for (const file of files.filter(file => /(^|\/)railpack\.json$/.test(file.path))) {
     const change = caddyChanges?.get(file.path);
-    if (!change || !caddyVersionChange(change.current, change.version, change.previous) || file.content !== caddyConfig(change)) throw new ApiError("Le fichier Railpack doit uniquement fixer la version Caddy validée.");
+    if (!change || !validatedRailpackChange(change) || file.content !== caddyConfig(change)) throw new ApiError("Le fichier Railpack doit uniquement contenir les versions Caddy et Debian validées.");
   }
   if (!repositoryAllowed(repository)) throw new ApiError("Ce dépôt n’est pas autorisé pour la mise à jour.");
   const token = githubUpdateToken(repository);
@@ -113,11 +118,11 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const latestLts = await latestNode();
   const runtimeChecks: (UpdateCheck | null)[] = [];
   const staticFrameworks = new Map<string, string>();
-  const caddyDeployments = new Map<string, { current: string; commit: string | null }>();
+  const caddyDeployments = new Map<string, { current: string; commit: string | null; imageDigest: string | null }>();
   for (const [index, target] of targets.entries()) {
     results[index].previousDeploymentId = await providerPreflight(target, latestLts, undefined, evidence => {
       const current = railpackCaddyVersion(evidence);
-      if (current && evidence && target.mode === "git") caddyDeployments.set(target.id, { current, commit: evidence.commit });
+      if (current && evidence && target.mode === "git") caddyDeployments.set(target.id, { current, commit: evidence.commit, imageDigest: normalizeImageDigest(evidence.imageDigest) });
     });
     await checkNodeEndpoint(target);
     if (workerTarget(target)) results[index].warnings.push("Traitement en arrière-plan : les tests isolés et le processus Node actif sont contrôlés. Aucun résultat de tâche, envoi externe ou parcours métier n’est certifié par la seule présence du processus.");
@@ -184,6 +189,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const caddyChanges = new Map<string, CaddyChange>();
     const caddyTested = new Map<string, CaddyFingerprint>();
     const caddyObserved = new Map<string, NonNullable<UpdateCheck["caddyEvidence"]>>();
+    const debianPlans = new Map<string, { identity: RailpackImageIdentity; before: UpdateCheck; upgrades: Awaited<ReturnType<typeof planDebianFixes>> }>();
     if (caddyDeployments.size) {
       const release = await caddyRelease;
       for (const [index, target] of targets.entries()) {
@@ -199,6 +205,21 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
             const proof = caddyDeployments.get(other.id);
             return proof?.commit === expected && proof.current === deployed.current;
           })) railpackCaddyPins.add(path);
+          const deploymentId = results[index].previousDeploymentId;
+          if (deploymentId && deployed.imageDigest && (previous === undefined || railpackCaddyPins.has(path))) {
+            const identity = { projectId: run.projectId, targetId: target.id, deploymentId, imageDigest: deployed.imageDigest, commit: expected, caddy: deployed.current };
+            const inventory = await cachedRailpackInventory(identity);
+            const { check: before } = await scanRailpackImage(target, identity, inventory);
+            const upgrades = await planDebianFixes(before.findings);
+            if (upgrades.length) {
+              const change = { previous, current: deployed.current, version: deployed.current, debianPins: upgrades.map(item => `${item.package}=${item.to}`) };
+              if (!validatedRailpackChange(change)) throw new ApiError("L’image active ne correspond pas aux versions Debian déjà demandées.", 422);
+              debianPlans.set(target.id, { identity, before, upgrades });
+              caddyCandidates.set(target.id, change);
+              if (release && caddyVersionChange(deployed.current, release.version, previous)) results[index].warnings.push("La mise à jour Caddy sera évaluée séparément des correctifs Debian.");
+              continue;
+            }
+          }
           if (!release) { results[index].warnings.push("Catalogue Caddy indisponible ; recherche de version reportée."); continue; }
           const change = caddyVersionChange(deployed.current, release.version, previous);
           if (change) caddyCandidates.set(target.id, change);
@@ -209,10 +230,11 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       }
       const unqualifiedRoots = new Set(targets.flatMap(target => {
         const candidate = caddyCandidates.get(target.id);
-        return candidate && targets.some(other => other.root === target.root && caddyCandidates.get(other.id)?.current !== candidate.current) ? [target.root] : [];
+        return candidate && targets.some(other => other.root === target.root && JSON.stringify(caddyCandidates.get(other.id)) !== JSON.stringify(candidate)) ? [target.root] : [];
       }));
       for (const [index, target] of targets.entries()) {
         if (unqualifiedRoots.has(target.root) && caddyCandidates.delete(target.id)) {
+          debianPlans.delete(target.id);
           results[index].warnings.push("Caddy : le même répertoire alimente un autre service sans candidate commune qualifiée.");
         }
       }
@@ -256,7 +278,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     async function record(check: UpdateCheck, selected = results) {
       for (const result of selected) { result.checks ||= []; result.checks.push(check); }
-      await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
+      await progress(check.phase === "after" ? "verifying" : "updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : check.phase === "after" ? "contrôle de l’image déployée" : "contrôle de la version candidate"}.`);
       requireSecurityPass(check);
     }
     async function recordOsv(phase: "before" | "candidate", scope: string, scan: Awaited<ReturnType<typeof nodeScan>>, selectedRoots = roots, workingFolder = sourceFolder, policy = npmPolicy) {
@@ -443,17 +465,31 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const started = performance.now();
       const cacheKey = randomUUID();
       const selected = results.filter((_, i) => targets[i].root === target.root);
-      await progress("updating", `${target.name} : construction de l’image Railpack candidate pour Caddy ${candidate.version}.`);
+      const debian = debianPlans.get(target.id);
+      await progress("updating", `${target.name} : construction de l’image Railpack candidate ${debian ? "avec les correctifs Debian" : `pour Caddy ${candidate.version}`}.`);
       const buildNames = [...new Set([...names, ...prepared.allowed])];
       let findings: SecurityFinding[] = [], previous: SecurityFinding[] = [];
       const tested = await validateRailpackCaddy(sourceFolder, target.root, buildNames, candidate.version, async image => {
         findings = (await scanImage(image)).map(finding => ({ ...finding, scope: target.root }));
-      }, cacheKey);
-      if (findings.length) {
+      }, cacheKey, candidate.previous, candidate.debianPins);
+      if (debian) {
+        previous = debian.before.findings;
+        for (const [i, service] of targets.entries()) if (service.root === target.root) {
+          const plan = debianPlans.get(service.id)!;
+          const active = await verifyRailwayCaddy(service, { deploymentId: plan.identity.deploymentId, commit: expected }, version, candidate.current);
+          const proof = active.caddyEvidence!;
+          if (proof.imageDigest !== plan.identity.imageDigest || tested.binaryHash !== proof.binaryHash ||
+            JSON.stringify(plan.before.findings) !== JSON.stringify(previous)) throw new ApiError("L’image active ou le binaire Caddy ne correspond plus à la référence du correctif Debian.", 422);
+          caddyObserved.set(service.id, proof);
+          await record({ ...active, phase: "before" }, [results[i]]);
+        }
+        await record(debian.before, selected);
+        verifyDebianFixes(previous, findings, debian.upgrades);
+      } else if (findings.length) {
         await progress("updating", `${target.name} : comparaison Trivy avec l’image Caddy ${candidate.current} active.`);
         const baseline = await validateRailpackCaddy(sourceFolder, target.root, buildNames, candidate.current, async image => {
           previous = (await scanImage(image)).map(finding => ({ ...finding, scope: target.root }));
-        }, cacheKey);
+        }, cacheKey, candidate.previous);
         for (const [i, service] of targets.entries()) if (service.root === target.root) {
           const active = await verifyRailwayCaddy(service, { deploymentId: results[i].previousDeploymentId!, commit: expected }, version, caddyCandidates.get(service.id)!.current);
           const proof = active.caddyEvidence!;
@@ -465,13 +501,13 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         }
         await record(securityCheck("Trivy", "before", `Image active Caddy ${candidate.current} reproduite`, previous), selected);
       }
-      await record(caddyImageSecurity(`Image Railpack Caddy ${candidate.version}`, previous, findings), selected);
+      await record(caddyImageSecurity(debian ? "Image Railpack candidate avec correctifs Debian" : `Image Railpack Caddy ${candidate.version}`, previous, findings, debian?.upgrades), selected);
       await writeFile(join(sourceFolder, path), caddyConfig(candidate));
       prepared.allowed.add(path);
       caddyChanges.set(path, candidate);
       caddyTested.set(target.root, tested);
       await record({ tool: "Caddy", phase: "candidate", scope: target.root, status: "passed", checkedAt: new Date().toISOString(), findings: [],
-        message: `Caddy ${candidate.current} → ${candidate.version} : plan Railpack, image, scan Trivy et démarrage HTTP validés en ${Math.round(performance.now() - started)} ms.`,
+        message: `${debian ? "Correctifs Debian " + candidate.debianPins!.join(", ") : `Caddy ${candidate.current} → ${candidate.version}`} : plan Railpack, image, scan Trivy et démarrage HTTP validés en ${Math.round(performance.now() - started)} ms.`,
       }, selected);
     }
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
@@ -482,7 +518,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const warnings = "services" in prepared ? prepared.services.find(service => service.root === targets[index].root)?.warnings || [] : prepared.warnings;
       result.warnings = [...new Set([...result.warnings, ...warnings])];
     }
-    for (const [index, target] of targets.entries()) if (!imageBaselines.has(target.root) && !vercelStaticTarget(target)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
+    for (const [index, target] of targets.entries()) if (!caddyCandidates.has(target.id) && !imageBaselines.has(target.root) && !vercelStaticTarget(target)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     if (run.purpose === "assessment") {
       if (changes.length) await assertSourceImpact(targets, changes.map(file => file.path));
       await refreshProjectHosting(run.projectId);
@@ -623,6 +659,15 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const tested = caddyTested.get(target.root)!;
         if (check.caddyEvidence?.packagesHash !== tested.packagesHash || check.caddyEvidence.binaryHash !== tested.binaryHash) throw new ApiError("Le Caddy déployé ou ses paquets Debian diffèrent de l’image candidate testée.", 422);
         await record(check, [result]);
+        const debian = debianPlans.get(target.id);
+        if (debian) {
+          const identity = { ...debian.identity, deploymentId: result.deploymentId, commit: result.commit!, imageDigest: check.caddyEvidence!.imageDigest };
+          const { check: report } = await scanRailpackImage(target, identity);
+          const fixed = verifyDebianFixes(debian.before.findings, report.findings, debian.upgrades);
+          const assessment = caddyImageSecurity("Image Railpack déployée après correctifs Debian", debian.before.findings, report.findings, debian.upgrades);
+          if (assessment.status !== "blocked") assessment.message = `${fixed} signalement(s) Debian ciblé(s) absent(s) du scan de l’image active. ${assessment.message}`;
+          await record({ ...assessment, phase: "after", checkedAt: report.checkedAt }, [result]);
+        }
       }
       await checkNodeEndpoint(target);
       result.stage = "completed";
