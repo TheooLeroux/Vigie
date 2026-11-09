@@ -11,18 +11,23 @@ export function finishAssessment(result: UpdateResult, changes: string[], limita
   if (remainingNpmFindings(result).length) result.message += " Des failles npm déjà présentes restent à corriger.";
 }
 
-export function currentAssessmentResults(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
+export function currentAssessmentEvidence(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
   const run = state?.assessment;
   if (!run || run.purpose !== "assessment" || !["completed", "failed"].includes(run.stage)) return [];
   const age = now - Date.parse(run.updatedAt);
   if (!Number.isFinite(age) || age < 0 || age >= assessmentInterval) return [];
   return run.results.filter(result => {
     const target = state!.targets.find(target => target.id === result.targetId);
-    if (!target || result.stage !== "completed" || !result.assessment || !run.assessmentSources?.[target.id]) return false;
+    if (!target || !run.assessmentSources?.[target.id]) return false;
     if (state!.runs.some(update => Date.parse(update.updatedAt) > Date.parse(run.createdAt) && update.targets.some(selected => selected.id === target.id))) return false;
-    if (result.assessment.sourceCommit && target.repository && controlSource(target, detail)?.commit !== result.assessment.sourceCommit) return false;
-    return controlSource(target, detail)?.identity === run.assessmentSources[target.id];
+    const source = controlSource(target, detail, now);
+    if (result.assessment?.sourceCommit && target.repository && source?.commit !== result.assessment.sourceCommit) return false;
+    return source?.identity === run.assessmentSources[target.id];
   });
+}
+
+export function currentAssessmentResults(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
+  return currentAssessmentEvidence(detail, state, now).filter(result => result.stage === "completed" && result.assessment);
 }
 
 // Report only manifest version declarations and known version files. No source

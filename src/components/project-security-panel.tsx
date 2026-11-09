@@ -1,4 +1,6 @@
+import type { ReactNode } from "react";
 import { CircleHelp, ShieldAlert, ShieldCheck } from "lucide-react";
+import { projectRemediation, type RemediationReason } from "@/lib/project-remediation";
 import { coverageLabels, projectSecurity, type ProjectVulnerability } from "@/lib/project-security";
 import type { ProjectHealth } from "@/lib/project-health";
 import type { ProjectDetail } from "@/lib/types";
@@ -8,26 +10,35 @@ const severityLabels = { critical: "Critique", high: "Élevée", moderate: "Mod�
 const usageLabels = { runtime: "Dépendance de production", build: "Développement / construction", unknown: "Usage à qualifier" };
 const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
 
-function FindingRows({ items }: { items: ProjectVulnerability[] }) {
-  return <ul className="security-findings">{items.map(item => <li key={item.key}>
-    <details className="security-finding">
-      <summary>
-        <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
-        <span className="security-finding-content"><strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong><span>{item.package} <span className="security-version">{item.version}</span></span></span>
-        <span className="security-finding-reference">{item.id}</span>
-      </summary>
-      <div className="security-finding-body">
-        {item.explanation && <p>{item.explanation}</p>}
-        <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) référencée(s) {item.fixedVersions.join(", ")}. La compatibilité reste à valider avant installation.</> : "aucune version correctrice indiquée dans ce rapport. Consulter le signalement pour déterminer la marche à suivre."}</p>
-        <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
-        <small>Références : {item.aliases.join(" · ") || item.id}</small>
-        {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
-      </div>
-    </details>
-  </li>)}</ul>;
+type ExplainRemediation = (item: ProjectVulnerability) => RemediationReason;
+
+function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
+  return <ul className="security-findings">{items.map(item => {
+    const reason = explain?.(item);
+    return <li key={item.key}>
+      <details className="security-finding">
+        <summary>
+          <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
+          <span className="security-finding-content">
+            <strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong>
+            <span>{item.package} <span className="security-version">{item.version}</span>{reason && <> · <span className="security-finding-reason">{reason.label}</span></>}</span>
+          </span>
+          <span className="security-finding-reference">{item.id}</span>
+        </summary>
+        <div className="security-finding-body">
+          {item.explanation && <p>{item.explanation}</p>}
+          {reason?.detail && <p><strong>Pourquoi la faille est toujours là :</strong> {reason.detail}</p>}
+          <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) correctrice(s) indiquée(s) dans le rapport : {item.fixedVersions.join(", ")}.</> : "aucune version correctrice indiquée dans ce rapport."}</p>
+          <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
+          <small>Références : {item.aliases.join(" · ") || item.id}</small>
+          {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
+        </div>
+      </details>
+    </li>;
+  })}</ul>;
 }
 
-function Findings({ items }: { items: ProjectVulnerability[] }) {
+function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
   const blocks = new Map<string, ProjectVulnerability[]>();
   const visibleKeys = new Set(items.slice(0, 5).map(item => item.key));
   for (const item of items) {
@@ -40,26 +51,28 @@ function Findings({ items }: { items: ProjectVulnerability[] }) {
     const remaining = entries.filter(item => !visibleKeys.has(item.key));
     return <details className="security-findings-block" open={visible.length > 0} key={targetId}>
       <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
-      {visible.length > 0 && <FindingRows items={visible} />}
-      {remaining.length > 0 && <details className="health-details security-more"><summary>Voir les {remaining.length} autres signalements</summary><FindingRows items={remaining} /></details>}
+      {visible.length > 0 && <FindingRows items={visible} explain={explain} />}
+      {remaining.length > 0 && <details className="health-details security-more"><summary>Voir les {remaining.length} autres signalements</summary><FindingRows items={remaining} explain={explain} /></details>}
     </details>;
   })}</div>;
 }
 
-export function ProjectSecurityPanel({ detail, updates, health, unavailable = false }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean }) {
+export function ProjectSecurityPanel({ detail, updates, health, unavailable = false, maintenance }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean; maintenance: ReactNode }) {
   const security = projectSecurity(detail, updates, health);
+  const explain = projectRemediation(detail, updates);
   const historical = security.lastKnown;
   const hasAlerts = security.count > 0 || security.signals.length > 0 || security.alerts.length > 0;
   const loading = updates === undefined;
   const secondarySummary = [security.signals.length > 0 ? `${security.signals.length} signalement(s) à confirmer` : "", security.alerts.length > 0 ? `${security.alerts.length} autre(s) alerte(s)` : ""].filter(Boolean).join(" · ");
   const Icon = hasAlerts ? ShieldAlert : security.known ? ShieldCheck : CircleHelp;
   return <article className={`project-health-card project-security-card ${hasAlerts ? "danger" : "neutral"}`}>
-    <div className="security-panel-heading"><div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité</span><h2>{security.count > 0 ? `${security.count} faille${security.count > 1 ? "s" : ""} connue${security.count > 1 ? "s" : ""}` : hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
+    <div className="security-panel-heading"><div className="project-health-title"><Icon size={20} aria-hidden="true" /><div><span>Sécurité et mises à jour</span><h2>{security.count > 0 ? `${security.count} faille${security.count > 1 ? "s" : ""} connue${security.count > 1 ? "s" : ""}` : hasAlerts ? "Alertes de sécurité" : security.status === "error" && !loading ? "Contrôle de sécurité indisponible" : security.known ? "Aucune vulnérabilité connue" : "Sécurité à vérifier"}</h2></div></div>
       <div className="security-coverage-summary"><span className={`badge ${security.known ? "sage" : "neutral"}`}>{loading ? "Chargement des contrôles" : security.label}</span><small>{security.coveredServices}/{security.totalServices} service(s) au périmètre couvert</small></div>
     </div>
     {security.count > 0 && <div className="security-severities" aria-label="Répartition par gravité">{Object.entries(security.severityCounts).filter(([, count]) => count > 0).map(([severity, count]) => <span className={`security-severity ${severity}`} key={severity}>{count} {severityLabels[severity as keyof typeof severityLabels].toLowerCase()}{count > 1 ? "s" : ""}</span>)}</div>}
     {!security.known && <p className="security-coverage-note">Couverture partielle ou indisponible : les composants non analysés restent à vérifier.</p>}
-    {security.count > 0 && <Findings items={security.vulnerabilities} />}
+    {security.count > 0 && <Findings items={security.vulnerabilities} explain={explain} />}
+    {maintenance}
     {historical && <div className="security-history"><p><strong>{historical.count} vulnérabilité(s)</strong> relevée(s) lors des derniers contrôles enregistrés.</p><small>Contrôles du {date(historical.checkedAt)}{historical.latestCheckedAt !== historical.checkedAt ? ` au ${date(historical.latestCheckedAt)}` : ""} · {historical.analyzedServices}/{historical.totalServices} service(s) analysé(s){historical.partial ? " · périmètre partiel" : ""}.</small><p>Ces résultats restent consultables, mais ne confirment pas l’état actuel.</p><details className="health-details"><summary>Voir le dernier rapport enregistré</summary>{historical.vulnerabilities.length > 0 ? <Findings items={historical.vulnerabilities} /> : <p>Aucune vulnérabilité n’avait été signalée dans le périmètre de ces contrôles.</p>}{historical.signals.length > 0 && <><h3>Signalements à confirmer dans ce rapport</h3><Findings items={historical.signals} /></>}</details></div>}
     {(security.signals.length > 0 || security.alerts.length > 0) && <details className="health-details security-secondary">
       <summary>{secondarySummary} · hors compteur de vulnérabilités</summary>

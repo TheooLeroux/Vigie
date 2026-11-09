@@ -96,7 +96,7 @@
 .project-health-title { display: flex; align-items: center; gap: 11px; }
 .project-health-title > svg { flex-shrink: 0; color: var(--muted); }
 .project-health-title span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
-.project-health-title h2 { font-size: 16px; line-height: 1.4; color: var(--ink); }
+.project-health-title :is(h2, h3) { font-size: 16px; line-height: 1.4; color: var(--ink); }
 .project-health-card p, .project-health-card li { font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .project-health-card ul { display: grid; gap: 6px; margin: 0; padding-left: 18px; }
 .project-health-card small { color: var(--muted); font-size: 11px; line-height: 1.5; }
@@ -135,6 +135,7 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .security-finding-content { display: grid; flex: 1; gap: 4px; min-width: 0; }
 .security-finding-content > strong { color: var(--ink); font-size: 12px; line-height: 1.5; }
 .security-finding-content > span, .security-finding-reference { color: var(--muted); font-size: 11px; }
+.security-finding-reason { font-weight: 600; color: var(--text); }
 .security-version { font-variant-numeric: tabular-nums; }
 .security-finding-reference { flex-shrink: 0; }
 .security-severity, .security-severities > .security-severity { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 68px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--text); font-size: 10px; font-weight: 600; }
@@ -171,7 +172,9 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 .security-history { width: 100%; }
 .security-history > p + small, .security-history > small + p { display: block; margin-top: 6px; }
 .security-more { margin-top: 8px; }
-.project-maintenance-card > .health-details { margin-top: 0; }
+.project-maintenance-section { display: grid; gap: 12px; width: 100%; min-width: 0; padding-top: 16px; border-top: 1px solid var(--line); }
+.project-security-card .project-maintenance-section .project-health-title > svg { color: var(--muted); }
+.project-maintenance-section > .health-details { margin-top: 0; }
 #project-updates, #project-technical { scroll-margin-top: 88px; }
 @media (max-width: 760px) {
   .project-health-summary { grid-template-columns: 1fr; gap: 12px; }

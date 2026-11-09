@@ -72,6 +72,35 @@ test("Fiche : intitulé et correction du signalement conservés, failles les plu
   assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
 
+test("Fiche : le bloc commun rattache le motif de maintenance à la bonne faille et au déploiement analysé", () => {
+  const base = healthCheck().findings[0];
+  const { detail, state, target, report } = fixture([
+    { ...base, fixedVersions: ["1.2.3"] },
+    { ...base, package: "other-library" },
+  ]);
+  state.enabled = true;
+  const blocked = healthCheck({ checkedAt: report.checkedAt, status: "blocked", findings: [{ ...base, id: "CVE-2026-12345", aliases: [], explanation: "La dépendance parente impose encore cette version." }] });
+  const assessment = healthUpdates([blocked]).runs[0];
+  state.assessment = { ...assessment, createdAt: report.attemptedAt, updatedAt: report.attemptedAt, purpose: "assessment", stage: "failed", assessmentSources: { [target.id]: report.identity } };
+  assessment.results[0].stage = "failed";
+  const markup = () => renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = markup();
+  assert.equal(html.match(/<article\b/g)?.length, 1);
+  assert.match(html, /Sécurité et mises à jour/);
+  assert.match(html, /La dépendance parente impose encore cette version/);
+  assert.equal(html.match(/La faille bloque la proposition de mise à jour/g)?.length, 1);
+  assert.match(html, /other-library .*Aucun correctif indiqué dans le rapport/);
+
+  assessment.results[0] = { ...assessment.results[0], stage: "completed", assessment: { changes: ["Autres dépendances mises à jour"] }, checks: [healthCheck({ npmRetained: blocked.findings })] };
+  state.assessment.stage = "completed";
+  assert.match(markup(), /Toujours présente dans la proposition/);
+
+  state.assessment.assessmentSources![target.id] = "ancien-déploiement";
+  const stale = markup();
+  assert.doesNotMatch(stale, /Toujours présente dans la proposition|La faille bloque la proposition de mise à jour/);
+  assert.match(stale, /Compatibilité du correctif à confirmer/);
+});
+
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {
   const { detail, state, report } = fixture([]);
   report.warnings.push("Le code métier n’est pas analysé.", "Catalogue de mises à jour indisponible.");
