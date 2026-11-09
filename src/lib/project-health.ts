@@ -7,9 +7,10 @@ import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
 import { currentAssessmentResults } from "./updates/assessment";
+import { activeRailpackImageReport } from "./updates/railpack-image-report";
 
 export type ProjectHealth = {
-  securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding }[];
+  securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding; railpackImage?: boolean }[];
   securityOtherAlerts: string[];
   security: string[];
   updates: string[];
@@ -186,8 +187,14 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     return [{ target, automatic: true, result: { targetId: target.id, name: target.name, checks, warnings: control.warnings, stage: "completed" as const, message: "Contrôle automatique" } }];
   });
   if (state?.automaticControls && state.targets.some(target => !automaticIds.has(target.id))) incomplete = true;
-  const reports = [...automatic, ...observations.filter(item => !automaticIds.has(item.target.id)).map(item => ({ ...item, automatic: false })), ...history.flatMap(run => run.results.filter(result => !automaticIds.has(result.targetId)).map(result => ({ target: run.targets.find(target => target.id === result.targetId), result, automatic: false })))];
-  for (const { target, result, automatic } of reports) {
+  const railpackImages = (state?.targets || []).flatMap(target => {
+    const image = activeRailpackImageReport(target, detail, state);
+    return image ? [{ target, automatic: true, railpackImage: true, result: { targetId: target.id, name: target.name, checks: [image.check], stage: "completed" as const, message: image.check.message, warnings: [] } }] : [];
+  });
+  const reports = [...automatic, ...railpackImages, ...observations.filter(item => !automaticIds.has(item.target.id)).map(item => ({ ...item, automatic: false })), ...history.flatMap(run => run.results.filter(result => !automaticIds.has(result.targetId)).map(result => ({ target: run.targets.find(target => target.id === result.targetId), result, automatic: false })))];
+  for (const entry of reports) {
+    const { target, result, automatic } = entry;
+    const railpackImage = "railpackImage" in entry && entry.railpackImage;
     if (!target) continue;
     let checks: UpdateCheck[] = [];
     if (automatic) checks = result.checks || [];
@@ -211,7 +218,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       const bound = staticBound || proof && (target.provider === "vercel" ? proof.source === "vercel-function" && proof.projectId === target.remoteId && proof.deploymentId === vercel?.id && !!proof.commit && proof.commit === vercel.commit && vercel.state === "READY" : service && railwayRuntimeDeployments(service).some(deployment => deployment.id === proof.deploymentId && deployment.evidence?.imageDigest === proof.imageDigest));
       if (bound) checks = (staticBound ? ["OSV"] : ["OSV", "Trivy"]).flatMap(tool => {
         const check = result.checks?.findLast(check => check.tool === tool && check.phase === "candidate");
-        return check && check.status !== "blocked" ? [check] : [];
+        return check && check.status !== "blocked" && !check.scope.startsWith("Image Railpack Caddy ") ? [check] : [];
       });
     }
     for (const check of checks) {
@@ -219,9 +226,10 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       if (scanned.has(scanKey)) continue;
       scanned.add(scanKey);
       securityKnown = true;
-      for (const finding of check.findings) {
+      for (const raw of check.findings) {
+        const finding: SecurityFinding = railpackImage ? { ...raw, usage: "runtime" } : raw;
         if (finding.scope !== undefined && finding.scope !== target.root) continue;
-        securityEvidence.push({ targetId: target.id, name: result.name, tool: check.tool, checkedAt: check.checkedAt, finding });
+        securityEvidence.push({ targetId: target.id, name: result.name, tool: check.tool, checkedAt: check.checkedAt, finding, ...(railpackImage ? { railpackImage: true } : {}) });
         const id = [...finding.aliases, finding.id].sort()[0];
         const severity = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
         const inventory = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId)?.inventory;
@@ -229,7 +237,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         const description = finding.explanation || (finding.kind === "supply-chain" || finding.id.startsWith("WPV-SUPPLY-") ? "Signal de distribution suspect à vérifier ; aucune compromission du site confirmée." : `Vulnérabilité connue (sévérité ${severity}).`);
         security.set(`${target.id}:${finding.package}:${finding.version}:${id}`, `${target.mode === "wordpress" ? "" : result.name + " · "}${component} ${finding.version} : ${id}. ${description}`);
         securityFromScan = true;
-        if (finding.fixedVersions?.length) {
+        if (finding.fixedVersions?.length && !railpackImage) {
           const key = `${target.id}:${finding.package}:${finding.version}`;
           const privatePlugin = target.mode === "wordpress" && result.warnings.some(warning => warning.startsWith(finding.package.replace(/^plugins\//, "") + " :") && warning.includes("catalogue privé, non identifié ou fermé"));
           const observation = state?.currentSecurity?.find(item => item.targetId === target.id && inventory && item.versions === wordpressSecurityVersions(inventory));

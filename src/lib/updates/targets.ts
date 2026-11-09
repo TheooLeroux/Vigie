@@ -19,9 +19,9 @@ export function sourceRoot(value: string | null) {
 export function updateScope(target: UpdateTarget) {
   return target.mode === "git" ? `git:${target.repository!.toLowerCase()}` : `${target.provider}:${target.connectionId}:${target.remoteId}:${target.environmentId || ""}`;
 }
-export async function updateTargets(projectId: string): Promise<UpdateTarget[]> {
+export async function updateTargets(projectId: string, railwaySnapshot?: ReturnType<typeof railwayState>): Promise<UpdateTarget[]> {
   const project = await requireProject(projectId, "live");
-  const [vercel, railway, hosting] = await Promise.all([vercelState(), railwayState(), projectHostingInstallations(projectId)]);
+  const [vercel, railway, hosting] = await Promise.all([vercelState(), railwaySnapshot ?? railwayState(), projectHostingInstallations(projectId)]);
   const configured = new Set((await (await updateStorage()).prepare("SELECT target_id FROM update_sources WHERE project_id=?").all(projectId) as { target_id: string }[]).map(row => row.target_id));
   const targets: UpdateTarget[] = [];
   for (const item of vercel.projects.filter(item => item.projectId === projectId && !item.excluded)) {

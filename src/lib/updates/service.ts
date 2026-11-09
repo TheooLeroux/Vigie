@@ -4,7 +4,7 @@ import { auditActor } from "../audit-context";
 import { log, requireProject, transaction } from "../db";
 import { ApiError } from "../http";
 import { dispatchUpdate, githubRequest, updateRunner } from "./github";
-import { readUpdateRun, readUpdateSource, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { readRailpackImageReports, readUpdateRun, readUpdateSource, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { activeUpdateStages, type UpdateRun, type UpdateState } from "./types";
 import { currentSourceDeployment } from "./providers";
@@ -19,6 +19,8 @@ import { allowsAutomaticMaintenance } from "./capabilities";
 import { refreshProjectHosting } from "./refresh-hosting";
 import { observedProjectDetail } from "../project-observations";
 import { controlSource } from "../automatic-control-state";
+import { railwayState } from "../railway";
+import { railpackImageIdentity, railpackImageReport } from "./railpack-image-report";
 
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
@@ -28,15 +30,24 @@ export function updatesDisabledReason() {
   if (!updateRunner()) return "L’exécuteur de maintenance n’est pas connecté à cette instance de Vigie.";
 }
 export async function projectUpdates(projectId: string): Promise<UpdateState> {
-  const targets = await updateTargets(projectId);
+  const railway = railwayState();
+  const [targets, { projects }] = await Promise.all([updateTargets(projectId, railway), railway]);
   const db = await updateStorage();
   const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND COALESCE(json_extract(data,'$.purpose'),'update')<>'assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
   const daily = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND json_extract(data,'$.purpose')='assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 1").get(projectId) as { data: string } | undefined;
-  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, automaticControls: (await Promise.all(targets.map(target => readAutomaticControl(target.id)))).filter(item => item !== null), currentSecurity: await Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))), runs: rows.map(row => {
+  const runs = rows.map(row => {
     const run = JSON.parse(row.data) as UpdateRun;
     delete run.nodeReceipts;
     return run;
-  }) };
+  });
+  const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null)
+    .filter(identity => !runs.some(run => railpackImageReport(run, identity)));
+  const [railpackImageReports, automaticControls, currentSecurity] = await Promise.all([
+    readRailpackImageReports(projectId, identities),
+    Promise.all(targets.map(target => readAutomaticControl(target.id))),
+    Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))),
+  ]);
+  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
 export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate, options: { assessment?: boolean } = {}) {

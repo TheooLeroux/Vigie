@@ -1,9 +1,10 @@
-import { automaticControlFresh, controlMatches, controlSource } from "./automatic-control-state";
+import { automaticControlFresh, controlInterval, controlMatches, controlSource } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
 import { projectHealth, type ProjectHealth } from "./project-health";
 import type { ProjectDetail } from "./types";
 import type { SecurityFinding, UpdateState, UpdateTarget } from "./updates/types";
 import { groupVulnerabilityReferences, severityOrder } from "./vulnerability-references";
+import { activeRailpackImageReport, railpackImageIdentity } from "./updates/railpack-image-report";
 
 export type CoverageStatus = "covered" | "partial" | "missing" | "pending" | "stale" | "error" | "unsupported";
 export const coverageLabels: Record<CoverageStatus, string> = {
@@ -14,6 +15,7 @@ export type ServiceCoverage = {
   id: string; name: string; provider: string; status: CoverageStatus; scope: string;
   reason: string; action: string; limitations: string[]; checkedAt?: string; packages?: number;
   repository?: string | null; commit?: string | null;
+  railpackImageCheckedAt?: string;
   evidence?: import("./automatic-control-state").SecurityCoverageDetails;
 };
 export type ProjectVulnerability = {
@@ -21,6 +23,8 @@ export type ProjectVulnerability = {
   package: string; version: string; severity: SecurityFinding["severity"]; usage: NonNullable<SecurityFinding["usage"]>;
   kind: NonNullable<SecurityFinding["kind"]>; checkedAt: string; explanation?: string;
   title?: string; fixedVersions?: string[]; url?: string;
+  railpackImage?: boolean;
+  scanners?: { tool: ProjectHealth["securityEvidence"][number]["tool"]; checkedAt: string }[];
 };
 const securityTools = new Set(["OSV", "WPScan", "WPVulnerability", "Trivy"]);
 
@@ -50,15 +54,19 @@ export function normalizedVulnerabilities(evidence: ProjectHealth["securityEvide
     const entry = [...entries].sort((a, b) => severityOrder.indexOf(a.finding.severity) - severityOrder.indexOf(b.finding.severity))[0];
     const ids = [...group.ids].sort((a, b) => Number(!a.startsWith("CVE-")) - Number(!b.startsWith("CVE-")) || a.localeCompare(b));
     const { finding } = entry;
+    const fixedVersions = [...new Set(entries.flatMap(item => item.finding.fixedVersions || []))];
+    const scanners = [...new Map([...entries].sort((a, b) => a.checkedAt.localeCompare(b.checkedAt)).map(item => [item.tool, { tool: item.tool, checkedAt: item.checkedAt }])).values()];
     return {
       key: JSON.stringify([entry.targetId, finding.package, finding.version, ids[0]]), id: ids[0], aliases: ids,
       targetId: entry.targetId, service: entry.name, package: finding.package, version: finding.version,
-      severity: finding.severity, usage: finding.usage || "unknown",
+      severity: finding.severity, usage: entries.some(item => item.finding.usage === "runtime") ? "runtime" as const : finding.usage || "unknown",
       kind: confirmed.length ? "vulnerability" as const : finding.kind || "unconfirmed" as const,
       checkedAt: entries.map(item => item.checkedAt).sort().at(-1)!, explanation: finding.explanation,
       title: finding.title || entries.find(item => item.finding.title)?.finding.title,
-      fixedVersions: finding.fixedVersions,
+      fixedVersions: fixedVersions.length ? fixedVersions : undefined,
       url: finding.url || entries.find(item => item.finding.url)?.finding.url,
+      scanners,
+      ...(entries.some(item => item.railpackImage) ? { railpackImage: true } : {}),
     };
   }).sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity) || a.key.localeCompare(b.key));
 }
@@ -79,11 +87,19 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   const control = state?.automaticControls?.find(item => item.targetId === target.id);
   const service = detail.railway?.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
   const image = control?.securityCoverage?.scope === "image" || !!service?.image && !target.repository;
-  const scope = control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
-  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage };
+  const railpack = railpackImageIdentity(target, detail.railway);
+  const railpackReport = railpack && activeRailpackImageReport(target, detail, state);
+  const imageCheckedAt = railpackReport?.check.checkedAt;
+  const imageLimitation = imageCheckedAt && Date.now() - Date.parse(imageCheckedAt) >= controlInterval
+    ? "Le rapport image correspond toujours au déploiement actif. Un nouveau scan est nécessaire pour prendre en compte les avis publiés depuis."
+    : undefined;
+  const scope = railpackReport ? "Dépendances verrouillées et paquets de l’image Railpack" : control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
+  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage, railpackImageCheckedAt: imageCheckedAt };
   const outcome = (status: CoverageStatus, reason: string, action: string, extra: Partial<ServiceCoverage> = {}): ServiceCoverage => ({ ...base, status, reason, action, ...extra });
   if (!state) return outcome("error", "Les rapports de sécurité sont indisponibles.", "Recharger les contrôles du projet.");
   const last = control?.checkedAt ? { checkedAt: control.checkedAt } : {};
+  const sourceFresh = control && controlMatches(control, target, detail) && automaticControlFresh(control) && control.checks.some(check => check.tool === "OSV" && check.status !== "blocked");
+  if (railpackReport && !sourceFresh) return outcome("partial", "Le scan de l’image est lié au déploiement actif. Le contrôle des dépendances doit être actualisé.", "Actualiser le contrôle des dépendances.", { ...last, limitations: imageLimitation ? [imageLimitation] : [] });
   if (imageObservationPending(target, detail, state)) return outcome("stale", "L’image a changé après le dernier relevé hébergeur. L’ancien compteur reste historique.", "Actualiser les relevés pour confirmer le compteur de la nouvelle image.", last);
   if (control?.error) return outcome("error", control.error, /GitHub|dépôt|accès/.test(control.error) ? "Vérifier l’accès en lecture au dépôt et au commit déployé." : "Actualiser les relevés ; le contrôle sera réessayé automatiquement.", last);
   if (control?.coverage === "partial" && !control.checks.some(check => securityTools.has(check.tool))) return outcome(target.repository || image || target.mode === "wordpress" || control.securityCoverage?.scope === "sources" ? "unsupported" : "missing", control.warnings[0] || "Aucun analyseur disponible pour ce service.", control.securityCoverage?.scope === "sources" ? "Compléter les versions ou les fichiers signalés ; les sources disponibles ont été récupérées." : image ? "Rendre l’image exacte accessible au scanner." : target.repository ? "Fournir un verrou résolu et un analyseur adapté à la technologie." : "Relier les sources ou fournir un inventaire lié au déploiement.", { ...last, limitations: control.warnings });
@@ -96,12 +112,19 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   if (!controlMatches(control, target, detail) || !automaticControlFresh(control)) return outcome("stale", "Le rapport a expiré, le déploiement a changé ou le relevé hébergeur doit être renouvelé.", "Actualiser les relevés et analyser le déploiement actuel.", last);
   if (!control.checks.some(check => securityTools.has(check.tool))) return outcome("pending", "Le contrôle n’a pas fourni de rapport de vulnérabilités exploitable.", "Relancer le contrôle automatique.", last);
   const limitations = [...(control.securityCoverage?.limitations || [])];
+  const imageScan = control.securityCoverage?.scope === "image" && control.checks.some(check => check.tool === "Trivy" && check.status !== "blocked");
+  if (railpack && !railpackReport && !imageScan) limitations.push("Le verrou applicatif est couvert. Le système et les bibliothèques de l’image Railpack attendent un scan lié à ce déploiement.");
+  else if (target.mode === "git" && !railpackReport && !imageScan && (service?.builder === "DOCKERFILE" || service?.builder === "RAILPACK")) {
+    limitations.push("Le contrôle des sources couvre les dépendances identifiées. Les paquets de l’image déployée restent à analyser.");
+  }
+  if (imageLimitation) limitations.push(imageLimitation);
   // Legacy reports have no structured coverage: retain concrete WordPress reservations.
   if (!control.securityCoverage && target.mode === "wordpress") limitations.push(...control.warnings);
   if (!control.securityCoverage && control.sourceQualification?.sharedLock) limitations.push("Le verrou est partagé avec d’autres services ; le périmètre exact reste à confirmer.");
   if (control.checks.some(check => check.findings.some(finding => finding.kind === "unconfirmed"))) limitations.push("L’applicabilité de certains signalements au service reste à confirmer.");
   if (control.coverage === "partial" && !limitations.length) limitations.push(...control.warnings, "Une partie du service n’est pas analysée.");
-  return outcome(limitations.length ? "partial" : "covered", limitations.length ? "Certains composants restent à vérifier." : "Le périmètre déclaré a été analysé pour l’état actuel.", limitations.length ? "Compléter les composants ou preuves indiqués ci-dessous." : "", { ...last, limitations: [...new Set(limitations)], packages: control.securityCoverage?.packages });
+  const checkedAt = [control.checkedAt, imageCheckedAt].filter(Boolean).sort()[0];
+  return outcome(limitations.length ? "partial" : "covered", limitations.length ? "Certains composants restent à vérifier." : "Le périmètre déclaré a été analysé pour l’état actuel.", limitations.length ? "Compléter les composants ou preuves indiqués ci-dessous." : "", { checkedAt, limitations: [...new Set(limitations)], packages: control.securityCoverage?.packages });
 }
 
 function vulnerabilityCounts(vulnerabilities: ProjectVulnerability[]) {

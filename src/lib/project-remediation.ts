@@ -41,6 +41,10 @@ export function projectRemediation(detail: ProjectDetail, state?: UpdateState | 
   }
 
   return (item: ProjectVulnerability): RemediationReason | undefined => {
+    if (item.railpackImage) return {
+      label: "Correctif à qualifier dans une image Railpack",
+      detail: "Le composant est livré par l’image Railpack ou intégré au binaire Caddy. Vigie doit vérifier le correctif dans une image candidate avant de le proposer à l’installation.",
+    };
     const target = targets.get(item.targetId);
     const result = assessments.get(item.targetId);
     const sameVulnerability = (finding: SecurityFinding) => finding.package === item.package &&

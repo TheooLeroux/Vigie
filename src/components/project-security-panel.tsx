@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import { useState, type Ref } from "react";
 import { CircleAlert, CircleHelp, ShieldAlert, ShieldCheck } from "lucide-react";
 import { projectRemediation, type RemediationReason } from "@/lib/project-remediation";
 import { coverageLabels, projectSecurity, type ProjectVulnerability } from "@/lib/project-security";
@@ -36,12 +36,21 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
           {item.explanation && item.explanation !== reason?.detail && <p>{item.explanation}</p>}
           <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) correctrice(s) indiquée(s) dans le rapport : {item.fixedVersions.join(", ")}.</> : "aucune version correctrice indiquée dans ce rapport."}</p>
           <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
+          {!!item.scanners?.length && <small>{item.scanners.map(scan => `${scan.tool}${scan.tool === "Trivy" && item.railpackImage ? " · image Railpack" : ""} · ${date(scan.checkedAt)}`).join(" / ")}</small>}
           <small>Références : {item.aliases.join(" · ") || item.id}</small>
           {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
         </div>
       </details>
     </li>;
   })}</ul>;
+}
+
+function MoreFindings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
+  const [opened, setOpened] = useState(false);
+  return <details className="health-details security-more" onToggle={event => { if (event.currentTarget.open) setOpened(true); }}>
+    <summary>{items.length === 1 ? "Voir l’autre signalement" : `Voir les ${items.length} autres signalements`}</summary>
+    {(items.length <= 20 || opened) && <FindingRows items={items} explain={explain} />}
+  </details>;
 }
 
 function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
@@ -58,7 +67,7 @@ function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?:
     return <details className="security-findings-block" open={visible.length > 0} key={targetId}>
       <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
       {visible.length > 0 && <FindingRows items={visible} explain={explain} />}
-      {remaining.length > 0 && <details className="health-details security-more"><summary>{remaining.length === 1 ? "Voir l’autre signalement" : `Voir les ${remaining.length} autres signalements`}</summary><FindingRows items={remaining} explain={explain} /></details>}
+      {remaining.length > 0 && <MoreFindings items={remaining} explain={explain} />}
     </details>;
   })}</div>;
 }
@@ -101,6 +110,7 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
         {service.action && <p><strong>À faire :</strong> {service.action}</p>}
         {service.repository && <small>Source : {service.repository}{service.commit ? ` · commit ${service.commit.slice(0, 12)}` : ""}</small>}
         {service.checkedAt && <small>Dernier rapport enregistré : {date(service.checkedAt)}. {!["covered", "partial"].includes(service.status) ? "Ce rapport ne valide pas l’état actuel." : ""}</small>}
+        {service.railpackImageCheckedAt && <small>Trivy · Paquets de l’image Railpack contrôlés le {date(service.railpackImageCheckedAt)}.</small>}
       </section>)}</div>
       <p>Le périmètre couvert concerne les composants identifiés ci-dessus. Le code métier, les secrets, la configuration et les couches d’hébergement non inventoriées demandent des contrôles complémentaires.</p>
       <p>Le compteur compte chaque vulnérabilité une seule fois par projet, même si plusieurs blocs sont concernés. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>

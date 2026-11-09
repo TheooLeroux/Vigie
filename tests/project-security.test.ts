@@ -12,6 +12,7 @@ import type { SecurityFinding, UpdateState } from "../src/lib/updates/types";
 import { ProjectSecurityBadge } from "../src/components/project-security-badge";
 import { ProjectHealthSummary } from "../src/components/project-health-summary";
 import { npmDependencyUsage } from "../src/lib/updates/dependency-usage";
+import { railpackImageIdentity, railpackImageReport } from "../src/lib/updates/railpack-image-report";
 
 function fixture(findings = healthCheck().findings) {
   const detail = healthFixture(), target = healthUpdates().runs[0].targets[0], now = new Date().toISOString();
@@ -20,6 +21,59 @@ function fixture(findings = healthCheck().findings) {
   const state: UpdateState = { enabled: false, targets: [target], runs: [], automaticControls: [report] };
   return { detail, target, report, state };
 }
+
+test("Railpack : OSV et Trivy coexistent avec leurs dates pour le déploiement et l’image attestés", () => {
+  const { detail, target, report, state } = fixture();
+  const service = detail.railway![0].services[0];
+  service.builder = "RAILPACK";
+  const deployment = service.activeDeployments[0], evidence = deployment.evidence!;
+  evidence.staticSite = true;
+  evidence.packages.push({ name: "caddy", version: "2.11.9", usage: "runtime" });
+  const imageFinding: SecurityFinding = { id: "CVE-2026-4321", aliases: [], package: "apt", version: "3.0.3", severity: "high", fixedVersions: ["3.0.4"], scope: target.root };
+  const check = healthCheck({ tool: "Trivy", scope: "Image Railpack Caddy 2.11.9", checkedAt: report.checkedAt, findings: [imageFinding] });
+  const proof = healthCheck({ tool: "Caddy", phase: "after", status: "passed", checkedAt: report.checkedAt, findings: [],
+    caddyEvidence: { version: "2.11.9", deploymentId: deployment.id, imageDigest: evidence.imageDigest!, instances: ["instance"],
+      packagesHash: "c".repeat(64), binaryHash: "d".repeat(64) } });
+  const run = healthUpdates([check, proof]).runs[0];
+  Object.assign(run.results[0], { commit: evidence.commit, deploymentId: deployment.id });
+  const noop = healthUpdates().runs[0];
+  noop.id = "noop";
+  state.runs = [noop, run];
+  const read = () => projectSecurity(detail, state);
+  const current = read();
+  assert.equal(current.count, 2);
+  assert.deepEqual(current.vulnerabilities.find(item => item.package === "apt")?.scanners, [{ tool: "Trivy", checkedAt: report.checkedAt }]);
+  assert.equal(current.services[0].railpackImageCheckedAt, report.checkedAt);
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(html, /Correctif à qualifier dans une image Railpack/);
+  assert.match(html, /Trivy · image Railpack/);
+
+  // Evidence must survive the normal five-run history window.
+  const identity = railpackImageIdentity(target, detail.railway)!;
+  assert.equal(railpackImageReport({ ...run, results: [{ ...run.results[0], stage: "attention" }] }, identity), null);
+  assert.equal(railpackImageReport({ ...run, purpose: "assessment" }, identity), null);
+  assert.equal(railpackImageReport({ ...run, projectId: "another-project" }, identity), null);
+  assert.equal(railpackImageReport({ ...run, results: [{ ...run.results[0], checks: [check] }] }, identity), null);
+  const old = railpackImageReport(run, identity)!;
+  state.runs = [noop];
+  state.railpackImageReports = [old];
+  assert.equal(read().count, 2);
+  old.check.checkedAt = new Date(Date.now() - controlInterval - 1).toISOString();
+  assert.equal(read().count, 2, "les alertes du même digest restent visibles et datées");
+  assert.equal(read().services[0].status, "partial");
+  assert.match(read().services[0].limitations.join(" "), /nouveau scan/);
+
+  deployment.id = "redeployed";
+  report.identity = controlSource(target, detail)!.identity;
+  assert.equal(read().count, 1);
+  deployment.id = identity.deploymentId;
+  // Same commit and same Caddy version are insufficient for a new image.
+  evidence.imageDigest = "sha256:" + "e".repeat(64);
+  report.identity = controlSource(target, detail)!.identity;
+  assert.equal(read().count, 1);
+  assert.equal(read().services[0].status, "partial");
+  assert.match(read().services[0].limitations.join(" "), /attendent un scan/);
+});
 
 test("Compteur : vulnérabilités, soupçons et fins de support sont distincts", () => {
   const finding = healthCheck().findings[0];
@@ -116,6 +170,12 @@ test("Fiche : le pictogramme annonce un motif lié au déploiement analysé, vis
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {
   const { detail, state, report } = fixture([]);
   report.warnings.push("Le code métier n’est pas analysé.", "Catalogue de mises à jour indisponible.");
+  const sourceOnly = projectSecurity(detail, state);
+  assert.equal(sourceOnly.count, 0);
+  assert.equal(sourceOnly.partial, true);
+  assert.match(sourceOnly.services[0].limitations.join(" "), /paquets de l’image déployée restent à analyser/);
+  report.securityCoverage!.scope = "image";
+  report.checks.push(healthCheck({ tool: "Trivy", phase: "before", checkedAt: report.checkedAt, status: "passed", findings: [] }));
   const summary = summarizeProject(detail.project, detail, state);
   assert.equal(summary.known, true);
   assert.equal(summary.count, 0);
@@ -184,11 +244,12 @@ test("Couverture : une ressource observée sans cible de maintenance reste dans 
   detail.railway![0].services.push(database);
   const security = projectSecurity(detail, state);
   assert.equal(security.totalServices, 2);
-  assert.equal(security.coveredServices, 1);
+  assert.equal(security.coveredServices, 0);
+  assert.equal(security.analyzedServices, 1);
   assert.equal(security.partial, true);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /PostgreSQL/);
-  assert.match(html, /1\/2 service/);
+  assert.match(html, /0\/2 service/);
   assert.match(html, /Aucun rapport automatique/);
 });
 

@@ -92,6 +92,7 @@ export type UpdateRun = {
   excludedTargets?: { targetId: string; name: string; reason: string }[];
 };
 export type UpdateState = {
+  railpackImageReports?: import("./railpack-image-report").RailpackImageReport[];
   assessment?: UpdateRun | null;
   automaticControls?: import("../automatic-control-state").AutomaticControl[];
   currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string; securityCoverage?: import("../automatic-control-state").SecurityCoverageDetails }[];

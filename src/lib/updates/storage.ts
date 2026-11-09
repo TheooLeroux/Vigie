@@ -1,6 +1,7 @@
 import { database } from "../db";
 import { openConnectorSecret, sealConnectorSecret } from "../connector-secrets";
 import type { SourceSettings, UpdateRun } from "./types";
+import { railpackImageReport, type RailpackImageIdentity } from "./railpack-image-report";
 
 export async function updateStorage() {
   const db = database();
@@ -22,6 +23,24 @@ export async function writeUpdateRun(run: UpdateRun) {
 export async function nodeRunsWithReceipts(projectId: string, hashes: string[]) {
   const rows = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE project_id=? AND stage IN ('completed','failed','attention') AND data LIKE ? AND data LIKE ? AND data LIKE ? ORDER BY json_extract(data,'$.updatedAt') DESC LIMIT 10").all(projectId, ...hashes.map(hash => `%${hash}%`)) as { data: string }[];
   return rows.flatMap(row => { try { return [JSON.parse(row.data) as UpdateRun]; } catch { return []; } });
+}
+export async function readRailpackImageReports(projectId: string, identities: RailpackImageIdentity[]) {
+  if (!identities.length) return [];
+  // Find the report for the active deployment even after no-op runs push it
+  // out of the maintenance history returned to the project view.
+  const db = await updateStorage();
+  const filters = [...new Set(identities.map(identity => `%"deploymentId":"${identity.deploymentId}"%`))];
+  const rows = await db.prepare(`SELECT data FROM update_runs WHERE project_id=? AND stage IN ('completed','failed','attention') AND data LIKE ? AND (${filters.map(() => "data LIKE ?").join(" OR ")}) ORDER BY json_extract(data,'$.updatedAt') DESC`).all(
+    projectId, '%"caddyEvidence":%', ...filters,
+  ) as { data: string }[];
+  const runs = rows.map(row => JSON.parse(row.data) as UpdateRun);
+  return identities.flatMap(identity => {
+    for (const run of runs) {
+      const report = railpackImageReport(run, identity);
+      if (report) return [report];
+    }
+    return [];
+  });
 }
 export async function readUpdateSource(targetId: string) {
   const row = await (await updateStorage()).prepare("SELECT secret_cipher,revision FROM update_sources WHERE target_id=?").get(targetId) as { secret_cipher: string; revision: number } | undefined;
