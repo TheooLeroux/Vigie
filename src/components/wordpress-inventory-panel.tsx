@@ -238,7 +238,7 @@ export function WordPressInventoryPanel({
           ) : (
             <RefreshCw size={14} />
           )}
-          Actualiser
+          Actualiser le relevé
         </button>
       </div>
       <div className="wp-inventory-body">

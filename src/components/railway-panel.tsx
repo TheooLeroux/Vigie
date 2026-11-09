@@ -572,7 +572,7 @@ export function RailwayInventoryPanel({
           ) : (
             <RefreshCw size={14} />
           )}
-          Actualiser
+          Actualiser les relevés
         </button>
       </div>
       <div className="connection-body">
@@ -639,6 +639,13 @@ export function RailwayInventoryPanel({
                           ? s.domains.join(" · ")
                           : "Aucun domaine public"}
                       </p>
+                      {s.activeDeployments.map((d) => (
+                        <small className="railway-deployment-id" key={d.id}>
+                          Déploiement actif : {d.id.slice(0, 8)} ·{" "}
+                          {deploymentLabel(d.status)} ·{" "}
+                          {formatDate(d.createdAt)}
+                        </small>
+                      ))}
                       <dl className="railway-facts">
                         <div>
                           <dt>Source configurée</dt>
@@ -695,13 +702,6 @@ export function RailwayInventoryPanel({
                           <small>Aucune</small>
                         )}
                       </div>
-                      {s.activeDeployments.map((d) => (
-                        <small className="railway-deployment-id" key={d.id}>
-                          Actif : {d.id.slice(0, 8)} ·{" "}
-                          {deploymentLabel(d.status)} ·{" "}
-                          {formatDate(d.createdAt)}
-                        </small>
-                      ))}
                     </div>
                   );
                 })}

@@ -669,9 +669,6 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} updateActionRef={setOverviewUpdateTarget} />
         </div>
         <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
-            <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
-          </ProjectUpdates>
           <section
             className="project-monitoring"
             id="project-technical"
@@ -679,16 +676,13 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           >
             <div className="project-section-title">
               <div>
-                <h2>Suivi technique</h2>
+                <h2>Services et hébergements</h2>
                 <p>
                   {connected
-                    ? "Versions, déploiements et points à vérifier depuis vos hébergeurs."
+                    ? "Versions, déploiements actifs et date du dernier relevé."
                     : "Liez ce projet à son hébergeur pour retrouver ses informations techniques."}
                 </p>
               </div>
-              <span className={`badge ${connected ? "sage" : "neutral"}`}>
-                {connected ? "Hébergement rattaché" : "À connecter"}
-              </span>
             </div>
             {!connected && (
               <div className="panel project-connect">
@@ -739,7 +733,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           {!!detail.hosting?.length && (
             <details className="panel project-section">
               <summary>
-                Hébergement <span>{detail.hosting.length} installation(s)</span>
+                Dossiers d’hébergement <span>{detail.hosting.length} installation(s)</span>
               </summary>
               <div className="project-hosting-list">
                 {detail.hosting.map((installation) => (
@@ -772,6 +766,9 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               </div>
             </details>
           )}
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
+            <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
+          </ProjectUpdates>
         </div>
         <div className="project-content project-tab-panel" id="project-panel-information" role="tabpanel" aria-labelledby="project-tab-information" hidden={projectTab !== "information"} tabIndex={0}>
           <section className="panel project-information">

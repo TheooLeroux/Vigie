@@ -198,7 +198,6 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 .security-history > p + small, .security-history > small + p { display: block; margin-top: 6px; }
 .security-more { margin-top: 8px; }
 .project-maintenance-details { display: grid; gap: 12px; margin-top: 10px; }
-.project-tab-panel > #project-updates { margin-bottom: 20px; }
 #project-updates, #project-technical { scroll-margin-top: 88px; }
 @media (max-width: 760px) {
   .project-health-summary { grid-template-columns: 1fr; gap: 12px; }

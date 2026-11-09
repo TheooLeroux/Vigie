@@ -31,9 +31,10 @@ export function ProjectMaintenanceSummary({ detail, updates }: ProjectHealthProp
     : `${pendingUpdates.length} correctif(s) ou mise(s) à jour à examiner.`;
   const wordpressTitle = updates && !updates.enabled ? "Maintenance non activée" : updates?.targets.length && unavailableTargets.length === updates.targets.length ? "Vérification technique requise" : automaticFixes.length ? "Correctifs de sécurité à valider" : available ? pendingTitle : health.manualUpdates.length ? "Interventions manuelles requises" : security ? "Sécurité à traiter" : quietTitle;
   const status = health.running ? "Mise à jour en cours" : health.attention ? "Vérification requise" : wordpress ? wordpressTitle : automaticFixes.length ? "Correctifs de sécurité à valider" : available ? pendingTitle : health.manualUpdates.length ? "Mises à jour à traiter séparément" : security ? "Sécurité non résolue" : quietTitle;
-  return <details className="updates-details">
-    <summary>Versions et correctifs · {status}</summary>
+  return <section className="updates-details" aria-label="Versions et correctifs">
+    <h3>Versions et correctifs</h3>
     <div className="project-maintenance-details">
+      <p><strong>{status}</strong></p>
       <p>{wordpress && updates && !updates.enabled ? updates.disabledReason || "L’exécuteur de maintenance doit être configuré et activé." : wordpress && updates?.targets.length && unavailableTargets.length === updates.targets.length ? "Le contrôle de l’agent ou de la configuration doit être renouvelé avant un lancement." : available ? pendingDescription : health.manualUpdates.length ? `${health.manualUpdates.length} composant(s) à mettre à jour ou à vérifier manuellement.` : health.attention ? "Le résultat du dernier traitement reste à vérifier." : security ? "Aucun correctif compatible validé pour les alertes signalées." : health.versionsKnown ? "Selon les versions relevées." : "Actualisez les relevés pour vérifier les versions."}</p>
       {wordpress && health.manualUpdates.length > 0 && <small>{health.manualUpdates.length} composant(s) à traiter manuellement. Ils ne bloquent pas les autres mises à jour compatibles.</small>}
       {available && health.attention && <small>Le dernier traitement attend une vérification ; son succès n’est pas confirmé.</small>}
@@ -46,5 +47,5 @@ export function ProjectMaintenanceSummary({ detail, updates }: ProjectHealthProp
         {health.manualSecurityFixes.length > 0 && <><p>Correctifs de sécurité à traiter manuellement :</p><ul>{health.manualSecurityFixes.map(item => <li key={item}>{item}</li>)}</ul></>}
       </details>}
     </div>
-  </details>;
+  </section>;
 }

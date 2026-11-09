@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { maintenanceCapability, matchingQualification, qualifySources, sourceFamily, SourceQualificationError } from "../src/lib/updates/capabilities";
 import { checkNodeEndpoint, nodeCompletionMessage } from "../src/lib/updates/executor";
 import { sourceImpact } from "../src/lib/updates/source-impact";
-import { MaintenanceScope } from "../src/components/project-updates";
+import { MaintenanceScope, UpdateReadiness } from "../src/components/project-updates";
 import { scanCurrentNode } from "../src/lib/updates/node-monitor";
 import type { UpdateTarget } from "../src/lib/updates/types";
 import { mkdtemp, writeFile, readFile, rm, access } from "node:fs/promises";
@@ -98,5 +98,10 @@ test("Interface : service manuel et périmètre automatique sont expliqués sans
   const manual = maintenanceCapability({ ...target, provider: "o2switch" }, { installation: "dolibarr" });
   const markup = renderToStaticMarkup(createElement(MaintenanceScope, { targets: [{ ...target, capability: manual, unavailable: manual.reason }] }));
   assert.match(markup, /Dolibarr/); assert.match(markup, /Intervention séparée/); assert.match(markup, /autres services admissibles/);
+  const readiness = renderToStaticMarkup(createElement(UpdateReadiness, {
+    state: { enabled: true, runs: [], targets: [target, { ...target, id: "manual", name: "Dolibarr", capability: manual }] },
+  }));
+  assert.match(readiness, /1 service éligible à la maintenance automatique sur 2/);
+  assert.match(readiness, /Dolibarr<\/strong> · Intervention manuelle/);
   assert.doesNotMatch(markup, /Parcours automatique disponible/);
 });

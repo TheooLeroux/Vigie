@@ -6,6 +6,7 @@ import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type Up
 import { formatDate } from "./ui";
 import { updateStopSummary } from "@/lib/updates/stop-summary";
 import { updateProgressStatus } from "@/lib/updates/progress";
+import { allowsAutomaticMaintenance } from "@/lib/updates/capabilities";
 import { createRefreshQueue } from "@/lib/project-realtime";
 import { useProjectRealtime } from "./project-realtime";
 
@@ -40,12 +41,19 @@ export function MaintenanceScope({ targets }: { targets: UpdateTarget[] }) {
   </div>;
 }
 export function UpdateReadiness({ state }: { state: UpdateState }) {
-  const ready = state.targets.filter(target => !target.unavailable);
+  const ready = state.targets.filter(allowsAutomaticMaintenance);
+  const blocked = state.targets.filter(target => !allowsAutomaticMaintenance(target));
   const wordpress = state.targets.some(target => target.mode === "wordpress");
   return <div className="updates-note" role="status">
     {!state.enabled && <p><strong>Maintenance non activée.</strong> {state.disabledReason || "L’exécuteur de maintenance doit être configuré et activé."}</p>}
-    {state.targets.filter(target => target.unavailable).map(target => <p key={target.id}><strong>Vérification technique · {target.name} :</strong> {target.unavailable}</p>)}
-    {state.enabled && ready.length > 0 && <p>{wordpress ? "WordPress est prêt pour une maintenance des composants compatibles." : `${ready.length} service(s) prêt(s) sur ${state.targets.length}.`}</p>}
+    {state.enabled && ready.length > 0 && <p>{ready.every(target => target.mode === "wordpress")
+      ? "WordPress est prêt pour une maintenance des composants compatibles."
+      : `${ready.length} service${ready.length > 1 ? "s" : ""} éligible${ready.length > 1 ? "s" : ""} à la maintenance automatique sur ${state.targets.length}.`}</p>}
+    {state.enabled && !ready.length && blocked.length > 0 && <p>Aucun service éligible à la maintenance automatique.</p>}
+    {blocked.length > 0 && <ul className="updates-blocked-services">{blocked.map(target => <li key={target.id}>
+      <strong>{target.name}</strong> · {target.unavailable ? "Vérification technique" : target.capability?.status === "manual" ? "Intervention manuelle" : "Qualification nécessaire"}
+      <p>{target.unavailable || target.capability?.reason}</p>
+    </li>)}</ul>}
     {state.targets.length === 0 && <p>Aucun service de mise à jour rattaché. Consultez les connexions et la configuration.</p>}
     {wordpress && <p>Les composants manuels sont conservés et signalés. Ils ne bloquent pas la mise à jour du cœur et des autres extensions compatibles.</p>}
   </div>;
@@ -152,9 +160,8 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
   }, [refresh, subscribe, projectId]);
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const assessmentActive = !!state?.assessment && activeUpdateStages.includes(state.assessment.stage);
-  const available = state?.targets.filter(target => !target.unavailable && (!target.capability || target.capability.status === "automatic" && target.capability.adapter)) || [];
+  const available = state?.targets.filter(allowsAutomaticMaintenance) || [];
   const unresolved = latest?.stage === "attention";
-  const newerObservation = latest?.stage === "failed" && state?.currentSecurity?.some(item => !item.error && item.check && Date.parse(item.check.checkedAt) > Date.parse(latest.updatedAt));
   async function startUpdate(targetIds?: string[]) {
     setBusy(true); setError("");
     try { await request("updates", "POST", { projectId, ...(targetIds ? { targetIds } : {}) }); await refresh(); }
@@ -168,21 +175,24 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
   const errorNotice = error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>;
   return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
     {overviewActionTarget && createPortal(<>{updateButton}{errorNotice}</>, overviewActionTarget)}
-    <div className="updates-heading"><div>{!embedded && <h2>Mettre le projet à jour</h2>}<p>Mises à jour compatibles selon la technologie de chaque service.</p></div>
+    <div className="updates-heading"><div>{!embedded && <h2>Maintenance</h2>}<p>Versions à installer et points à traiter.</p></div>
       {updateButton}
     </div>
     {errorNotice}
     {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
-    {children}
+    {latest && (active ? <UpdateProgress run={latest} /> : <details className="updates-details">
+      <summary>{updateStopSummary(latest)?.title || "Dernière mise à jour terminée"} · {formatDate(latest.updatedAt)}</summary>
+      <UpdateProgress run={latest} />
+    </details>)}
     {state && (!embedded || !state.enabled || !state.targets.length || state.targets.some(target => target.unavailable)) && <UpdateReadiness state={state} />}
+    {children}
     {state?.targets.some(target => target.provider !== "o2switch") && <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>}
     {state?.targets.some(target => target.capability) && <details className="updates-details"><summary>Périmètre et conditions de maintenance</summary><MaintenanceScope targets={state.targets} />
     {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
     {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
     </details>}
     {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
-    {latest && (latest.stage === "completed" || newerObservation ? <details className="updates-details"><summary>{latest.stage === "completed" ? "Dernière mise à jour terminée" : "Dernière tentative arrêtée"} · {formatDate(latest.updatedAt)}</summary><UpdateProgress run={latest} /></details> : <UpdateProgress run={latest} />)}
     <ManagedNodeNotice run={latest} />
     {!!latest?.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}
     <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />

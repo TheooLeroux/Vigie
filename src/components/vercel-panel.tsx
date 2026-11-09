@@ -1014,7 +1014,11 @@ export function VercelInventoryPanel({
       <div className="panel-heading">
         <div>
           <h2>Vercel · {item.name}</h2>
-          <p>Relevé du {formatDate(item.observedAt)}</p>
+          <p>
+            Relevé du {formatDate(item.observedAt)} · {item.production
+              ? `Production : ${labels[item.production.state] || item.production.state}`
+              : "Aucun déploiement de production identifié"}
+          </p>
         </div>
         <button
           className="button secondary"
@@ -1037,7 +1041,7 @@ export function VercelInventoryPanel({
           ) : (
             <RefreshCw size={14} />
           )}
-          Actualiser
+          Actualiser les relevés
         </button>
       </div>
       <div className="connection-body">
