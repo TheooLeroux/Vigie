@@ -15,7 +15,25 @@ export function ProjectListActions({ project, request, onOpen }: {
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const { summary, loading } = useProjectSummary(project.id);
-  const { active, attention, refreshNeeded, disabledReason } = summary || { active: false, attention: false, refreshNeeded: false, disabledReason: "Résumé indisponible ; réessayez le chargement de la liste." };
+  const { active, attention, refreshNeeded, disabledReason } = summary || { active: false, attention: false, refreshNeeded: false, disabledReason: "État du projet indisponible." };
+  const action = active ? "Suivre la mise à jour" : attention ? "Vérifier le résultat" : refreshNeeded ? "Actualiser les relevés" : "Lancer la mise à jour";
+  const unavailable = !active && !attention && !refreshNeeded && disabledReason;
+
+  async function performAction() {
+    if (active || attention) { onOpen(); return; }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request(refreshNeeded ? "updates/refresh" : "updates", "POST", { projectId: project.id });
+      if (refreshNeeded && result.errors?.length) {
+        setError(result.errors.join(" "));
+        return;
+      }
+      onOpen();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : refreshNeeded ? "L’actualisation a échoué." : "La mise à jour n’a pas démarré.");
+    } finally { setBusy(false); }
+  }
 
   return <>
     <td>
@@ -23,27 +41,16 @@ export function ProjectListActions({ project, request, onOpen }: {
         <ProjectSecurityBadge summary={summary} onOpen={onOpen} />}
     </td>
     <td>
-      <button
+      {loading ? <span className="subtle">Chargement…</span> : unavailable ? <span className="project-action-unavailable">{unavailable}</span> : <button
         type="button"
         className="button secondary small record-secondary"
-        disabled={loading || busy || (!active && !attention && !refreshNeeded && !!disabledReason)}
-        title={active ? "Voir le suivi de la mise à jour" : attention ? "Vérifier le dernier traitement" : refreshNeeded ? "Ouvrir la fiche et actualiser les relevés" : disabledReason || `Mettre à jour ${project.name}`}
-        aria-label={`${active ? "Suivre la mise à jour de" : attention ? "Vérifier la mise à jour de" : refreshNeeded ? "Actualiser les relevés de" : "Mise à jour de"} ${project.name}`}
-        onClick={async () => {
-          if (active || attention || refreshNeeded) { onOpen(); return; }
-          setBusy(true);
-          setError("");
-          try {
-            await request("updates", "POST", { projectId: project.id });
-            onOpen();
-          } catch (cause) {
-            setError(cause instanceof Error ? cause.message : "La mise à jour n’a pas démarré.");
-          } finally { setBusy(false); }
-        }}
+        disabled={busy}
+        aria-label={`${action} pour ${project.name}`}
+        onClick={() => void performAction()}
       >
         {busy || active ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />}
-        {busy ? "Lancement…" : active ? "En cours" : attention ? "À vérifier" : refreshNeeded ? "Actualiser" : "Mise à jour"}
-      </button>
+        {busy ? refreshNeeded ? "Actualisation…" : "Lancement…" : action}
+      </button>}
       {error && <p className="updates-error record-secondary" role="alert">{error}</p>}
     </td>
   </>;

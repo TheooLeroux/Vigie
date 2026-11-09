@@ -1,18 +1,34 @@
-import { CircleHelp, ShieldAlert, ShieldCheck } from "lucide-react";
+import { projectSeverityCounts } from "@/lib/project-severity";
 import type { ProjectSummary } from "@/lib/project-summary";
+import { severityLabels } from "@/lib/security-watch";
+import { severityOrder } from "@/lib/vulnerability-references";
+import { formatDate } from "./ui";
+
+export function ProjectSeverityLegend() {
+  return <ul className="project-severity-legend" aria-label="Gravité des failles">
+    {severityOrder.map(severity => <li key={severity} className={`project-severity ${severity}`}>{severityLabels[severity]}</li>)}
+  </ul>;
+}
 
 export function ProjectSecurityBadge({ summary, onOpen }: { summary?: ProjectSummary; onOpen: () => void }) {
   const historical = summary?.lastKnown;
-  const count = historical?.count ?? summary?.count ?? 0;
+  const counts = projectSeverityCounts(summary);
+  const populated = counts ? severityOrder.filter(severity => counts[severity] > 0) : [];
+  const coverage = historical ? `Ancien relevé${historical.partial ? " · partiel" : ""}` : summary?.unknownLabel ?? "Contrôle indisponible";
+  const checkedServices = historical?.analyzedServices ?? summary?.coveredServices;
+  const totalServices = historical?.totalServices ?? summary?.totalServices;
+  const serviceCoverage = totalServices && totalServices > 1 ? ` · ${checkedServices}/${totalServices} services` : "";
   const signals = historical?.signalCount ?? summary?.signalCount ?? 0;
-  const attention = count > 0 || signals > 0 || !!summary?.alertCount;
-  const measurable = !!summary && (!!historical || count > 0 || summary.known || summary.partial);
-  const Icon = attention ? ShieldAlert : summary?.known ? ShieldCheck : CircleHelp;
-  return <button type="button" className="security-summary-button record-secondary" onClick={onOpen} title={summary?.securityTitle || "Les rapports sont indisponibles."} aria-label="Voir les vulnérabilités et la couverture du projet">
-    <span className={`badge ${attention ? "warning" : summary?.known ? "sage" : "neutral"}`}><Icon size={13} aria-hidden="true" />{measurable ? historical ? `${count} au dernier contrôle` : `${count} faille${count > 1 ? "s" : ""}` : summary?.unknownLabel || "Contrôle indisponible"}</span>
-    {measurable && <small>{summary!.unknownLabel}</small>}
-    {historical && <small><time dateTime={historical.checkedAt}>{new Date(historical.checkedAt).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" })}</time>{historical.partial ? " · partiel" : ""}</small>}
-    {!!summary && summary.totalServices > 1 && <small>{summary.coveredServices}/{summary.totalServices} services couverts</small>}
-    {!!summary && (signals > 0 || summary.alertCount > 0) && <small>{signals > 0 ? `${signals} à confirmer` : ""}{signals > 0 && summary.alertCount > 0 ? " · " : ""}{summary.alertCount > 0 ? `${summary.alertCount} autre${summary.alertCount > 1 ? "s" : ""} alerte${summary.alertCount > 1 ? "s" : ""}` : ""}</small>}
+  const alerts = summary?.alertCount ?? 0;
+  const countLabel = populated.map(severity => `${counts![severity]} · ${severityLabels[severity]}`).join(", ") || (counts ? "0 faille" : "Nombre de failles indisponible");
+  const details = [coverage + serviceCoverage, historical && `Relevé du ${formatDate(historical.checkedAt)}`, signals > 0 && `${signals} à confirmer`, alerts > 0 && `${alerts} autre${alerts > 1 ? "s" : ""} alerte${alerts > 1 ? "s" : ""}`].filter(Boolean).join(". ");
+  return <button type="button" className="security-summary-button record-secondary" onClick={onOpen} title={summary?.securityTitle} aria-label={`${countLabel}. ${details}. Voir les vulnérabilités du projet.`}>
+    <span className="project-severity-counts">
+      {counts && populated.length ? populated.map(severity => <span key={severity} className={`project-severity ${severity}`} title={severityLabels[severity]}>{counts[severity]}</span>)
+        : <span className="project-severity">{counts ? "0" : "—"}</span>}
+    </span>
+    <small>{coverage}{serviceCoverage}</small>
+    {historical && <small><time dateTime={historical.checkedAt}>{formatDate(historical.checkedAt)}</time></small>}
+    {(signals > 0 || alerts > 0) && <small>{signals > 0 && `${signals} à confirmer`}{signals > 0 && alerts > 0 && " · "}{alerts > 0 && `${alerts} autre${alerts > 1 ? "s" : ""} alerte${alerts > 1 ? "s" : ""}`}</small>}
   </button>;
 }

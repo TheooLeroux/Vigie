@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { projectSecurity, normalizedVulnerabilities } from "../src/lib/project-security";
 import { summarizeProject } from "../src/lib/project-summary";
+import { compareProjectSeverity } from "../src/lib/project-severity";
 import { controlSource, controlInterval } from "../src/lib/automatic-control-state";
 import type { AutomaticControl } from "../src/lib/automatic-control-state";
 import { healthCheck, healthFixture, healthUpdates, healthRelease } from "./project-health-fixture";
@@ -99,6 +100,9 @@ test("Compteur projet : une seule faille, de gravité maximale, même dans plusi
   assert.equal(summary.count, 1);
   assert.equal(summary.severityCounts?.critical, 1);
   assert.equal(summary.severityCounts?.high, 0);
+  const moderate = { ...summary, count: 150, severityCounts: { critical: 0, high: 0, moderate: 150, low: 0, unknown: 0 } };
+  assert.ok(compareProjectSeverity(summary, moderate) < 0);
+  assert.ok(compareProjectSeverity(moderate, undefined) < 0);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(html, /1 faille connue/);
   const blocks = html.split('<details class="security-findings-block"').slice(1).map(section => section.split("</details>")[0]);
@@ -112,7 +116,10 @@ test("Compteur projet : une seule faille, de gravité maximale, même dans plusi
     assert.match(block, /1 signalement/);
   }
   detail.railway![0].observedAt = new Date(0).toISOString();
-  assert.equal(summarizeProject(detail.project, detail, state).lastKnown?.count, 1);
+  const historical = summarizeProject(detail.project, detail, state);
+  assert.equal(historical.lastKnown?.count, 1);
+  assert.equal(historical.lastKnown?.severityCounts.critical, 1);
+  assert.ok(compareProjectSeverity(historical, moderate) < 0);
 });
 
 test("Couverture : aucun zéro depuis un runtime seul, un service absent ou un rapport vide", () => {
@@ -186,8 +193,8 @@ test("Historique : l’expiration du relevé hébergeur conserve le nombre et la
   assert.equal(summary.lastKnown?.count, 1);
   assert.equal(summary.lastKnown?.checkedAt, report.checks[0].checkedAt);
   const html = renderToStaticMarkup(createElement(ProjectSecurityBadge, { summary, onOpen() {} }));
-  assert.match(html, /1 au dernier contrôle/);
-  assert.match(html, /À actualiser/);
+  assert.match(html, /project-severity high" title="Élevée">1</);
+  assert.match(html, /Ancien relevé/);
   assert.match(html, /dateTime=/);
   const panel = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   assert.match(panel, /derniers contrôles enregistrés/);
@@ -202,8 +209,9 @@ test("Historique : ancien zéro clairement daté, aucun zéro inventé depuis un
   let summary = summarizeProject(detail.project, detail, state);
   assert.equal(summary.lastKnown?.count, 0);
   let html = renderToStaticMarkup(createElement(ProjectSecurityBadge, { summary, onOpen() {} }));
-  assert.match(html, /0 au dernier contrôle/);
-  assert.doesNotMatch(html, /0 faille|Périmètre couvert/);
+  assert.match(html, /project-severity">0</);
+  assert.match(html, /Ancien relevé/);
+  assert.doesNotMatch(html, /Périmètre couvert/);
   report.checks[0].status = "blocked";
   summary = summarizeProject(detail.project, detail, state);
   assert.equal(summary.lastKnown, undefined);

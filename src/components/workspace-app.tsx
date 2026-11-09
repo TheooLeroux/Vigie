@@ -71,6 +71,8 @@ import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
 import { ProjectUpdates } from "./project-updates";
 import { ProjectHealthSummary } from "./project-health-summary";
 import { ProjectListActions } from "./project-list-actions";
+import { ProjectSeverityLegend } from "./project-security-badge";
+import { compareProjectSeverity } from "@/lib/project-severity";
 import type { UpdateState } from "@/lib/updates/types";
 
 type View = "sites" | "security" | "clients" | "connections" | "backup" | "activity";
@@ -216,7 +218,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
     [selectedClient, setSelectedClient] = useState<string | null>(null),
     [editClient, setEditClient] = useState<Client | undefined>(),
     [technology, setTechnology] = useState(""),
-    [sort, setSort] = useState("name"),
+    [sort, setSort] = useState("severity"),
     [layout, setLayout] = useState<"list" | "grid">("list"),
     [incompleteOnly, setIncompleteOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null),
@@ -431,10 +433,17 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
     Number(!!clientFilter) +
     Number(incompleteOnly);
 
-  function renderProjects(rows: Project[], compact = false) {
-    return <ProjectSummaries ids={rows.map(row => row.id)} request={api}>{renderProjectsContent(rows, compact)}</ProjectSummaries>;
+  function renderProjectProviders(projectId: string) {
+    const providers = [...new Set(data?.services.filter(service => service.projectId === projectId && service.provider).map(service => service.provider))].sort();
+    return <span className="project-provider-list">{providers.length ? providers.map(name => <ProviderBadge key={name} name={name} />) : <ProviderBadge name="" />}</span>;
   }
-  function renderProjectsContent(rows: Project[], compact = false) {
+  function renderProjects(rows: Project[]) {
+    return <ProjectSummaries ids={rows.map(row => row.id)} request={api}>{summaries => {
+      const ordered = sort === "severity" ? rows.toSorted((a, b) => compareProjectSeverity(summaries[a.id], summaries[b.id])) : rows;
+      return renderProjectsContent(ordered);
+    }}</ProjectSummaries>;
+  }
+  function renderProjectsContent(rows: Project[]) {
     if (!rows.length)
       return (
         <EmptyState
@@ -465,7 +474,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           }
         />
       );
-    if (layout === "grid" && !compact)
+    if (layout === "grid")
       return (
         <div className="project-grid">
           {rows.map((p) => {
@@ -488,7 +497,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                 </span>
                 <p>{p.description || "Aucune description renseignée."}</p>
                 <div className="project-card-footer">
-                  <ProviderBadge name={s?.provider || ""} />
+                  {renderProjectProviders(p.id)}
                 </div>
               </RecordLink>
             );
@@ -500,12 +509,18 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
         <table className="project-table">
           <thead>
             <tr>
-              <th>
-                Projet <ChevronDown size={11} />
+              <th aria-sort={sort === "name" ? "ascending" : undefined}>
+                <button type="button" className="project-sort-button" onClick={() => setSort("name")}>
+                  Projet {sort === "name" && <ChevronDown size={11} aria-hidden="true" />}
+                </button>
               </th>
               <th>Hébergement</th>
-              {!compact && <th>Client</th>}
-              <th>Failles connues</th>
+              <th>Client</th>
+              <th aria-sort={sort === "severity" ? "descending" : undefined}>
+                <button type="button" className="project-sort-button" onClick={() => setSort("severity")} aria-label="Failles connues, trier par gravité">
+                  Failles connues {sort === "severity" && <ChevronDown size={11} aria-hidden="true" />}
+                </button>
+              </th>
               <th>Mise à jour</th>
             </tr>
           </thead>
@@ -537,23 +552,21 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                     </RecordLink>
                   </td>
                   <td>
-                    <ProviderBadge name={s?.provider || ""} />
+                    {renderProjectProviders(p.id)}
                   </td>
-                  {!compact && (
-                    <td>
-                      {p.clientId ? (
-                        <RecordLink
-                          className="text-button record-secondary"
-                          href={`/?client=${encodeURIComponent(p.clientId)}`}
-                          onNavigate={() => openClient(p.clientId)}
-                        >
-                          {p.client}
-                        </RecordLink>
-                      ) : (
-                        <span className="subtle">À rattacher</span>
-                      )}
-                    </td>
-                  )}
+                  <td>
+                    {p.clientId ? (
+                      <RecordLink
+                        className="text-button record-secondary"
+                        href={`/?client=${encodeURIComponent(p.clientId)}`}
+                        onNavigate={() => openClient(p.clientId)}
+                      >
+                        {p.client}
+                      </RecordLink>
+                    ) : (
+                      <span className="subtle">À rattacher</span>
+                    )}
+                  </td>
                   <ProjectListActions
                     project={p}
                     request={api}
@@ -1025,7 +1038,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           </div>
         </header>
         <main className="main-content">
-          {(view === "sites" || view === "clients") && <ProjectRealtimeStatus />}
+          {(view === "sites" || view === "clients") && <ProjectRealtimeStatus onlyProblems={view === "sites"} />}
           {error && !selected && (
             <div className="error-banner" role="alert">
               {error}
@@ -1119,21 +1132,31 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                               {projects.length}
                             </span>
                           </span>
-                          <div className="view-toggle">
-                            <button
-                              className={layout === "list" ? "active" : ""}
-                              aria-label="Vue liste"
-                              onClick={() => setLayout("list")}
-                            >
-                              <List size={16} />
-                            </button>
-                            <button
-                              className={layout === "grid" ? "active" : ""}
-                              aria-label="Vue cartes"
-                              onClick={() => setLayout("grid")}
-                            >
-                              <LayoutGrid size={16} />
-                            </button>
+                          <div className="project-list-controls">
+                            <label className="sort-select">
+                              Trier par
+                              <select value={sort} onChange={event => setSort(event.target.value)} aria-label="Ordre de tri">
+                                <option value="severity">Gravité des failles</option>
+                                <option value="name">Nom du projet</option>
+                                <option value="updated">Dernière modification</option>
+                              </select>
+                            </label>
+                            <div className="view-toggle">
+                              <button
+                                className={layout === "list" ? "active" : ""}
+                                aria-label="Vue liste"
+                                onClick={() => setLayout("list")}
+                              >
+                                <List size={16} />
+                              </button>
+                              <button
+                                className={layout === "grid" ? "active" : ""}
+                                aria-label="Vue cartes"
+                                onClick={() => setLayout("grid")}
+                              >
+                                <LayoutGrid size={16} />
+                              </button>
+                            </div>
                           </div>
                         </div>
                         <div className="filter-toolbar">
@@ -1221,6 +1244,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                             </button>
                           </div>
                         )}
+                        {layout === "list" && filtered.length > 0 && <ProjectSeverityLegend />}
                         {renderProjects(filtered)}
                         <div className="table-footer">
                           <span>
@@ -1228,19 +1252,6 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                             {filtered.length > 1 ? "s" : ""} affiché
                             {filtered.length > 1 ? "s" : ""}
                           </span>
-                          <label className="sort-select">
-                            Trier par
-                            <select
-                              value={sort}
-                              onChange={(e) => setSort(e.target.value)}
-                              aria-label="Ordre de tri"
-                            >
-                              <option value="name">Nom du projet</option>
-                              <option value="updated">
-                                Dernière modification
-                              </option>
-                            </select>
-                          </label>
                         </div>
                       </section>
                     )}

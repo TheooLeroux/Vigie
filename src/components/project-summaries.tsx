@@ -6,7 +6,7 @@ import { useProjectRealtime } from "./project-realtime";
 type Request = (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
 const Context = createContext<{ summaries: Record<string, ProjectSummary>; loading: boolean }>({ summaries: {}, loading: false });
 export const useProjectSummary = (id: string) => { const state = useContext(Context); return { summary: state.summaries[id], loading: state.loading }; };
-export function ProjectSummaries({ ids, request, children }: { ids: string[]; request: Request; children: React.ReactNode }) {
+export function ProjectSummaries({ ids, request, children }: { ids: string[]; request: Request; children: (summaries: Record<string, ProjectSummary>) => React.ReactNode }) {
   const [summaries, setSummaries] = useState<Record<string, ProjectSummary>>({}), [loading, setLoading] = useState(true);
   const key = [...ids].sort().join(",");
   const { subscribe } = useProjectRealtime();
@@ -31,5 +31,5 @@ export function ProjectSummaries({ ids, request, children }: { ids: string[]; re
     setLoading(!!selected.length); queue.invalidate(selected);
     return () => { controller.abort(); queue.dispose(); unsubscribe(); };
   }, [key, request, subscribe]);
-  return <Context.Provider value={{ summaries, loading }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ summaries, loading }}>{children(summaries)}</Context.Provider>;
 }
