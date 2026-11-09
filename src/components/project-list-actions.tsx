@@ -8,10 +8,11 @@ import { ProjectSecurityBadge } from "./project-security-badge";
 
 type Request = (path: string, method?: string, payload?: unknown) => Promise<any>;
 
-export function ProjectListActions({ project, request, onOpen }: {
+export function ProjectListActions({ project, request, onOpen, layout = "list" }: {
   project: Project;
   request: Request;
   onOpen: () => void;
+  layout?: "list" | "card";
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const { summary, loading } = useProjectSummary(project.id);
@@ -35,12 +36,9 @@ export function ProjectListActions({ project, request, onOpen }: {
     } finally { setBusy(false); }
   }
 
-  return <>
-    <td>
-      {loading ? <span className="subtle" role="status"><Loader2 size={14} className="spin" aria-label="Chargement des contrôles" /></span> :
-        <ProjectSecurityBadge summary={summary} onOpen={onOpen} />}
-    </td>
-    <td>
+  const security = loading ? <span className="subtle" role="status"><Loader2 size={14} className="spin" aria-label="Chargement des contrôles" /></span> :
+    <ProjectSecurityBadge summary={summary} onOpen={onOpen} />;
+  const maintenance = <>
       {loading ? <span className="subtle">Chargement…</span> : unavailable ? <span className="project-action-unavailable">{unavailable}</span> : <button
         type="button"
         className="button secondary small record-secondary"
@@ -52,6 +50,11 @@ export function ProjectListActions({ project, request, onOpen }: {
         {busy ? refreshNeeded ? "Actualisation…" : "Lancement…" : action}
       </button>}
       {error && <p className="updates-error record-secondary" role="alert">{error}</p>}
-    </td>
   </>;
+
+  if (layout === "card") return <div className="project-card-actions">
+    <div><h4>Failles connues</h4>{security}</div>
+    <div>{maintenance}</div>
+  </div>;
+  return <><td>{security}</td><td>{maintenance}</td></>;
 }

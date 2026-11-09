@@ -152,6 +152,13 @@ html[data-theme="dark"] .project-severity.high { color: #ffc297; background: #50
 html[data-theme="dark"] .project-severity.moderate { color: #f7d582; background: #473917; }
 html[data-theme="dark"] .project-severity.low { color: #a6d7ff; background: #23384d; }
 .project-action-unavailable { display: block; max-width: 24ch; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.project-card-with-actions { position: relative; isolation: isolate; display: flex; flex-direction: column; }
+.project-card-with-actions h3 > a { color: inherit; }
+.project-card-with-actions .project-card-footer { margin-top: auto; }
+.project-card-actions { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px 14px; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.project-card-actions h4 { margin: 0 0 6px; color: var(--muted); font-size: 10px; font-weight: 600; }
+.project-card-actions > div { min-width: 0; }
+.project-card-actions .button { max-width: 100%; white-space: normal; }
 .security-severity.critical, .security-severity.high { color: #a42c3a; background: #fcecef; border-color: #edc6cd; }
 .security-severity.critical { color: #8c1e31; background: #f9dde3; border-color: #dea6b1; }
 .security-severity.moderate { color: #85601e; background: #fcf3df; border-color: #e7d5ad; }

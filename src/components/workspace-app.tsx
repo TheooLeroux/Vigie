@@ -479,17 +479,16 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           {rows.map((p) => {
             const s = data!.services.find((s) => s.projectId === p.id);
             return (
-              <RecordLink
-                className="project-card"
-                key={p.id}
-                href={`/?project=${encodeURIComponent(p.id)}`}
-                onNavigate={() => openProject(p.id)}
-              >
+              <article className="project-card project-card-with-actions" key={p.id}>
                 <div className="project-card-head">
                   <TechIcon name={s?.technology || ""} />
                   <Status project={p} data={data!} />
                 </div>
-                <h3>{p.name}</h3>
+                <h3>
+                  <RecordLink href={`/?project=${encodeURIComponent(p.id)}`} onNavigate={() => openProject(p.id)} stretch>
+                    {p.name}
+                  </RecordLink>
+                </h3>
                 <span className="subtle">{domain(p.url)}</span>
                 <span className="card-client">
                   {p.client || "Client à rattacher"}
@@ -498,7 +497,8 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                 <div className="project-card-footer">
                   {renderProjectProviders(p.id)}
                 </div>
-              </RecordLink>
+                <ProjectListActions project={p} request={api} onOpen={() => openProject(p.id)} layout="card" />
+              </article>
             );
           })}
         </div>
