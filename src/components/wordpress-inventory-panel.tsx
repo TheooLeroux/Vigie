@@ -264,7 +264,16 @@ export function WordPressInventoryPanel({
             site.
           </p>
         ) : (
-          <>
+          <details className="technical-disclosure">
+            <summary>
+              <span className="technical-disclosure-copy">
+                <strong>Détails WordPress</strong>
+                <small>{[
+                  inventory.wordpress?.version && `WordPress ${inventory.wordpress.version}`,
+                  inventory.php?.version && `PHP ${inventory.php.version}`,
+                ].filter(Boolean).join(" · ") || "Versions non relevées"}</small>
+              </span>
+            </summary>
             <div className="wp-facts">
               <div>
                 <small>WordPress</small>
@@ -476,7 +485,7 @@ export function WordPressInventoryPanel({
                 </ul>
               </details>
             )}
-          </>
+          </details>
         )}
         {(!installation.observerConfigured || inventory?.error) &&
           !installation.missingSince && (

@@ -223,6 +223,35 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   gap: 18px;
   min-width: 0;
 }
+.technical-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.technical-disclosure > summary::-webkit-details-marker { display: none; }
+.technical-disclosure > summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: none;
+  margin-inline-start: 3px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+}
+.technical-disclosure[open] > summary::after { transform: rotate(45deg); }
+.technical-disclosure[open] > summary { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+.technical-disclosure > summary:focus-visible { outline: 2px solid var(--green); outline-offset: 5px; border-radius: 4px; }
+.technical-disclosure-copy { display: grid; gap: 4px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.technical-disclosure-copy > small { color: var(--muted); line-height: 1.5; }
+.technical-disclosure-badges { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 600px) {
+  .technical-disclosure > summary { flex-wrap: wrap; }
+  .technical-disclosure > summary::after { order: 1; }
+  .technical-disclosure-badges { order: 2; flex-basis: 100%; justify-content: flex-start; }
+}
 .project-section-title {
   display: flex;
   align-items: center;

@@ -2,6 +2,19 @@
 import type { RailwayService, RailwayPackage } from "@/lib/railway-types";
 import { OutLink, formatDate } from "./ui";
 import { railwayRuntimeDeployments } from "@/lib/railway-status";
+
+function packageName(name: string) {
+  return name === "node" ? "Node.js" : name === "caddy" ? "Caddy" : name;
+}
+
+export function railwayVersionPreview(service: RailwayService) {
+  const versions = [...new Set(railwayRuntimeDeployments(service).flatMap(
+    deployment => deployment.evidence?.packages.map(pkg => `${packageName(pkg.name)} ${pkg.version}`) || [],
+  ))];
+  if (versions.length <= 3) return versions.join(" · ");
+  return `${versions.slice(0, 3).join(" · ")} · +${versions.length - 3}`;
+}
+
 function PackageVersion({ pkg }: { pkg: RailwayPackage }) {
   const r = pkg.release;
   const label =
@@ -18,13 +31,7 @@ function PackageVersion({ pkg }: { pkg: RailwayPackage }) {
   return (
     <div className="railway-package">
       <div>
-        <strong>
-          {pkg.name === "node"
-            ? "Node.js"
-            : pkg.name === "caddy"
-              ? "Caddy"
-              : pkg.name}
-        </strong>
+        <strong>{packageName(pkg.name)}</strong>
         <code>{pkg.version}</code>
         <small>
           {pkg.usage === "build"
@@ -91,6 +98,7 @@ export function RailwayBuildDetails({ service }: { service: RailwayService }) {
           ? "Code et versions du déploiement actif"
           : "Dernière tentative — aucune version active confirmée"}
       </h4>
+      <p className="connection-footnote">Les versions proviennent du build. Elles peuvent différer de celles exécutées dans le conteneur.</p>
       {deployments.map((d) => {
         const e = d.evidence;
         const source =

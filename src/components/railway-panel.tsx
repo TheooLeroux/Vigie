@@ -18,11 +18,13 @@ import type {
 import {
   railwayAttention,
   railwayServiceState,
+  railwayRuntimeDeployments,
+  railwayVersionAttention,
   deploymentLabel,
   deploymentTone,
 } from "@/lib/railway-status";
 import { RecordLink } from "./record-link";
-import { RailwayBuildDetails } from "./railway-build-details";
+import { RailwayBuildDetails, railwayVersionPreview } from "./railway-build-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -599,12 +601,6 @@ export function RailwayInventoryPanel({
             situation.
           </p>
         )}
-        <p className="subtle">
-          {item.workspaceName} · {item.environments.length} environnement(s) ·{" "}
-          {item.services.length} service(s). Les états ci-dessous décrivent les
-          déploiements Railway ; ils ne constituent pas un test de disponibilité
-          du site.
-        </p>
         {item.environments.map((env) => (
           <div className="railway-environment" key={env.id}>
             <h3>
@@ -619,8 +615,28 @@ export function RailwayInventoryPanel({
                 .filter((s) => s.environmentId === env.id)
                 .map((s) => {
                   const status = railwayServiceState(s);
+                  const active = railwayRuntimeDeployments(s);
+                  const primary = active.find(deployment => deployment.status === "SUCCESS") || active[0];
+                  const versions = railwayVersionPreview(s);
+                  const failed = ["FAILED", "CRASHED"].includes(s.latestDeployment?.status || "") &&
+                    !active.some(deployment => deployment.id === s.latestDeployment?.id);
                   return (
-                    <div className="railway-service-card record-row" key={s.id}>
+                    <details className="railway-service-card technical-disclosure" key={s.id}>
+                      <summary>
+                        <span className="technical-disclosure-copy">
+                          <strong>{s.name}</strong>
+                          {(primary || versions) && <small>
+                            {primary && <>Déploiement du {formatDate(primary.createdAt)}{active.length > 1 && ` (+${active.length - 1})`}</>}
+                            {primary && versions && " · "}
+                            {versions}
+                          </small>}
+                        </span>
+                        <span className="technical-disclosure-badges">
+                          {failed && <span className="badge warning">Dernière tentative en échec</span>}
+                          {railwayVersionAttention(s) && <span className="badge warning">Versions à vérifier</span>}
+                          <span className={`badge ${status.tone}`}>{status.label}</span>
+                        </span>
+                      </summary>
                       <div className="railway-service-title">
                         <a
                           className="record-link"
@@ -628,11 +644,8 @@ export function RailwayInventoryPanel({
                           target="_blank"
                           rel="noopener noreferrer"
                         >
-                          <strong>{s.name}</strong>
+                          Ouvrir dans Railway
                         </a>
-                        <span className={`badge ${status.tone}`}>
-                          {status.label}
-                        </span>
                       </div>
                       <p>
                         {s.domains.length
@@ -702,19 +715,12 @@ export function RailwayInventoryPanel({
                           <small>Aucune</small>
                         )}
                       </div>
-                    </div>
+                    </details>
                   );
                 })}
             </div>
           </div>
         ))}
-        <p className="connection-footnote">
-          Les versions ci-dessus sont résolues lors de la construction du
-          déploiement indiqué. Elles ne proviennent pas d’une commande exécutée
-          dans le conteneur. Une image Docker configurée et son tag ne suffisent
-          pas à confirmer une version exacte. Les dépendances applicatives ne
-          sont pas encore collectées.
-        </p>
       </div>
     </section>
   );

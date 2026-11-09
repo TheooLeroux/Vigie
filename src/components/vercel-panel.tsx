@@ -1068,7 +1068,19 @@ export function VercelInventoryPanel({
             situation.
           </p>
         )}
-        <VercelFacts item={item} />
+        <details className="technical-disclosure">
+          <summary>
+            <span className="technical-disclosure-copy">
+              <strong>Détails du déploiement</strong>
+              {item.production && <small>
+                Déploiement du {formatDate(item.production.createdAt)}
+                {item.production.framework && ` · ${item.production.framework}`}
+                {item.production.nodeBranch && ` · Branche Node ${item.production.nodeBranch}`}
+              </small>}
+            </span>
+          </summary>
+          <VercelFacts item={item} />
+        </details>
       </div>
     </section>
   );
