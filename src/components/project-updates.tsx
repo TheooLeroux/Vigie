@@ -121,6 +121,18 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
+export function MaintenanceDetails({ label, status, warning, children }: {
+  label: string;
+  status?: string;
+  warning?: boolean;
+  children: ReactNode;
+}) {
+  return <details className="maintenance-details">
+    <summary><span>{label}</span>{status && <span className={warning ? "maintenance-warning" : "maintenance-status"}>{status}</span>}</summary>
+    <div className="maintenance-details-content">{children}</div>
+  </details>;
+}
+
 export function ProjectUpdates({ projectId, request, onState, embedded = false, children, overviewActionTarget }: {
   projectId: string;
   request: Request;
@@ -173,44 +185,58 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
     {busy || active ? "Mise à jour en cours" : "Mettre à jour"}
   </button>;
   const errorNotice = error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>;
+  const closeButton = latest && !["completed", "failed"].includes(latest.stage) && Date.now() - Date.parse(latest.updatedAt) > 30 * 60_000 && <button className="button secondary updates-close-button" onClick={async () => {
+          if (!window.confirm("Confirmez avoir vérifié les déploiements et le site chez l’hébergeur. Clôturer ne restaure ni le code ni les données ; cela autorise une prochaine mise à jour.")) return;
+          try { await request(`updates/${latest.id}/close`, "POST", { confirmed: true }); await refresh(); }
+          catch (error) { setError(error instanceof Error ? error.message : "Clôture non confirmée."); }
+        }}>Clôturer après vérification manuelle</button>;
+  const maintenanceStatus = !state ? !error && "Chargement de la maintenance…"
+    : assessmentActive ? "Vérification des versions en cours."
+    : !state.enabled ? "Maintenance non activée."
+    : available.length ? null
+    : state.targets.length ? "Aucun service éligible à la maintenance automatique." : "Aucun service rattaché à la maintenance.";
   return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
     {overviewActionTarget && createPortal(<>{updateButton}{errorNotice}</>, overviewActionTarget)}
-    <div className="updates-heading"><div>{!embedded && <h2>Maintenance</h2>}<p>Versions à installer et points à traiter.</p></div>
+    <div className="updates-heading"><div>{!embedded && <h2>Maintenance</h2>}</div>
       {updateButton}
     </div>
     {errorNotice}
-    {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
-    {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
-    {latest && (active ? <UpdateProgress run={latest} /> : <details className="updates-details">
-      <summary>{updateStopSummary(latest)?.title || "Dernière mise à jour terminée"} · {formatDate(latest.updatedAt)}</summary>
-      <UpdateProgress run={latest} />
-    </details>)}
-    {state && (!embedded || !state.enabled || !state.targets.length || state.targets.some(target => target.unavailable)) && <UpdateReadiness state={state} />}
-    {children}
-    {state?.targets.some(target => target.provider !== "o2switch") && <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>}
-    {state?.targets.some(target => target.capability) && <details className="updates-details"><summary>Périmètre et conditions de maintenance</summary><MaintenanceScope targets={state.targets} />
-    {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
-    {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
-    </details>}
-    {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button> · Ce service uniquement.</p>)}
-    <ManagedNodeNotice run={latest} />
-    {!!latest?.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}
-    <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />
-    {!!state?.currentSecurity?.length && <details className="updates-details"><summary>Rapports de sécurité</summary>
-      {state.currentSecurity.map(observation => <details className="updates-security-report" key={observation.targetId}><summary>{state.targets.find(target => target.id === observation.targetId)?.name || "Service"}{observation.check ? ` · ${observation.check.findings.length} signalement(s)` : " · indisponible"}</summary>{observation.error && <p role="status">{observation.error}</p>}{observation.check && <><p>{formatDate(observation.check.checkedAt)} · Ce contrôle ne lance aucune mise à jour. Les rapports des exécutions précédentes restent dans l’historique.</p>{observation.check.findings.map(finding => <FindingDetails key={finding.id} finding={finding} />)}{!observation.check.findings.length && <p>Aucune vulnérabilité connue dans le périmètre contrôlé.</p>}</>}{observation.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>)}
-    </details>}
-    <details className="updates-details"><summary>Configuration et compte rendu</summary>
-      <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "Sauvegarde fichiers et base avant modification, contrôle gratuit WPVulnerability. PHP reste géré par l’hébergeur ; pour les thèmes, utilisez WordPress → Apparence → Thèmes."}</p>
-      {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : target.mode === "image" ? "Image officielle Railway" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && target.mode !== "image" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
-      {latest?.results.map(result => <div className="updates-target" key={result.targetId}><strong>{result.name} — {updateStageLabels[result.stage]}</strong><p>{result.message}</p><RemainingNpmFindings result={result} />{result.commit && <p>Commit publié : <code>{result.commit.slice(0, 10)}</code></p>}{result.deploymentId && <p>Déploiement : <code>{result.deploymentId}</code></p>}{result.previousDeploymentId && <p>Déploiement précédent conservé : <code>{result.previousDeploymentId}</code></p>}{result.imageUpdate?.rollbackDeploymentId && <p>Retour et connexion contrôlés : <code>{result.imageUpdate.rollbackDeploymentId}</code></p>}{result.backup && <p>Sauvegarde privée sur o2switch : <code>{result.backup}</code>. Sa restauration reste manuelle pour ne pas écraser de nouvelles données.</p>}{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
-        {result.checks?.map((check, index) => <details key={index}><summary>{check.tool === "Static" ? "Fichiers statiques" : check.tool} · {check.phase === "before" ? "Avant mise à jour" : check.phase === "candidate" ? "Version candidate" : "Après installation"} · {check.status === "blocked" ? "Bloqué" : check.status === "warning" ? "Avec réserves" : "Vérifié"}</summary><p>{check.scope} · {formatDate(check.checkedAt)}</p><p>{check.message}</p>{check.staticEvidence && <p>{check.staticEvidence.fileCount} fichier(s) · Node du build de validation : {check.staticEvidence.buildNodeVersion} · Déploiement : <code>{check.staticEvidence.deploymentId}</code> · Empreinte SHA-256 : <code>{check.staticEvidence.artifactHash}</code></p>}{check.findings.slice(0, 20).map((finding, findingIndex) => <p key={findingIndex}><code>{finding.package}@{finding.version}</code> · {finding.id} · {finding.severity}</p>)}{check.findings.length > 20 && <p>{check.findings.length - 20} autre(s) alerte(s) conservée(s) dans le rapport.</p>}</details>)}
-      </div>)}
-      {latest && !["completed", "failed"].includes(latest.stage) && Date.now() - Date.parse(latest.updatedAt) > 30 * 60_000 && <button className="button secondary" onClick={async () => {
-        if (!window.confirm("Confirmez avoir vérifié les déploiements et le site chez l’hébergeur. Clôturer ne restaure ni le code ni les données ; cela autorise une prochaine mise à jour.")) return;
-        try { await request(`updates/${latest.id}/close`, "POST", { confirmed: true }); await refresh(); }
-        catch (error) { setError(error instanceof Error ? error.message : "Clôture non confirmée."); }
-      }}>Clôturer après vérification manuelle</button>}
-      <p className="updates-note">Les tests automatiques et le contrôle HTTPS ne garantissent pas tous les parcours métier. Une restauration de base de données n’est jamais lancée automatiquement.</p>
-    </details>
+    {maintenanceStatus && <p className="updates-note" role="status">{maintenanceStatus}</p>}
+    {active && <><UpdateProgress run={latest} />{closeButton}</>}
+    <div className="maintenance-sections">
+      {children}
+      {latest && !active && <MaintenanceDetails label="Dernière tentative"
+        status={`${updateStopSummary(latest)?.title || "Terminée"} · ${formatDate(latest.updatedAt)}`} warning={latest.stage !== "completed"}>
+        <UpdateProgress run={latest} />
+        <ManagedNodeNotice run={latest} />
+        {!!latest.excludedTargets?.length && <details className="updates-details"><summary>Services hors de la dernière maintenance · {latest.excludedTargets.length}</summary>{latest.excludedTargets.map(target => <p key={target.targetId}><strong>{target.name}</strong> : {target.reason}</p>)}</details>}
+        {!!latest.results.length && <details className="updates-details"><summary>Compte rendu par service</summary>
+          {latest.results.map(result => <div className="updates-target" key={result.targetId}><strong>{result.name} — {updateStageLabels[result.stage]}</strong><p>{result.message}</p><RemainingNpmFindings result={result} />{result.commit && <p>Commit publié : <code>{result.commit.slice(0, 10)}</code></p>}{result.deploymentId && <p>Déploiement : <code>{result.deploymentId}</code></p>}{result.previousDeploymentId && <p>Déploiement précédent conservé : <code>{result.previousDeploymentId}</code></p>}{result.imageUpdate?.rollbackDeploymentId && <p>Retour et connexion contrôlés : <code>{result.imageUpdate.rollbackDeploymentId}</code></p>}{result.backup && <p>Sauvegarde privée sur o2switch : <code>{result.backup}</code>. Sa restauration reste manuelle pour ne pas écraser de nouvelles données.</p>}{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
+            {result.checks?.map((check, index) => <details key={index}><summary>{check.tool === "Static" ? "Fichiers statiques" : check.tool} · {check.phase === "before" ? "Avant mise à jour" : check.phase === "candidate" ? "Version candidate" : "Après installation"} · {check.status === "blocked" ? "Bloqué" : check.status === "warning" ? "Avec réserves" : "Vérifié"}</summary><p>{check.scope} · {formatDate(check.checkedAt)}</p><p>{check.message}</p>{check.staticEvidence && <p>{check.staticEvidence.fileCount} fichier(s) · Node du build de validation : {check.staticEvidence.buildNodeVersion} · Déploiement : <code>{check.staticEvidence.deploymentId}</code> · Empreinte SHA-256 : <code>{check.staticEvidence.artifactHash}</code></p>}{check.findings.slice(0, 20).map((finding, findingIndex) => <p key={findingIndex}><code>{finding.package}@{finding.version}</code> · {finding.id} · {finding.severity}</p>)}{check.findings.length > 20 && <p>{check.findings.length - 20} autre(s) alerte(s) conservée(s) dans le rapport.</p>}</details>)}
+          </div>)}
+        </details>}
+        {closeButton}
+      </MaintenanceDetails>}
+      {state && <MaintenanceDetails label="Services et configuration"
+        status={state.enabled && available.length > 0 && available.length < state.targets.length ? `${available.length}/${state.targets.length} services éligibles` : undefined}>
+        <UpdateReadiness state={state} />
+        <WordPressManualUpdates run={latest} observations={state?.currentSecurity} targets={state?.targets} />
+        {!!state?.currentSecurity?.length && <details className="updates-details"><summary>Rapports de sécurité</summary>
+          {state.currentSecurity.map(observation => <details className="updates-security-report" key={observation.targetId}><summary>{state.targets.find(target => target.id === observation.targetId)?.name || "Service"}{observation.check ? ` · ${observation.check.findings.length} signalement(s)` : " · indisponible"}</summary>{observation.error && <p role="status">{observation.error}</p>}{observation.check && <><p>{formatDate(observation.check.checkedAt)} · Ce contrôle ne lance aucune mise à jour. Les rapports des exécutions précédentes restent dans l’historique.</p>{observation.check.findings.map(finding => <FindingDetails key={finding.id} finding={finding} />)}{!observation.check.findings.length && <p>Aucune vulnérabilité connue dans le périmètre contrôlé.</p>}</>}{observation.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>)}
+        </details>}
+        {state?.targets.some(target => target.capability) && <details className="updates-details"><summary>Conditions par type de service</summary><MaintenanceScope targets={state.targets} />
+        {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
+        {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
+        </details>}
+        {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button></p>)}
+        {state.targets.some(target => target.provider !== "o2switch") && <details className="updates-details"><summary>Relevés d’hébergement</summary>
+          <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>
+          {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
+        </details>}
+        <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "Sauvegarde fichiers et base avant modification, contrôle gratuit WPVulnerability. PHP reste géré par l’hébergeur ; pour les thèmes, utilisez WordPress → Apparence → Thèmes."}</p>
+        {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : target.mode === "image" ? "Image officielle Railway" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && target.mode !== "image" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
+        <p className="updates-note">Les tests automatiques et le contrôle HTTPS ne garantissent pas tous les parcours métier. Une restauration de base de données n’est jamais lancée automatiquement.</p>
+      </MaintenanceDetails>}
+    </div>
   </section>;
 }

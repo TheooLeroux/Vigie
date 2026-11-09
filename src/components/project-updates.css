@@ -16,3 +16,21 @@
 .updates-progress>svg{flex-shrink:0}
 .updates-progress ul{padding-left:18px;margin-top:6px}
 .updates-progress li{font-size:12px;line-height:1.7;margin-top:6px}
+
+.maintenance-sections{margin-top:14px}
+.maintenance-details{border-top:1px solid var(--line);font-size:12px}
+.maintenance-details>summary{display:grid;grid-template-columns:auto auto minmax(0,1fr);align-items:center;gap:10px;min-height:42px;padding:8px 0;cursor:pointer;font-weight:600;color:var(--ink);list-style:none}
+.maintenance-details>summary::-webkit-details-marker{display:none}
+.maintenance-details>summary::before{content:"";width:6px;height:6px;margin-inline:2px 4px;border:solid var(--muted);border-width:0 1px 1px 0;transform:rotate(-45deg)}
+.maintenance-details[open]>summary::before{transform:rotate(45deg)}
+.maintenance-details>summary:hover>span:first-of-type{text-decoration:underline}
+.maintenance-details>summary:focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:4px}
+.maintenance-status,.maintenance-warning{font-weight:400;overflow-wrap:anywhere}
+.maintenance-status{color:var(--muted)}
+.maintenance-warning{color:var(--amber)}
+.maintenance-details-content{padding:0 0 14px 22px}
+.maintenance-details-content>.updates-note:first-child,.maintenance-details-content>.updates-progress:first-child{margin-top:0}
+.updates-close-button{margin-top:14px}
+.maintenance-details-content .updates-note>ul{padding-inline-start:18px}
+@media(max-width:600px){.maintenance-details>summary{grid-template-columns:auto minmax(0,1fr);row-gap:3px}.maintenance-details>summary>span:nth-of-type(2){grid-column:2;text-align:start}}
+@media(max-width:700px){.project-updates:not(.updates-embedded) .updates-heading{flex-direction:row;align-items:center}.project-updates:not(.updates-embedded) .updates-heading .button{width:auto}}
