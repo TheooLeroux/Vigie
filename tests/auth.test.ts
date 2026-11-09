@@ -62,7 +62,7 @@ test("Configuration absente : aucune session ni accès implicite", async () => {
 });
 
 test("Inventaire et exports refusés sans authentification ou avec un cookie falsifié", async () => {
-  for (const path of ["workspace", "export"]) {
+  for (const path of ["workspace", "export", "security-watch"]) {
     for (const cookie of ["", "vigie.session_token=forged.signature"]) {
       const response = await GET(
         new Request(`${base}/api/${path}`, { headers: { cookie } }),

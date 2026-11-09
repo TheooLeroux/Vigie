@@ -28,6 +28,7 @@ import {
   Plus,
   Search,
   Server,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   UserRound,
@@ -40,6 +41,7 @@ import { createRefreshQueue } from "@/lib/project-realtime";
 import { observedInventory } from "@/lib/project-summary";
 import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
+import { SecurityWatchPanel } from "./security-watch-panel";
 import { ClientsPanel } from "./clients-panel";
 import { ConnectionsPanel } from "./connections-panel";
 import { ExistingProjectForm } from "./existing-project-form";
@@ -70,7 +72,7 @@ import { ProjectHealthSummary } from "./project-health-summary";
 import { ProjectListActions } from "./project-list-actions";
 import type { UpdateState } from "@/lib/updates/types";
 
-type View = "sites" | "clients" | "connections" | "backup" | "activity";
+type View = "sites" | "security" | "clients" | "connections" | "backup" | "activity";
 const projectTabs = [
   { id: "overview", label: "Vue d’ensemble" },
   { id: "technical", label: "Technique" },
@@ -92,6 +94,7 @@ type Dialog =
   | null;
 const navigation = [
   { id: "sites", label: "Sites & projets", icon: Globe2 },
+  { id: "security", label: "Veille sécurité", icon: ShieldAlert },
   { id: "clients", label: "Clients", icon: Building2 },
   { id: "connections", label: "Connexions", icon: Link2 },
   { id: "backup", label: "Backup", icon: Database },
@@ -115,6 +118,11 @@ const titles: Record<
     title: "Sites & projets",
     description: "Sites, versions connues et hébergements.",
     kicker: "VOTRE PARC WEB",
+  },
+  security: {
+    title: "Veille sécurité",
+    description: "Les failles détectées sur votre parc et les derniers avis publics.",
+    kicker: "SÉCURITÉ DU PARC",
   },
   backup: { title: "Backup", description: "", kicker: "SAUVEGARDES" },
   activity: {
@@ -1224,6 +1232,7 @@ function WorkspaceContent({
                     {view === "backup" && (
                       <BackupsPanel request={api} onProject={openProject} />
                     )}
+                    {view === "security" && <SecurityWatchPanel request={api} onProject={openProject} />}
                     {view === "activity" && (
                       <ActivityPanel
                         items={data.activity}

@@ -1,0 +1,78 @@
+.security-watch {
+  display: grid;
+  gap: 20px;
+}
+.watch-toolbar, .watch-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.watch-toolbar {
+  align-items: center;
+}
+.watch-panel {
+  overflow-wrap: anywhere;
+}
+.watch-panel > header, .watch-advisory, .watch-empty {
+  padding: 16px clamp(14px, 3vw, 24px);
+}
+.watch-panel h2, .watch-link, .watch-panel header a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.watch-panel h2 {
+  gap: 9px;
+  font-size: 17px;
+}
+.watch-panel h3 {
+  margin-top: 4px;
+}
+.watch-panel p, .watch-toolbar p, .watch-affected {
+  font-size: 12px;
+  color: var(--text);
+}
+.watch-panel header p {
+  margin-top: 6px;
+}
+.watch-panel a {
+  color: var(--green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.watch-list, .watch-affected {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.watch-advisory, .watch-empty {
+  border-top: 1px solid var(--line);
+}
+.watch-row > div {
+  flex: 1 1 210px;
+  min-width: 0;
+}
+.watch-panel .watch-meta, .watch-panel time {
+  font-size: 11px;
+  color: var(--text);
+}
+.watch-affected {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+.watch-affected li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  border-radius: 6px;
+  background: var(--soft);
+  padding: 8px 10px;
+}
+.watch-link {
+  margin-top: 8px;
+  font-size: 12px;
+}
