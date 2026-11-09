@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
 import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
@@ -112,7 +112,7 @@ function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTa
     <button className="button secondary" disabled={busy}>{busy ? "Demande en cours…" : target.mode === "wordpress" ? "Réessayer l’installation automatique" : "Enregistrer la configuration"}</button>
   </form>;
 }
-export function ProjectUpdates({ projectId, request, onState, embedded = false }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void; embedded?: boolean }) {
+export function ProjectUpdates({ projectId, request, onState, embedded = false, children }: { projectId: string; request: Request; onState?: (projectId: string, state: UpdateState | null) => void; embedded?: boolean; children?: ReactNode }) {
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true);
   const refreshing = useRef(false);
@@ -160,6 +160,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false }
     {error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>}
     {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
     {!state && !error && <p className="updates-note">Chargement des mises à jour…</p>}
+    {children}
     {state && (!embedded || !state.enabled || !state.targets.length || state.targets.some(target => target.unavailable)) && <UpdateReadiness state={state} />}
     {state?.targets.some(target => target.provider !== "o2switch") && <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>}
     {state?.targets.some(target => target.capability) && <details className="updates-details"><summary>Périmètre et conditions de maintenance</summary><MaintenanceScope targets={state.targets} />

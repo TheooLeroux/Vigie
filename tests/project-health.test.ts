@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { projectHealth } from "../src/lib/project-health";
-import { ProjectHealthSummary } from "../src/components/project-health-summary";
+import { ProjectHealthSummary, ProjectMaintenanceSummary } from "../src/components/project-health-summary";
 import { healthCheck, healthFixture, healthRelease, healthUpdates, healthAt } from "./project-health-fixture";
 
 test("Résumé projet : correctif de sécurité et mise à jour du déploiement actif visibles ensemble", () => {
@@ -15,10 +15,12 @@ test("Résumé projet : correctif de sécurité et mise à jour du déploiement 
   assert.equal(state.updates.length, 1);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail }));
   assert.match(html, /Alertes de sécurité/);
-  assert.match(html, /Mises à jour disponibles/);
   assert.match(html, /correctif de sécurité manquant/);
-  assert.match(html, /24.21.0 → 24.22.1/);
-  assert.match(html, /<summary>Voir les composants concernés<\/summary>/);
+  assert.doesNotMatch(html, /Voir les composants concernés/);
+  const maintenance = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail }));
+  assert.match(maintenance, /Mises à jour disponibles/);
+  assert.match(maintenance, /24.21.0 → 24.22.1/);
+  assert.match(maintenance, /<summary>Voir les composants concernés<\/summary>/);
 });
 
 test("Résumé projet : une dernière tentative échouée ne remplace pas les versions actives", () => {
@@ -49,19 +51,19 @@ test("Résumé projet : candidats rejetés exclus, réserves acceptées conserv�
 test("Objectif sécurité : des correctifs restants ne donnent jamais aucune mise à jour signalée", () => {
   const detail = healthFixture();
   const accepted = healthUpdates([healthCheck({ findings: [{ ...healthCheck().findings[0], fixedVersions: ["2.0.3"] }] })]);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: accepted }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: accepted }));
   assert.match(html, /Correctifs de sécurité à valider/);
   assert.match(html, /2.0.3/);
   assert.doesNotMatch(html, /Aucune mise à jour signalée/);
   const unresolved = healthUpdates([healthCheck()]);
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: unresolved })), /Sécurité non résolue/);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: unresolved })), /Sécurité non résolue/);
   const failed = healthUpdates([healthCheck({ status: "blocked" })]);
   failed.runs[0].id = "new-search";
   failed.runs[0].stage = "failed";
   failed.runs[0].results[0].stage = "failed";
   failed.runs.push(...accepted.runs);
   assert.equal(projectHealth(detail, failed).security.length, 1, "un essai récent rejeté ne doit pas effacer les alertes du déploiement encore actif");
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: failed })), /Combinaison sûre non validée/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: failed })), /Combinaison sûre non validée|Versions et correctifs|Bilan quotidien/);
 });
 
 test("Résumé projet : inventaire en retard après publication ne réannonce pas l’ancien Node vulnérable", () => {
@@ -80,7 +82,7 @@ test("Résumé projet : absence de catalogue ne devient pas un état sécurisé 
   detail.railway = [];
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: null }));
   assert.match(html, /Sécurité à vérifier/);
-  assert.match(html, /Versions à vérifier/);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: null })), /Versions à vérifier/);
   assert.doesNotMatch(html, /Aucune alerte connue|Aucune mise à jour signalée/);
   detail.railway = healthFixture().railway;
   detail.railway![0].connectionError = "Relevé indisponible";
@@ -109,10 +111,10 @@ test("Résumé projet : nouvelle LTS et contrôles non terminés restent explici
   assert.equal(projectHealth(detail).updates.length, 1);
   const updates = healthUpdates();
   updates.runs[0].stage = "verifying";
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates })), /Mise à jour en cours/);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates })), /Mise à jour en cours/);
   updates.runs[0].stage = "attention";
   release.latestLts = "24.22.1";
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates })), /Vérification requise/);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates })), /Vérification requise/);
 });
 test("Résumé projet : Vercel distingue la branche Node du correctif exact et les mises à jour de framework", () => {
   const detail = healthFixture();

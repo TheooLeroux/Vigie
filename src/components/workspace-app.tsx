@@ -69,7 +69,7 @@ import {
 import { VercelInventoryPanel } from "./vercel-panel";
 import { WordPressInventoryPanel } from "./wordpress-inventory-panel";
 import { ProjectUpdates } from "./project-updates";
-import { ProjectHealthSummary } from "./project-health-summary";
+import { ProjectHealthSummary, ProjectMaintenanceSummary } from "./project-health-summary";
 import { ProjectListActions } from "./project-list-actions";
 import { compareProjectSeverity } from "@/lib/project-severity";
 import type { UpdateState } from "@/lib/updates/types";
@@ -665,10 +665,12 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           ))}
         </div>
         <div className="project-content project-tab-panel" id="project-panel-overview" role="tabpanel" aria-labelledby="project-tab-overview" hidden={projectTab !== "overview"} tabIndex={0}>
-          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable}
-            maintenance={<ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} embedded />} />
+          <ProjectHealthSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} updatesUnavailable={projectUpdateState?.projectId === p.id && projectUpdateState.unavailable} />
         </div>
         <div className="project-content project-tab-panel" id="project-panel-technical" role="tabpanel" aria-labelledby="project-tab-technical" hidden={projectTab !== "technical"} tabIndex={0}>
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState}>
+            <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
+          </ProjectUpdates>
           <section
             className="project-monitoring"
             id="project-technical"

@@ -86,7 +86,7 @@ test("Fiche : le motif documenté est visible sans ouvrir la faille et reste li�
   const markup = () => renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
   const html = markup();
   assert.equal(html.match(/<article\b/g)?.length, 1);
-  assert.match(html, /Sécurité et mises à jour/);
+  assert.match(html, /aria-label="Failles du projet"/);
   const summaries = [...html.matchAll(/<details class="security-finding"><summary>(.*?)<\/summary>/g)].map(match => match[1]);
   const blockedSummary = summaries.find(summary => summary.includes("La faille bloque la proposition de mise à jour"));
   assert.match(blockedSummary || "", /security-finding-reason.*La dépendance parente impose encore cette version/);
@@ -99,6 +99,16 @@ test("Fiche : le motif documenté est visible sans ouvrir la faille et reste li�
   state.assessment.assessmentSources![target.id] = "ancien-déploiement";
   const stale = markup();
   assert.doesNotMatch(stale, /security-finding-reason|Compatibilité du correctif à confirmer/);
+
+  const actualRun = healthUpdates([healthCheck({ npmRetained: blocked.findings })]).runs[0];
+  state.runs = [actualRun];
+  assert.match(markup(), /security-finding-reason.*Toujours présente après la mise à jour.*La dépendance parente impose encore cette version/);
+  actualRun.results[0].checks = [blocked];
+  actualRun.stage = actualRun.results[0].stage = "failed";
+  actualRun.results[0].previousDeploymentId = "deployed";
+  assert.match(markup(), /security-finding-reason.*La version proposée contient encore cette faille/);
+  actualRun.results[0].previousDeploymentId = "ancien-déploiement";
+  assert.doesNotMatch(markup(), /security-finding-reason/);
 });
 
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {

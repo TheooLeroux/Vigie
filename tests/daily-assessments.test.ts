@@ -15,7 +15,7 @@ import { wordpressPlanSchema } from "../src/lib/updates/wordpress-security";
 import { agentDirectory } from "../src/lib/updates/wordpress-agent";
 import type { SiteInventory } from "../src/lib/types";
 import type { UpdateResult } from "../src/lib/updates/types";
-import { ProjectHealthSummary } from "../src/components/project-health-summary";
+import { ProjectMaintenanceSummary } from "../src/components/project-health-summary";
 import type { UpdateRun } from "../src/lib/updates/types";
 import { healthFixture, healthUpdates, healthRelease } from "./project-health-fixture";
 
@@ -36,7 +36,7 @@ test("Bilan : une combinaison actuelle validée remplace les estimations du cata
   const { detail, state } = fixture();
   assert.equal(currentAssessmentResults(detail, state).length, 1);
   assert.equal(projectHealth(detail, state).updates.length, 0);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Aucune meilleure version validée/);
   assert.doesNotMatch(html, /Mises à jour disponibles|9\.0\.0/);
   assert.match(html, /Aucune installation ni publication automatique/);
@@ -59,7 +59,7 @@ test("Bilan NES App : un contrôle final avec réserve distingue la correction d
   assert.equal(assessmentResultIsSafe(result), false);
   result.checks.push(securityCheck("Trivy", "candidate", "Image finale", []));
   assert.equal(assessmentResultIsSafe(result), true);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Failles npm corrigées dans la proposition.*glob \(CVE-2026-118773\)/);
   assert.match(html, /Failles npm qui resteraient après la mise à jour/);
   assert.match(html, /ESLint 10\.14\.0 exige la branche 10\. Le correctif commence en 11\.0\.1/);
@@ -68,7 +68,7 @@ test("Bilan NES App : un contrôle final avec réserve distingue la correction d
 test("Bilan : seules les propositions testées sont comptées pour le bloc validé", () => {
   const { detail, state } = fixture(["library : 1.0.0 → 1.2.0"]);
   assert.deepEqual(projectHealth(detail, state).updates, ["Backend · library : 1.0.0 → 1.2.0"]);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Propositions validées avant installation/);
   assert.doesNotMatch(html, /9\.0\.0/);
 });
@@ -96,7 +96,7 @@ test("Bilan : un rapport partiel ne valide pas les autres blocs", () => {
   state.assessment!.results.push({ targetId: "second", name: "Second", stage: "failed", warnings: [], message: "Tests en échec." });
   assert.equal(projectHealth(detail, state).assessedServices, 1);
   assert.ok(projectHealth(detail, state).updates.some(update => update.includes("Second")));
-  assert.match(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state })), /Bilan partiel|À actualiser/);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state })), /Bilan partiel|À actualiser/);
 });
 
 test("Plan quotidien : projets archivés exclus, installation en cours différée, échec isolé", async () => {

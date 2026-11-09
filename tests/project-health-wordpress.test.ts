@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { projectHealth } from "../src/lib/project-health";
-import { ProjectHealthSummary } from "../src/components/project-health-summary";
+import { ProjectHealthSummary, ProjectMaintenanceSummary } from "../src/components/project-health-summary";
 import { healthFixture, healthUpdates, healthCheck, healthAt } from "./project-health-fixture";
 import type { SiteInventory, WordPressComponent } from "../src/lib/types";
 import { wordpressSecurityVersions } from "../src/lib/updates/wordpress-security-key";
@@ -27,7 +27,7 @@ test("WordPress : succès avec extension privée et deux thèmes restants expliq
   const { detail, state } = wordpressFixture(), health = projectHealth(detail, state);
   assert.equal(health.updates.length, 3);
   assert.equal(health.manualUpdates.length, 3);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Interventions manuelles requises/);
   assert.match(html, /Vigie ne peut pas télécharger cette extension/);
   assert.match(html, /Vigie ne met pas les thèmes à jour actuellement/);
@@ -47,7 +47,7 @@ test("WordPress : les mises à jour publiques restent disponibles et PHP est gé
   const health = projectHealth(detail, state);
   assert.equal(health.manualUpdates.length, 4);
   assert.equal(health.updates.length, 5);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Mises à jour disponibles/);
   assert.match(html, /public-plugin : 1.0 → 2.0/);
   assert.match(html, /PHP est affiché uniquement/);
@@ -109,16 +109,16 @@ test("WordPress : le résumé distingue la configuration actuelle de l’ancien 
   state.targets = state.runs[0].targets;
   state.enabled = false;
   state.disabledReason = "L’exécuteur de maintenance n’est pas connecté à cette instance de Vigie.";
-  let html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  let html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary,{detail,updates:state}));
   assert.match(html, /Maintenance non activée/);
   assert.match(html, /exécuteur de maintenance n’est pas connecté/);
   assert.doesNotMatch(html, /Dernière tentative WordPress bloquée|Combinaison sûre non validée/);
   state.enabled = true;
   state.targets[0].unavailable = "Le contrôle de l’agent a expiré.";
-  html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary,{detail,updates:state}));
   assert.match(html, /Vérification technique requise/);
   state.targets[0].unavailable = null;
-  html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary,{detail,updates:state}));
   assert.match(html, /Interventions manuelles requises/);
 });
 
@@ -128,7 +128,7 @@ test("WordPress : les correctifs manuels ne gonflent pas le compteur automatique
   state.currentSecurity = [{targetId:"target",versions:wordpressSecurityVersions(inventory),warnings:state.runs[0].results[0].warnings,check:healthCheck({tool:"WPVulnerability",phase:"before",findings:[{...healthCheck().findings[0],package:"plugins/private-pro",version:"3.0.103",scope:undefined,fixedVersions:["3.0.124"]}]})}];
   const health = projectHealth(detail,state);
   assert.equal(health.manualSecurityFixes.length,1);
-  const html = renderToStaticMarkup(createElement(ProjectHealthSummary,{detail,updates:state}));
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary,{detail,updates:state}));
   assert.match(html,/Interventions manuelles requises/);
   assert.match(html,/Correctifs de sécurité à traiter manuellement/);
   assert.doesNotMatch(html,/1 correctif\(s\) ou mise\(s\) à jour à examiner/);
