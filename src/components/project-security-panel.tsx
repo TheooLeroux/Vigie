@@ -10,7 +10,7 @@ const severityLabels = { critical: "Critique", high: "Élevée", moderate: "Mod�
 const usageLabels = { runtime: "Dépendance de production", build: "Développement / construction", unknown: "Usage à qualifier" };
 const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
 
-type ExplainRemediation = (item: ProjectVulnerability) => RemediationReason;
+type ExplainRemediation = (item: ProjectVulnerability) => RemediationReason | undefined;
 
 function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
   return <ul className="security-findings">{items.map(item => {
@@ -21,13 +21,13 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
           <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
           <span className="security-finding-content">
             <strong>{item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}</strong>
-            <span>{item.package} <span className="security-version">{item.version}</span>{reason && <> · <span className="security-finding-reason">{reason.label}</span></>}</span>
+            <span>{item.package} <span className="security-version">{item.version}</span></span>
+            {reason && <span className="security-finding-reason"><strong>{reason.label}</strong>{reason.detail && <span>{reason.detail}</span>}</span>}
           </span>
           <span className="security-finding-reference">{item.id}</span>
         </summary>
         <div className="security-finding-body">
           {item.explanation && <p>{item.explanation}</p>}
-          {reason?.detail && <p><strong>Pourquoi la faille est toujours là :</strong> {reason.detail}</p>}
           <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) correctrice(s) indiquée(s) dans le rapport : {item.fixedVersions.join(", ")}.</> : "aucune version correctrice indiquée dans ce rapport."}</p>
           <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
           <small>Références : {item.aliases.join(" · ") || item.id}</small>
@@ -46,13 +46,13 @@ function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?:
     entries.push(item);
     blocks.set(item.targetId, entries);
   }
-  return <div className="security-findings-group">{[...blocks].map(([targetId, entries]) => {
+  return <div className={explain ? "security-findings-group security-current-findings" : "security-findings-group"}>{[...blocks].map(([targetId, entries]) => {
     const visible = entries.filter(item => visibleKeys.has(item.key));
     const remaining = entries.filter(item => !visibleKeys.has(item.key));
     return <details className="security-findings-block" open={visible.length > 0} key={targetId}>
       <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
       {visible.length > 0 && <FindingRows items={visible} explain={explain} />}
-      {remaining.length > 0 && <details className="health-details security-more"><summary>Voir les {remaining.length} autres signalements</summary><FindingRows items={remaining} explain={explain} /></details>}
+      {remaining.length > 0 && <details className="health-details security-more"><summary>{remaining.length === 1 ? "Voir l’autre signalement" : `Voir les ${remaining.length} autres signalements`}</summary><FindingRows items={remaining} explain={explain} /></details>}
     </details>;
   })}</div>;
 }

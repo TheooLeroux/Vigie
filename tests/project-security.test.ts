@@ -72,7 +72,7 @@ test("Fiche : intitulé et correction du signalement conservés, failles les plu
   assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
 
-test("Fiche : le bloc commun rattache le motif de maintenance à la bonne faille et au déploiement analysé", () => {
+test("Fiche : le motif documenté est visible sans ouvrir la faille et reste lié au déploiement analysé", () => {
   const base = healthCheck().findings[0];
   const { detail, state, target, report } = fixture([
     { ...base, fixedVersions: ["1.2.3"] },
@@ -87,9 +87,10 @@ test("Fiche : le bloc commun rattache le motif de maintenance à la bonne faille
   const html = markup();
   assert.equal(html.match(/<article\b/g)?.length, 1);
   assert.match(html, /Sécurité et mises à jour/);
-  assert.match(html, /La dépendance parente impose encore cette version/);
-  assert.equal(html.match(/La faille bloque la proposition de mise à jour/g)?.length, 1);
-  assert.match(html, /other-library .*Aucun correctif indiqué dans le rapport/);
+  const summaries = [...html.matchAll(/<details class="security-finding"><summary>(.*?)<\/summary>/g)].map(match => match[1]);
+  const blockedSummary = summaries.find(summary => summary.includes("La faille bloque la proposition de mise à jour"));
+  assert.match(blockedSummary || "", /security-finding-reason.*La dépendance parente impose encore cette version/);
+  assert.equal(summaries.filter(summary => summary.includes("security-finding-reason")).length, 1);
 
   assessment.results[0] = { ...assessment.results[0], stage: "completed", assessment: { changes: ["Autres dépendances mises à jour"] }, checks: [healthCheck({ npmRetained: blocked.findings })] };
   state.assessment.stage = "completed";
@@ -97,8 +98,7 @@ test("Fiche : le bloc commun rattache le motif de maintenance à la bonne faille
 
   state.assessment.assessmentSources![target.id] = "ancien-déploiement";
   const stale = markup();
-  assert.doesNotMatch(stale, /Toujours présente dans la proposition|La faille bloque la proposition de mise à jour/);
-  assert.match(stale, /Compatibilité du correctif à confirmer/);
+  assert.doesNotMatch(stale, /security-finding-reason|Compatibilité du correctif à confirmer/);
 });
 
 test("Couverture : un scan complet sans alerte donne un zéro borné à son périmètre", () => {

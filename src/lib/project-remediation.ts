@@ -12,7 +12,7 @@ export function projectRemediation(detail: ProjectDetail, state?: UpdateState | 
   const targets = new Map(state?.targets.map(target => [target.id, target]));
   const observations = new Map(state?.currentSecurity?.map(observation => [observation.targetId, observation]));
 
-  return (item: ProjectVulnerability): RemediationReason => {
+  return (item: ProjectVulnerability): RemediationReason | undefined => {
     const target = targets.get(item.targetId);
     const result = assessments.get(item.targetId);
     const matches = (finding: SecurityFinding) => finding.package === item.package && finding.version === item.version &&
@@ -31,7 +31,7 @@ export function projectRemediation(detail: ProjectDetail, state?: UpdateState | 
 
     if (result?.stage === "completed" && result.assessment) {
       const retained = remainingNpmFindings(result).find(matches);
-      if (retained) return {
+      if (retained?.explanation) return {
         label: state?.assessment?.assessmentOrigin === "maintenance" ? "Toujours présente après la mise à jour" : "Toujours présente dans la proposition",
         detail: retained.explanation,
       };
@@ -46,9 +46,8 @@ export function projectRemediation(detail: ProjectDetail, state?: UpdateState | 
     }
 
     if (target?.unavailable) return { label: "Mise à jour automatique indisponible", detail: target.unavailable };
-    if (state && !state.enabled) return { label: "Maintenance automatique désactivée", detail: state.disabledReason };
-    return item.fixedVersions?.length
-      ? { label: "Compatibilité du correctif à confirmer", detail: "Le rapport indique une version correctrice, mais aucun correctif compatible n’est confirmé pour ce bloc." }
-      : { label: "Aucun correctif indiqué dans le rapport", detail: "Le rapport ne permet pas de déterminer ce qui empêche la correction." };
+    if (state && !state.enabled && state.disabledReason) {
+      return { label: "Maintenance automatique désactivée", detail: state.disabledReason };
+    }
   };
 }

@@ -123,9 +123,25 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .security-block-name { min-width: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
 .security-block-name > strong { color: var(--ink); }
 .security-block-heading > small { margin-left: auto; flex-shrink: 0; }
+.security-current-findings > .security-findings-block { border: 1px solid var(--line); border-radius: 8px; }
+.security-current-findings > .security-findings-block > .security-block-heading {
+  padding: 11px 14px;
+  border-radius: 7px;
+  margin-bottom: 0;
+}
+.security-current-findings > .security-findings-block[open] > .security-block-heading {
+  border-bottom: 1px solid var(--line);
+  border-radius: 7px 7px 0 0;
+}
+.security-current-findings > .security-findings-block > :is(.security-findings, .security-more) { padding-inline: 14px; }
+.security-current-findings .security-more { margin: 0; }
+.security-current-findings .security-more > summary { padding-block: 10px; }
 .project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
 .project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
 .project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }
+.security-current-findings .security-findings > li:first-child { border-top: 0; }
+.security-current-findings .security-findings-block > .security-findings:last-child > li:last-child,
+.security-current-findings .security-more > .security-findings > li:last-child { border-bottom: 0; }
 .security-finding > summary { display: flex; align-items: center; gap: 12px; padding: 11px 0; list-style: none; cursor: pointer; }
 .security-finding > summary::-webkit-details-marker { display: none; }
 .security-finding > summary::after { content: "›"; color: var(--muted); font-size: 20px; }
@@ -135,7 +151,15 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .security-finding-content { display: grid; flex: 1; gap: 4px; min-width: 0; }
 .security-finding-content > strong { color: var(--ink); font-size: 12px; line-height: 1.5; }
 .security-finding-content > span, .security-finding-reference { color: var(--muted); font-size: 11px; }
-.security-finding-reason { font-weight: 600; color: var(--text); }
+.security-finding-content > .security-finding-reason {
+  display: grid;
+  gap: 2px;
+  margin-top: 3px;
+  padding: 6px 9px;
+  border-left: 2px solid var(--amber);
+  background: var(--soft);
+  color: var(--text);
+}
 .security-version { font-variant-numeric: tabular-nums; }
 .security-finding-reference { flex-shrink: 0; }
 .security-severity, .security-severities > .security-severity { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 68px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--text); font-size: 10px; font-weight: 600; }
