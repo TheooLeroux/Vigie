@@ -47,11 +47,23 @@ export function npmGraph(raw: string) {
       return target ? [{ name, range, target }] : [];
     });
   }
+  const reverseEdges = () => {
+    const parents = new Map<string, string[]>();
+    for (const location of nodes.keys()) for (const edge of edges(location, true)) {
+      const incoming = parents.get(edge.target);
+      if (incoming) incoming.push(location);
+      else parents.set(edge.target, [location]);
+    }
+    return parents;
+  };
+  let parents: ReturnType<typeof reverseEdges> | undefined;
+  function locations(name: string, version: string) {
+    return [...nodes].filter(([location, item]) => location && (item.name || packageName(location)) === name && item.version === version).map(([location]) => location);
+  }
   function paths(name: string, version: string) {
     const result: string[][] = [];
-    const parents = new Map<string, string[]>();
-    for (const location of nodes.keys()) for (const edge of edges(location, true)) parents.set(edge.target, [...parents.get(edge.target) || [], location]);
-    const queue = [...nodes].filter(([location, item]) => location && (item.name || packageName(location)) === name && item.version === version).map(([location]) => [location]);
+    parents ||= reverseEdges();
+    const queue = locations(name, version).map(location => [location]);
     let visits = 0;
     while (queue.length) {
       if (++visits > 20000 || result.length > 100) throw new ApiError("Le graphe contient trop de chemins de dépendances pour cette recherche bornée.");
@@ -62,7 +74,7 @@ export function npmGraph(raw: string) {
     }
     return result;
   }
-  return { nodes, resolve, edges, paths };
+  return { nodes, resolve, edges, paths, locations };
 }
 function publicNpmArtifact(node: { resolved?: string; integrity?: string }) {
   try {
@@ -190,6 +202,9 @@ export function npmCoordinationCandidates(raw: string, findings: SecurityFinding
   return [...candidates].sort();
 }
 export type RemediationDecision = { kind: "lock"; roots: string[]; messages: string[] } | { kind: "balance"; roots: string[]; messages: string[] } | { kind: "parents"; constraints: Map<string, Record<string, string>>; messages: string[] };
+export class RemediationUnavailableError extends ApiError {
+  constructor(message: string, readonly remaining: SecurityFinding[]) { super(message, 422); }
+}
 class RejectedNpmProposal extends Error {}
 export function createNodeRemediator(transport: typeof fetch = fetch, execute = runCommand) {
   const catalogs = new Map<string, Promise<PackageVersion[]>>();
@@ -197,7 +212,10 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
   type Route = { graph: ReturnType<typeof npmGraph>; path: string[]; alert: SecurityFinding };
   const history = new Map<string, Map<string, Route>>();
   const catalog = (name: string) => {
-    if (!catalogs.has(name)) catalogs.set(name, packageCatalog(name, transport));
+    if (!catalogs.has(name)) catalogs.set(name, packageCatalog(name, transport).catch(error => {
+      catalogs.delete(name);
+      throw error;
+    }));
     return catalogs.get(name)!;
   };
   const usable = (item: PackageVersion, node: string) => !item.engines?.node || !!validRange(item.engines.node) && satisfies(node, item.engines.node);
@@ -206,7 +224,10 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
     if (!safe.has(key)) safe.set(key, (async () => {
       const candidates = (await catalog(name)).filter(item => compare(item.version, minimum) >= 0 && usable(item, node)).slice(0, remediationVersionLimit);
       return verifiedSafeVersions(name, candidates, transport);
-    })());
+    })().catch(error => {
+      safe.delete(key);
+      throw error;
+    }));
     return safe.get(key)!;
   }
   async function inPlace(manifest: string, lock: string, ids: string[]) {
@@ -227,7 +248,7 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       return canonical(JSON.parse(lock)) === canonical(JSON.parse(proposed)) ? null : proposed;
     } finally { await rm(temporary, { recursive: true, force: true }); }
   }
-  return async (folder: string, roots: string[], names: string[], findings: SecurityFinding[], node: string, originals: Map<string, string | null>, tried: Set<string>, proposalContext = ""): Promise<RemediationDecision> => {
+  async function search(folder: string, roots: string[], names: string[], findings: SecurityFinding[], node: string, originals: Map<string, string | null>, tried: Set<string>, proposalContext = "", planning = false): Promise<RemediationDecision> {
     const updated: string[] = [], messages: string[] = [], contexts: { root: string; manifest: Record<string, any>; originalManifest: Record<string, any>; graph: ReturnType<typeof npmGraph>; original: ReturnType<typeof npmGraph>; alerts: SecurityFinding[] }[] = [];
     for (const root of [...new Set(findings.map(item => item.scope))]) {
       if (root === undefined || !roots.includes(root)) throw new ApiError("Le périmètre de la dépendance vulnérable n’est pas confirmé.");
@@ -237,11 +258,12 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       const name = prefix + lockName, manifestName = prefix + "package.json";
       const lock = await readFile(join(folder, name), "utf8"), manifest = await readFile(join(folder, manifestName), "utf8");
       const alerts = findings.filter(item => item.scope === root);
-      const lockAttempt = `lock:${root}:${createHash("sha256").update(proposalContext + "\n" + lock).digest("hex")}`;
+      const ids = [...new Set(alerts.map(item => item.id))].sort();
+      const lockAttempt = `lock:${root}:${createHash("sha256").update(canonical([proposalContext, lock, ids])).digest("hex")}`;
       let proposed: string | null = null;
-      if (!tried.has(lockAttempt)) {
+      if (!planning && !tried.has(lockAttempt)) {
         tried.add(lockAttempt);
-        try { proposed = await inPlace(manifest, lock, [...new Set(alerts.map(item => item.id))]); }
+        try { proposed = await inPlace(manifest, lock, ids); }
         catch (error) {
           if (!(error instanceof RejectedNpmProposal)) throw error;
           messages.push(`${root || "racine"} : proposition OSV rejetée sans modifier les sources ; recherche de versions compatibles des paquets parents.`);
@@ -255,17 +277,20 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
       contexts.push({ root, manifest: JSON.parse(manifest), originalManifest: JSON.parse(originals.get(manifestName) || manifest), graph: npmGraph(lock), original: npmGraph(originals.get(name) || lock), alerts });
     }
     if (updated.length) return { kind: "lock", roots: updated, messages };
+    // Baseline paths rank the first proposal. Only resolved candidate paths
+    // contribute to the constraints retained across remediation attempts.
+    const observedPaths = planning ? new Map<string, Map<string, Route>>() : history;
     for (const { root, graph, alerts } of contexts) {
-      const routes = history.get(root) || new Map<string, Route>();
+      const routes = observedPaths.get(root) || new Map<string, Route>();
       for (const alert of [...new Map(alerts.map(item => [item.package + "@" + item.version, item])).values()]) for (const path of graph.paths(alert.package, alert.version)) {
         const fingerprint = createHash("sha256").update(canonical([alert.package, alert.version, path.map(location => [location, graph.nodes.get(location)])])).digest("hex");
         routes.set(fingerprint, { graph, path, alert });
       }
-      history.set(root, routes);
+      observedPaths.set(root, routes);
     }
     const coordinated: string[] = [];
-    for (const { root, graph, alerts } of contexts) {
-      const raw = canonical([proposalContext, Object.fromEntries(graph.nodes)]), fingerprint = `balance:${root}:${createHash("sha256").update(raw).digest("hex")}`;
+    for (const { root, graph, alerts } of planning ? [] : contexts) {
+      const raw = canonical([proposalContext, Object.fromEntries(graph.nodes), alerts.map(item => item.id).sort()]), fingerprint = `balance:${root}:${createHash("sha256").update(raw).digest("hex")}`;
       if (tried.has(fingerprint)) continue;
       const names = npmCoordinationCandidates(JSON.stringify({ lockfileVersion: 3, packages: Object.fromEntries(graph.nodes) }), alerts);
       if (!names.length) continue;
@@ -279,7 +304,8 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
     for (const { root, manifest, originalManifest, graph, original, alerts } of contexts) {
       const affected = new Set(alerts.flatMap(alert => graph.paths(alert.package, alert.version).map(path => packageName(path[0]))));
       const requirements = new Map<string, { graph: ReturnType<typeof npmGraph>; path: string[]; fixed: PackageVersion[]; alert: SecurityFinding }[]>();
-      const routes = [...history.get(root)!.values()].filter(({ path }) => affected.has(packageName(path[0])));
+      const packages = new Set(alerts.map(alert => alert.package));
+      const routes = [...observedPaths.get(root)!.values()].filter(({ path, alert }) => packages.has(alert.package) && affected.has(packageName(path[0])));
       const verifiedRoutes = await mapConcurrent(routes, 8, async ({ graph: source, path, alert }) => {
         const installedVersions = [...original.nodes].filter(([location, item]) => location && (item.name || packageName(location)) === alert.package && stableVersion(item.version)).map(([, item]) => item.version!).sort((first, second) => compare(second, first));
         const fixed = await safeVersions(alert.package, node, installedVersions[0] || "0.0.0");
@@ -323,21 +349,40 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
             return false;
           }
         }
-        const candidates = await verifiedSafeVersions(current.name || direct, (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, remediationVersionLimit), transport);
-        const admissible: PackageVersion[] = [];
-        for (const candidate of candidates) {
-          if (tried.has(`${root}:${direct}@${candidate.version}`)) continue;
-          let supported = true;
-          for (const route of related) if (!await supports(route.graph, route.path, 0, candidate, route.fixed)) { supported = false; break; }
-          if (supported) admissible.push(candidate);
+        const candidates = (await catalog(current.name || direct)).filter(item => compare(item.version, floor) >= 0 && usable(item, node) && (!installed || compare(item.version, installed) >= 0 || satisfies(item.version, originalRange))).slice(0, remediationVersionLimit);
+        async function admissibleVersions(routes: typeof related) {
+          const compatible: PackageVersion[] = [];
+          for (const candidate of candidates) {
+            let supported = true;
+            for (const route of routes) if (!await supports(route.graph, route.path, 0, candidate, route.fixed)) { supported = false; break; }
+            if (supported) compatible.push(candidate);
+          }
+          return verifiedSafeVersions(current.name || direct, compatible, transport);
         }
+        const admissible = await admissibleVersions(related);
         if (!admissible.length) {
+          if (planning) continue;
           const details = [...new Set(related.map(({ graph: source, path, fixed, alert }) => {
             const chain = path.map(location => { const item = source.nodes.get(location)!; return `${item.name || packageName(location)}@${item.version}`; }).join(" → ");
             const fixes = fixed.slice(0, 3).map(item => item.version).join(", ") || alert.fixedVersions?.join(", ") || "aucun correctif stable vérifié";
             return `${chain}. Correctifs vérifiés de ${alert.package} : ${fixes}`;
           }))].slice(0, 5).join(" ; ");
-          throw new ApiError(`${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé dans le budget de recherche (${remediationVersionLimit} versions par paquet). Recherche bornée, absence de solution non démontrée au-delà du budget. Aucun override ni contrôle désactivé.`, 422);
+          const message = `${root || "racine"} : ${details}. Aucun parent stable compatible avec toutes ces alertes trouvé parmi les versions examinées (${remediationVersionLimit} par paquet au maximum). Aucun override ajouté.`;
+          const unavailable: SecurityFinding[] = [];
+          for (const alert of alerts) {
+            const routes = related.filter(item => item.alert.package === alert.package && item.alert.version === alert.version);
+            if (!routes.length || (routes.length !== related.length && (await admissibleVersions(routes)).length)) continue;
+            const requirements = [...new Set(routes.filter(route => route.graph === graph && route.path.length > 1).map(({ path }) => {
+              const parent = path.at(-2)!;
+              const edge = graph.edges(parent, true).find(edge => edge.target === path.at(-1))!;
+              const item = graph.nodes.get(parent)!;
+              return `${item.name || packageName(parent)} ${item.version} demande ${alert.package} ${edge.range}.`;
+            }))].slice(0, 2);
+            const fix = alert.fixedVersions?.length ? ` Correctif indiqué par OSV : ${alert.fixedVersions.slice(0, 3).join(", ")}.` : "";
+            const explanation = [...requirements, `Aucune version stable de ${current.name || direct} compatible avec le correctif n’a été trouvée parmi les versions examinées.${fix}`].join(" ");
+            unavailable.push({ ...alert, explanation });
+          }
+          throw new RemediationUnavailableError(message, unavailable);
         }
         const selected = constraints.get(root) || {};
         constraints.set(root, { ...selected, [direct]: admissible.map(item => item.version).join(" || ") });
@@ -345,9 +390,20 @@ export function createNodeRemediator(transport: typeof fetch = fetch, execute = 
         if (installed && admissible.some(item => compare(item.version, installed) < 0)) messages.push(`${root || "racine"} : Version antérieure envisagée uniquement dans la plage initialement déclarée, après les versions admissibles plus récentes.`);
       }
     }
-    if (!constraints.size) throw new ApiError("Aucune proposition de correction de dépendance n’a pu être établie.");
+    if (!planning && !constraints.size) throw new ApiError("Aucune proposition de correction de dépendance n’a pu être établie.");
     // Do not reject the head of a domain before the peer solver has actually
     // selected it. Multiple individually safe parents may require coordination.
     return { kind: "parents", constraints, messages };
-  };
+  }
+  return Object.assign(search, {
+    async plan(folder: string, root: string, names: string[], findings: SecurityFinding[], node: string) {
+      try {
+        const result = await search(folder, [root], names, findings, node, new Map(), new Set(), "", true);
+        return result.kind === "parents" ? result.constraints.get(root) : undefined;
+      } catch (error) {
+        if (error instanceof ApiError || error instanceof SyntaxError || error instanceof z.ZodError) return;
+        throw error;
+      }
+    },
+  });
 }

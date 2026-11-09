@@ -10,6 +10,8 @@ import { withPlanningSession } from "../src/lib/updates/planning";
 import { runCommand, DependencyValidationError, yarnPeerWarning } from "../src/lib/updates/process";
 import { prepareNodeSources, type NodeValidationRuntime } from "../src/lib/updates/node";
 import { requireStrictYarnConfiguration } from "../src/lib/updates/manager-policy";
+import { createNodeRemediator } from "../src/lib/updates/remediation";
+import { requireSecurityPass, securityCheck } from "../src/lib/updates/security";
 
 function registry(packages: Record<string, PackageVersion[]>, unsafe: string[] = [], requests: string[] = []): typeof fetch {
   return async (input, options) => {
@@ -227,5 +229,72 @@ test("Moteur : une rupture majeure identifiée revient en deux essais à une API
     });
     assert.deepEqual(attempts, [{ grid: "2.2.0", unrelated: "9.0.19" }, { grid: "1.6.0", unrelated: "9.0.19" }]);
     assert.deepEqual(scans, attempts);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+for (const mode of ["reactive", "planned", "retry", "validation", "unavailable"] as const) test(`Moteur npm : parcours ${mode} des chemins vulnérables`, async () => {
+  const folder = await mkdtemp(join(tmpdir(), "vigie-security-plan-"));
+  const manifest = join(folder, "package.json"), lock = join(folder, "package-lock.json");
+  const installed: string[][] = [], scanned: string[] = [], validated: string[][] = [];
+  const alert = { id: "GHSA-fixture-low", aliases: [], package: "leaf", version: "1.0.0", severity: "low" as const, scope: "" };
+  const catalogs = registry({
+    parent: [{ version: "3.0.0", dependencies: { leaf: "^1" } }, { version: "2.0.0", dependencies: { leaf: "^1 || ^2" } }],
+    companion: [{ version: "2.0.0" }, { version: "1.0.0" }],
+    leaf: [{ version: "2.0.0" }, { version: "1.0.0" }],
+  }, ["leaf@1.0.0"]);
+  let catalogUnavailable = mode === "unavailable";
+  const transport: typeof fetch = (input, options) => {
+    if (catalogUnavailable && String(input) === "https://registry.npmjs.org/parent") {
+      catalogUnavailable = false;
+      return Promise.resolve(new Response(null, { status: 503 }));
+    }
+    return catalogs(input, options);
+  };
+  async function saveLock(parent: string, companion: string, leaf: string) {
+    await writeFile(lock, JSON.stringify({ lockfileVersion: 3, packages: {
+      "": { dependencies: { parent, companion } },
+      "node_modules/parent": { version: parent, dependencies: { leaf: parent === "3.0.0" ? "^1" : "^1 || ^2" } },
+      "node_modules/companion": { version: companion },
+      "node_modules/leaf": { version: leaf },
+    } }));
+  }
+  const runtime: NodeValidationRuntime = { image: async () => "sha256:" + "a".repeat(64), execute: async (_command, args) => {
+    if (args[0] === "rm") return "";
+    const { parent, companion } = JSON.parse(await readFile(manifest, "utf8")).dependencies;
+    if (args.at(-1)!.includes("--package-lock-only")) {
+      installed.push([parent, companion]);
+      const fixed = parent === "2.0.0" && (mode !== "retry" || companion === "1.0.0");
+      await saveLock(parent, companion, fixed ? "2.0.0" : "1.0.0");
+    } else {
+      validated.push([parent, companion]);
+      if (mode === "validation" && companion === "2.0.0") throw new DependencyValidationError("API incompatible avec ce partenaire", ["parent"]);
+    }
+    return "";
+  } };
+  try {
+    await writeFile(manifest, JSON.stringify({ name: "fixture", dependencies: { parent: "^2", companion: "^1" }, scripts: { test: "node --test" } }));
+    await saveLock("2.0.0", "1.0.0", "1.0.0");
+    const repair = createNodeRemediator(transport, async () => JSON.stringify({ patches: [] }));
+    await prepareNodeSources(folder, [""], ["package.json", "package-lock.json"], "24.14.0", transport, [], {
+      limits: new Map(), attempt: 0, runtime,
+      remediation: { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair },
+    }, {
+      baseline: mode === "reactive" || mode === "validation" ? undefined : [alert],
+      resolved: async () => {
+        const { version } = JSON.parse(await readFile(lock, "utf8")).packages["node_modules/leaf"];
+        scanned.push(version);
+        requireSecurityPass(securityCheck("OSV", "candidate", "fixture", version === alert.version ? [alert] : []));
+      },
+      image: async () => {}, validated: async () => {},
+    });
+    const preferred = ["2.0.0", "2.0.0"], latest = ["3.0.0", "2.0.0"], alternate = ["2.0.0", "1.0.0"];
+    const expected = {
+      reactive: { installed: [latest, preferred], scanned: ["1.0.0", "2.0.0"], validated: [preferred] },
+      planned: { installed: [preferred], scanned: ["2.0.0"], validated: [preferred] },
+      retry: { installed: [preferred, alternate], scanned: ["1.0.0", "2.0.0"], validated: [alternate] },
+      validation: { installed: [latest, preferred, alternate], scanned: ["1.0.0", "2.0.0", "2.0.0"], validated: [preferred, alternate] },
+      unavailable: { installed: [latest, preferred], scanned: ["1.0.0", "2.0.0"], validated: [preferred] },
+    };
+    assert.deepEqual({ installed, scanned, validated }, expected[mode]);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

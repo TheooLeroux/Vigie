@@ -43,6 +43,15 @@ test("Arrêt : conserver la cause de validation et ne pas recycler une alerte d�
   assert.doesNotMatch(html,/Aucune nouvelle version n’a été publiée/);
 });
 
+test("Arrêt : distinguer l’image bloquante des alertes d’inventaire et des réserves", () => {
+  const run = healthUpdates().runs[0];
+  run.stage = "failed";
+  const baseline = healthCheck({ phase: "before" });
+  const [zlib] = healthCheck().findings.map(finding => ({ ...finding, package: "zlib", version: "1.3.2-r1", fixedVersions: ["1.4-r0"] }));
+  run.results[0].checks = [baseline, healthCheck({ tool: "Trivy", status: "blocked", findings: [...baseline.findings, zlib], blockers: [zlib] })];
+  assert.deepEqual(updateStopSummary(run)?.findings.map(entry => entry.finding), [zlib]);
+});
+
 test("Exécuteur : une proposition encore vulnérable arrête définitivement la tentative, sans publication ni relance", async () => {
   process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY=randomBytes(32).toString("hex");
   process.env.VIGIE_UPDATES_ENABLED="1";

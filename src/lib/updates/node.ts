@@ -8,7 +8,8 @@ import { compatibleVersions, CompatibilitySelectionError, verifiedPeerConflicts 
 import { dockerPackages, rewriteDockerfile, validateDockerfile } from "./dockerfile";
 import { nodeTestProfile } from "./node-test-profile";
 import { SecurityPolicyError } from "./security";
-import { createNodeRemediator, npmChangedIndirectPackages, npmGraph, npmIndirectVersionsChanged, seedNpmIndirectVersions, validateNpmProposal } from "./remediation";
+import type { SecurityFinding } from "./types";
+import { createNodeRemediator, npmChangedIndirectPackages, npmGraph, npmIndirectVersionsChanged, RemediationUnavailableError, seedNpmIndirectVersions, validateNpmProposal } from "./remediation";
 import { searchIndirectCompatibility, maxIndirectAttempts, type IndirectEvaluation } from "./indirect-compatibility";
 export { stableVersion } from "./versions";
 import { stableVersion } from "./versions";
@@ -112,13 +113,15 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
   return { lock, resolve: `${tool} install --package-lock-only --ignore-scripts ${strict}`, balance: `${tool} dedupe --package-lock-only --ignore-scripts --prefer-dedupe ${strict}`, verify: `${tool} ci --ignore-scripts ${strict} && ${tool} ls --all --json`, validate: `${tool} ci ${strict} && ${tool} ls --all --json && ${tool} run typecheck --if-present && ${tool} run test --if-present && ${tool} run build --if-present` + additional.map(name => ` && ${tool} run ${name}`).join("") };
 }
 export type NodeUpdateChecks = {
+  baseline?: readonly SecurityFinding[];
   resolved: (names: string[]) => Promise<void>;
+  retain?: (findings: SecurityFinding[]) => Promise<boolean>;
   image: (root: string, image: string) => Promise<void>;
   validated: (root: string, scripts: string[]) => Promise<void>;
   remediating?: (message: string) => Promise<void>;
   reused?: (message: string) => Promise<void>;
 };
-type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
+type RemediationState = { iterations: number; constraints: Map<string, Record<string, string>>; initialPreferences?: Map<string, Record<string, string>>; tried: Set<string>; seen: Set<string>; repair: ReturnType<typeof createNodeRemediator> };
 type ResolutionState = { attempts: number; learned: Map<string, Record<string, string[]>> };
 export type NodeValidationRuntime = { image: () => Promise<string>; downloads?: (root: string) => Promise<string>; dispose?: () => Promise<void>; execute?: typeof runCommand; signal?: AbortSignal };
 export function nodeValidationRuntime(nodeVersion: string, execute = runCommand): NodeValidationRuntime {
@@ -156,7 +159,8 @@ export function nodeValidationRuntime(nodeVersion: string, execute = runCommand)
     return id;
   })() };
 }
-type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, string>; lockSeeds?: Map<string, string>; indirectAttempts?: Map<string, number>; validations?: Set<string>; rejected?: Map<string, Record<string, string>[]>; preferences?: Map<string, Record<string, string>>; priority?: string; runtime?: NodeValidationRuntime };
+type LockFallback = { manifest: string; reference: string; seed?: string };
+type PreparationRetry = { limits: Map<string, Record<string, string>>; attempt: number; remediation?: RemediationState; resolution?: ResolutionState; lockFallbacks?: Map<string, LockFallback>; indirectAttempts?: Map<string, number>; validations?: Set<string>; rejected?: Map<string, Record<string, string>[]>; preferences?: Map<string, Record<string, string>>; priority?: string; runtime?: NodeValidationRuntime };
 function nodeSandbox(folder: string, runtime: NodeValidationRuntime) {
   const execute = runtime.execute || runCommand;
   return async (root: string, commands: string, diagnosticPackages?: string[], environment: Record<string, string> = {}, peerResolution = false, diagnosticIndirectPackages: string[] = [], diagnosticIndirectLocations?: Record<string, string>) => {
@@ -215,8 +219,11 @@ export async function prepareNodeSources(folder: string, roots: string[], names:
 async function prepareSources(folder: string, roots: string[], names: string[], nodeVersion: string, transport: typeof fetch, requiredDockerRoots: string[], retry: PreparationRetry, security?: NodeUpdateChecks): Promise<{ allowed: Set<string>; warnings: string[] }> {
   retry.runtime?.signal?.throwIfAborted();
   const remediation = retry.remediation || { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair: createNodeRemediator(transport) } as RemediationState;
+  const firstPlanningPass = !remediation.initialPreferences;
+  const initialPreferences = remediation.initialPreferences ||= new Map();
   const resolution = retry.resolution || { attempts: 0, learned: new Map() } as ResolutionState;
-  retry = { ...retry, remediation, resolution, rejected: retry.rejected || new Map(), indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
+  const lockFallbacks = new Map(retry.lockFallbacks);
+  retry = { ...retry, remediation, resolution, lockFallbacks, rejected: retry.rejected || new Map(), indirectAttempts: retry.indirectAttempts || new Map(), validations: retry.validations || new Set(), runtime: retry.runtime || nodeValidationRuntime(nodeVersion) };
   const resolutionKey = (root: string) => JSON.stringify([root, Object.entries(remediation.constraints.get(root) || {}).sort(), Object.entries(retry.limits.get(root) || {}).sort()]);
   if (requiredDockerRoots.some(root => !names.includes((root ? root + "/" : "") + "Dockerfile"))) throw new ApiError("Le service Railway utilise Docker, mais son Dockerfile est absent du répertoire source attendu.");
   const custom = names.find(name => {
@@ -238,7 +245,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       else await writeFile(join(folder, name), content);
     }
   }
-  const allowed = new Set<string>(), warnings: string[] = [], checks: { root: string; lock: string; resolve: string; validate: string; verify?: string; balance?: string; docker: boolean; original: Record<string, any>; packages: string[]; environment: Record<string, string> }[] = [], intended = new Map<string, string>();
+  const allowed = new Set<string>(), warnings: string[] = [], checks: { root: string; lock: string; resolve: string; validate: string; verify?: string; balance?: string; docker: boolean; original: Record<string, any>; selection: Record<string, string>; environment: Record<string, string> }[] = [], intended = new Map<string, string>();
   for (const root of [...new Set(roots)]) {
     const prefix = root ? `${root}/` : "", path = `${prefix}package.json`;
     if (!names.includes(path)) throw new ApiError("Sources Node introuvables dans le répertoire configuré.");
@@ -246,6 +253,11 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     if (!manifest.scripts?.test && !manifest.scripts?.build) throw new ApiError("Ce projet doit fournir au moins un script test ou build pour vérifier la mise à jour.");
     const localNames = names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length));
     const manager = managerCommands(manifest, localNames);
+    const baseline = security?.baseline?.filter(finding => finding.scope === root) || [];
+    if (firstPlanningPass && baseline.length && (manager.lock === "package-lock.json" || manager.lock === "npm-shrinkwrap.json")) {
+      const planned = await remediation.repair.plan(folder, root, names, baseline, nodeVersion);
+      if (planned) initialPreferences.set(root, planned);
+    }
     if (manager.lock === "yarn.lock") {
       for (const name of names.filter(name => /(^|\/)\.yarnrc(?:\.yml)?$/.test(name))) {
         const directory = name.includes("/") ? name.slice(0, name.lastIndexOf("/")) : "";
@@ -258,22 +270,35 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     for (const [name, range] of Object.entries(remediation.constraints.get(root) || {})) limits[name] = Object.hasOwn(limits, name) ? [limits[name], range].flat() : range;
     const learned = resolution.learned.get(resolutionKey(root)) || {};
     for (const [name, ranges] of Object.entries(learned)) limits[name] = Object.hasOwn(limits, name) ? [limits[name], ranges].flat() : ranges;
+    const recovery = retry.preferences?.get(root);
+    const planned = recovery || remediation.constraints.has(root) ? undefined : initialPreferences.get(root);
+    const select = (preferredRanges?: Record<string, string>) => compatibleVersions(manifest, nodeVersion, transport, extra, limits, {
+      screen: items => checkPackageVersions(items, transport), rejectedCombinations: retry.rejected!.get(root), preferredRanges, platform: { os: "linux", cpu: process.arch, libc: "glibc" },
+    });
     let upgraded: Awaited<ReturnType<typeof compatibleVersions>>;
-    try { upgraded = await compatibleVersions(manifest, nodeVersion, transport, extra, limits, { screen: items => checkPackageVersions(items, transport), rejectedCombinations: retry.rejected!.get(root), preferredRanges: retry.preferences?.get(root), platform: { os: "linux", cpu: process.arch, libc: "glibc" } }); }
+    try {
+      upgraded = planned ? await select(planned).catch(error => {
+        if (!(error instanceof ApiError)) throw error;
+        initialPreferences.delete(root);
+        return select();
+      }) : await select(recovery);
+    }
     catch (error) {
-      if (!(error instanceof CompatibilitySelectionError) || !Object.keys(learned).length || !Object.keys(remediation.constraints.get(root) || {}).length) throw error;
+      if (!(error instanceof CompatibilitySelectionError) || !Object.keys(remediation.constraints.get(root) || {}).length || (!Object.keys(learned).length && !retry.rejected!.get(root)?.length)) throw error;
       await changedSources(folder, initialSources, allowed);
       await restoreVersions();
       remediation.constraints.delete(root);
-      const message = `${root || "racine"} : proposition de sécurité écartée car ses pairs indirects ne permettent aucun ensemble admissible ; recherche d’autres parents.`;
+      const reason = Object.keys(learned).length ? "ses pairs indirects ne permettent aucun ensemble admissible" : "les combinaisons admissibles ont déjà été écartées";
+      const message = `${root || "racine"} : proposition de sécurité écartée car ${reason} ; recherche d’autres parents.`;
       await security?.remediating?.(message);
       const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, retry, security);
       result.warnings.push(...warnings, message);
       return result;
     }
     warnings.push(...upgraded.warnings);
-    warnings.push(`${root || "racine"} : sélection optimisée, ${Object.keys(retry.preferences?.get(root) || {}).length ? "priorité à la récupération des API signalées, puis aux dernières versions stables" : "priorité au nombre de dernières versions stables puis au recul minimal"} ; ${upgraded.selection.screenedVersions} versions préanalysées, ${upgraded.selection.states} états explorés.`);
-    for (const name of Object.keys(remediation.constraints.get(root) || {})) if (upgraded.versions[name]) remediation.tried.add(`${root}:${name}@${upgraded.versions[name]}`);
+    const guided = planned && initialPreferences.has(root);
+    const priority = recovery ? "à la récupération des API signalées" : guided ? "à la correction des chemins vulnérables du verrou initial" : "aux dernières versions stables et au recul minimal";
+    warnings.push(`${root || "racine"} : sélection optimisée, priorité ${priority} ; ${upgraded.selection.screenedVersions} versions préanalysées, ${upgraded.selection.states} états explorés.`);
     const content = JSON.stringify(upgraded.manifest, null, 2) + "\n";
     await remember(path);
     await remember(prefix + manager.lock);
@@ -282,9 +307,12 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     allowed.add(path);
     allowed.add(prefix + manager.lock);
     if (manager.lock === "package-lock.json" || manager.lock === "npm-shrinkwrap.json") {
-      const seed = retry.lockSeeds?.get(root);
-      if (seed) await writeFile(join(folder, prefix + manager.lock), seed);
-      else if (!retry.lockFallbacks?.has(root)) await writeFile(join(folder, prefix + manager.lock), JSON.stringify({ name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true, packages: {} }) + "\n");
+      // An indirect fallback is only valid for the direct versions it was built with.
+      const previous = lockFallbacks.get(root);
+      if (previous && previous.manifest !== content) lockFallbacks.delete(root);
+      const fallback = lockFallbacks.get(root);
+      if (fallback?.seed) await writeFile(join(folder, prefix + manager.lock), fallback.seed);
+      else if (!fallback) await writeFile(join(folder, prefix + manager.lock), JSON.stringify({ name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true, packages: {} }) + "\n");
     }
     if (docker) {
       await remember(dockerName);
@@ -300,15 +328,14 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     const schemaName = prefix + "src/config/env.ts";
     const profile = nodeTestProfile(manifest, names.includes(schemaName) ? await readFile(join(folder, schemaName), "utf8") : "");
     if (profile) warnings.push(profile.message);
-    checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, packages: Object.keys(upgraded.versions), environment: profile?.environment || {} });
+    checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, selection: upgraded.versions, environment: profile?.environment || {} });
   }
   const isolated = nodeSandbox(folder, retry.runtime!);
-  function rejectCombination(check: typeof checks[number], candidate: Record<string, any>) {
-    const selected = { ...candidate.dependencies, ...candidate.devDependencies, ...candidate.optionalDependencies };
-    const combination = Object.fromEntries(check.packages.filter(name => stableVersion(selected[name])).sort().map(name => [name, selected[name] as string]));
+  function rejectCombination(check: typeof checks[number]) {
+    const combination = check.selection;
     if (!Object.keys(combination).length) return false;
     const previous = retry.rejected!.get(check.root) || [];
-    if (previous.some(item => JSON.stringify(item) === JSON.stringify(combination))) return false;
+    if (previous.some(item => Object.keys(item).length === Object.keys(combination).length && Object.entries(item).every(([name, version]) => combination[name] === version))) return false;
     retry.rejected!.set(check.root, [...previous, combination]);
     return true;
   }
@@ -321,15 +348,15 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       await security?.reused?.(`${check.root || "racine"} : installation et tests déjà réussis pour ces sources, verrous et version Node exacts ; résultat de cette exécution réutilisé.`);
       return;
     }
-    await isolated(check.root, check.validate, check.packages, check.environment, false, indirects, locations);
+    await isolated(check.root, check.validate, Object.keys(check.selection), check.environment, false, indirects, locations);
     await changedSources(folder, files, new Set());
     retry.validations!.add(key);
   }
   for (const check of checks) {
     try {
       await isolated(check.root, check.resolve, undefined, {}, true);
-      const previous = retry.lockFallbacks?.get(check.root);
-      if (previous) validateNpmProposal(previous, await readFile(join(folder, check.lock), "utf8"));
+      const previous = lockFallbacks.get(check.root);
+      if (previous) validateNpmProposal(previous.reference, await readFile(join(folder, check.lock), "utf8"));
     }
     catch (error) {
       if (!(error instanceof PeerResolutionError)) throw error;
@@ -371,14 +398,23 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       if (++remediation.iterations > maxRemediationProposals) throw new ApiError(`Budget de remédiation épuisé (${maxRemediationProposals} propositions). Recherche incomplète ; aucune publication autorisée et aucun contrôle désactivé.`, 422);
       await changedSources(folder, resolvedFiles, new Set());
       await changedSources(folder, initialSources, allowed);
-      const fingerprint = JSON.stringify({ files: resolvedFiles.map(file => [file.path, file.hash]), tried: [...remediation.tried].sort(), limits: [...retry.limits] });
+      const blockers = error.check.blockers || error.check.findings;
+      const fingerprint = JSON.stringify({ files: resolvedFiles.map(file => [file.path, file.hash]), blockers: blockers.map(item => JSON.stringify([item.scope, item.id, item.package, item.version])).sort(), tried: [...remediation.tried].sort(), limits: [...retry.limits] });
       if (remediation.seen.has(fingerprint)) throw new ApiError("La remédiation reproduit un ensemble déjà refusé. Aucun changement n’a été publié.", 422);
       remediation.seen.add(fingerprint);
       await security?.remediating?.("Recherche de correctifs indirects et de versions compatibles des paquets parents.");
       const lockCopies = new Map<string, string>();
       for (const file of resolvedFiles.filter(file => /(^|\/)(package-lock\.json|npm-shrinkwrap\.json)$/.test(file.path))) lockCopies.set(file.path, await readFile(join(folder, file.path), "utf8"));
       const proposalContext = JSON.stringify([...intended].sort(([first], [second]) => first.localeCompare(second)));
-      const decision = await remediation.repair(folder, roots, [...new Set([...names, ...allowed])], error.check.blockers || error.check.findings, nodeVersion, originalVersions, remediation.tried, proposalContext);
+      const scanNames = [...new Set([...names, ...allowed])];
+      let decision: Awaited<ReturnType<typeof remediation.repair>>;
+      try {
+        decision = await remediation.repair(folder, roots, scanNames, blockers, nodeVersion, originalVersions, remediation.tried, proposalContext);
+      } catch (failure) {
+        if (!(failure instanceof RemediationUnavailableError) || !failure.remaining.length || !await security?.retain?.(failure.remaining)) throw failure;
+        warnings.push(failure.message);
+        continue;
+      }
       for (const message of decision.messages) { warnings.push(message); await security?.remediating?.(message); }
       if (decision.kind === "lock" || decision.kind === "balance") {
         try {
@@ -408,6 +444,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         resolvedFiles = await snapshotSources(folder, [...allowed]);
         continue;
       }
+      for (const check of checks) if (decision.constraints.has(check.root)) rejectCombination(check);
       for (const [root, constraints] of decision.constraints) remediation.constraints.set(root, { ...remediation.constraints.get(root), ...constraints });
       for (const [name, content] of originalVersions) {
         if (content === null) await rm(join(folder, name), { force: true });
@@ -427,6 +464,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
     }
     catch (error) {
       retry.priority = check.root;
+      const manifest = intended.get((check.root ? check.root + "/" : "") + "package.json")!;
       if (error instanceof IndirectValidationError && check.verify) {
         const originalLock = originalVersions.get(check.lock), failedLock = await readFile(join(folder, check.lock), "utf8");
         const used = retry.indirectAttempts!.get(check.root) || 0;
@@ -462,8 +500,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
             }
           }, transport, async message => { warnings.push(message); await security?.remediating?.(`${check.root || "racine"} : ${message}`); }, maxIndirectAttempts - used, () => { retry.indirectAttempts!.set(check.root, (retry.indirectAttempts!.get(check.root) || 0) + 1); }, error.locations);
           if (result) {
-            retry.lockFallbacks = new Map(retry.lockFallbacks).set(check.root, failedLock);
-            retry.lockSeeds = new Map(retry.lockSeeds).set(check.root, result.lock);
+            lockFallbacks.set(check.root, { manifest, reference: failedLock, seed: result.lock });
             resolvedFiles = await snapshotSources(folder, [...allowed]);
             await security?.validated(check.root, ["typecheck", "test", "build", "test:integration", "test:e2e"].filter(name => check.original.scripts?.[name]));
             continue;
@@ -474,20 +511,18 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         if ((retry.indirectAttempts!.get(check.root) || 0) > used || used >= maxIndirectAttempts) throw new ApiError(`${check.root || "racine"} : aucune version indirecte validée dans le budget de ${maxIndirectAttempts} essais. Recherche incomplète au-delà du budget ; aucun contrôle désactivé.`, 422);
       }
       if (retry.attempt >= maxValidationRetries) throw new ApiError(`Budget de validation épuisé (${maxValidationRetries} reprises). Recherche incomplète ; aucune publication autorisée.`, 422);
-      if (error instanceof ApiError && error.status === 502 && !(error instanceof DependencyValidationError) && check.verify && !retry.lockFallbacks?.has(check.root)) {
+      if (error instanceof ApiError && error.status === 502 && !(error instanceof DependencyValidationError) && check.verify && !lockFallbacks.has(check.root)) {
         const originalLock = originalVersions.get(check.lock), candidateLock = await readFile(join(folder, check.lock), "utf8");
         if (originalLock && npmIndirectVersionsChanged(originalLock, candidateLock)) {
           await changedSources(folder, resolvedFiles, new Set());
           await changedSources(folder, initialSources, allowed);
-          const lockFallbacks = new Map(retry.lockFallbacks).set(check.root, candidateLock);
           const seed = error instanceof IndirectValidationError ? seedNpmIndirectVersions(originalLock, candidateLock, error.packages) : null;
           const heldIndirects = seed ? npmChangedIndirectPackages(candidateLock, seed) : [];
-          const lockSeeds = new Map(retry.lockSeeds);
-          if (seed) lockSeeds.set(check.root, seed);
+          lockFallbacks.set(check.root, { manifest, reference: candidateLock, ...(seed ? { seed } : {}) });
           const message = `${check.root || "racine"} : échec de validation après changement de versions indirectes ; ${seed ? `repli ciblé ${heldIndirects.length ? "de " + heldIndirects.join(", ") : "des versions indirectes admissibles"} dans les contraintes actuelles` : "nouvelle résolution à partir du verrou initial"}, sans changer les versions directes proposées, puis installation stricte, scan et tests obligatoires.`;
           await security?.remediating?.(message);
           await restoreVersions();
-          const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1, lockFallbacks, lockSeeds }, security);
+          const result = await prepareNodeSources(folder, roots, names, nodeVersion, transport, requiredDockerRoots, { ...retry, attempt: retry.attempt + 1 }, security);
           result.warnings.push(...warnings, message);
           return result;
         }
@@ -498,11 +533,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       await changedSources(folder, resolvedFiles, new Set());
       await changedSources(folder, initialSources, allowed);
       if (rejected.length) {
-        const remaining = { ...secured };
-        for (const name of rejected) delete remaining[name];
-        remediation.constraints.set(check.root, remaining);
-        const manifest = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
-        rejectCombination(check, manifest);
+        if (!rejectCombination(check)) throw error;
         const message = `${check.root || "racine"} : proposition de sécurité écartée après échec des tests (${rejected.join(", ")}) ; recherche d’une autre combinaison sans ignorer les assertions.`;
         await security?.remediating?.(message);
         for (const [name, content] of originalVersions) {
@@ -514,8 +545,8 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         return result;
       }
       if (!(error instanceof DependencyValidationError)) throw error;
-      const candidate = JSON.parse(intended.get((check.root ? check.root + "/" : "") + "package.json")!);
-      if (!rejectCombination(check, candidate)) throw error;
+      const candidate = JSON.parse(manifest);
+      if (!rejectCombination(check)) throw error;
       const preferences = new Map(retry.preferences), preferred = { ...preferences.get(check.root) };
       for (const name of error.packages) {
         const original = check.original.dependencies?.[name] || check.original.devDependencies?.[name] || check.original.optionalDependencies?.[name];

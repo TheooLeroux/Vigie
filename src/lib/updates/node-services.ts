@@ -14,7 +14,14 @@ type Options = {
   prepare?: typeof prepareNodeSources;
   validate?: typeof validatePreparedNodeSources;
   progress?: (root: string, phase: "preparing" | "prepared" | "validating" | "ready") => Promise<void>;
+  onPreparationFailure?: (root: string) => Promise<void>;
 };
+
+export class NodePreparationError extends ApiError {
+  constructor(readonly failures: Map<string, unknown>) {
+    super(`Préparation arrêtée pour ${[...failures.keys()].join(", ")}. La combinaison du dépôt n’a pas été validée.`, 422);
+  }
+}
 
 export function nodeServiceConcurrency(cpus = availableParallelism(), memory = totalmem()) {
   // Each validation container is limited to 3 GiB. Keep at least 1 GiB for the
@@ -74,7 +81,7 @@ async function prepareServices(folder: string, roots: string[], names: string[],
   const cancellation = new AbortController();
   const runtime = { ...(options.runtime || nodeValidationRuntime(nodeVersion)), signal: options.runtime?.signal ? AbortSignal.any([options.runtime.signal, cancellation.signal]) : cancellation.signal };
   try {
-    const prepared = await boundedMap(selected, limit, async root => {
+    const preparations = await boundedMap(selected, limit, async root => {
       const working = await mkdtemp(join(temporary, "prepare-"));
       const started = performance.now();
       try {
@@ -87,10 +94,20 @@ async function prepareServices(folder: string, roots: string[], names: string[],
         if ([...result.allowed].some(name => !versionFiles.some(file => name === prefix + file))) throw new ApiError("La préparation d’un service a dépassé son périmètre de versions.", 422);
         const files = await changedSources(working, original, result.allowed);
         await options.progress?.(root, "prepared");
-        return { root, ...result, files, elapsedMs: Math.round(performance.now() - started) };
-      } catch (error) { if (!cancellation.signal.aborted) cancellation.abort(error); throw cancellation.signal.reason; }
+        return { status: "prepared" as const, root, ...result, files, elapsedMs: Math.round(performance.now() - started) };
+      } catch (error) {
+        if (options.onPreparationFailure) {
+          await options.onPreparationFailure(root);
+          return { status: "failed" as const, root, error };
+        }
+        if (!cancellation.signal.aborted) cancellation.abort(error);
+        throw cancellation.signal.reason;
+      }
       finally { await rm(working, { recursive: true, force: true }); }
     });
+    const failed = preparations.filter(item => item.status === "failed");
+    if (failed.length) throw new NodePreparationError(new Map(failed.map(item => [item.root, item.error])));
+    const prepared = preparations.filter(item => item.status === "prepared");
     const allowed = new Set(prepared.flatMap(result => [...result.allowed]));
     const combinedNames = [...new Set([...names, ...allowed])].filter(name => names.includes(name) || prepared.some(result => result.files.some(file => file.path === name)));
     const combined = join(temporary, "combined");

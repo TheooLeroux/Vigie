@@ -6,7 +6,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import YAML from "yaml";
 import { controlSource } from "../src/lib/automatic-control-state";
 import { projectHealth } from "../src/lib/project-health";
-import { currentAssessmentResults, assessmentInterval, nodeAssessmentChanges } from "../src/lib/updates/assessment";
+import { assessmentResultIsSafe, currentAssessmentResults, assessmentInterval, nodeAssessmentChanges } from "../src/lib/updates/assessment";
+import { securityCheck } from "../src/lib/updates/security";
 import { planDailyAssessments } from "../src/lib/updates/daily-assessments";
 import { recordAssessmentAfterUpdate } from "../src/lib/updates/assessment-after-update";
 import { executeLocalWordPress } from "../src/lib/updates/wordpress-agent-execution";
@@ -39,6 +40,24 @@ test("Bilan : une combinaison actuelle validée remplace les estimations du cata
   assert.match(html, /Aucune meilleure version validée/);
   assert.doesNotMatch(html, /Mises à jour disponibles|9\.0\.0/);
   assert.match(html, /Aucune installation ni publication automatique/);
+});
+
+test("Bilan NES App : un contrôle final avec réserve distingue la correction du blocage ESLint", () => {
+  const { detail, state } = fixture(["Verrou actualisé"]);
+  const result = state.assessment!.results[0];
+  const glob = { id: "CVE-2026-118773", aliases: [], package: "glob", version: "13.0.6", severity: "moderate" as const, scope: "backend" };
+  const minimatch = { ...glob, id: "CVE-2026-118764", package: "minimatch", version: "10.2.6", explanation: "ESLint 10.14.0 exige la branche 10. Le correctif commence en 11.0.1." };
+  const initial = securityCheck("OSV", "before", "backend", [glob, minimatch]);
+  const rejected = securityCheck("OSV", "candidate", "backend", [minimatch]);
+  const final = { ...rejected, status: "warning" as const, blockers: undefined, npmRetained: [minimatch] };
+  result.checks = [initial, rejected];
+  assert.equal(assessmentResultIsSafe(result), false);
+  result.checks.push(final);
+  assert.equal(assessmentResultIsSafe(result), true);
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(html, /Failles npm corrigées dans la proposition.*glob \(CVE-2026-118773\)/);
+  assert.match(html, /Failles npm qui resteraient après la mise à jour/);
+  assert.match(html, /ESLint 10\.14\.0 exige la branche 10\. Le correctif commence en 11\.0\.1/);
 });
 
 test("Bilan : seules les propositions testées sont comptées pour le bloc validé", () => {

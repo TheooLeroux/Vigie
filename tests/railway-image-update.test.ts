@@ -114,6 +114,10 @@ test("Image : suppression des doublons entre binaires, sans masquer les alertes 
   const before = [finding({ version: "0.50.0" })];
   const check = imageSecurityCheck("candidate", newReference, [finding(), finding({ scope: "other" })], before);
   assert.equal(check.findings.length, 1); assert.equal(check.status, "warning");
+  const zlib = finding({ id: "CVE-2026-4738", package: "zlib", version: "1.3.2-r1", severity: "moderate" });
+  const blocked = imageSecurityCheck("candidate", newReference, [finding(), zlib], before);
+  assert.deepEqual(blocked.findings, [finding(), zlib]);
+  assert.deepEqual(blocked.blockers, [zlib]);
   for (const patch of [{ id: "CVE-new" }, { package: "other-lib" }, { severity: "low" as const }, { kind: "supply-chain" as const }]) assert.equal(retainedImageFindings([finding(patch)], before), false);
   assert.equal(retainedImageFindings([finding(), finding({ version: "0.61.0" })], before), false, "ne pas multiplier les composants affectés par la même alerte");
   assert.throws(() => requireZeroFinalFindings([{ targetId: target.id, name: "Node", stage: "completed", message: "", warnings: [], checks: [{ ...check, phase: "after" }] }]), /Publication arrêtée/);

@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
-import { activeUpdateStages, type SecurityFinding, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
+import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
 import { formatDate } from "./ui";
 import { updateStopSummary } from "@/lib/updates/stop-summary";
 import { updateProgressStatus } from "@/lib/updates/progress";
@@ -9,9 +9,24 @@ import { createRefreshQueue } from "@/lib/project-realtime";
 import { useProjectRealtime } from "./project-realtime";
 
 type Request = (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
-function FindingDetails({ finding }: { finding: SecurityFinding }) {
+export function FindingDetails({ finding }: { finding: SecurityFinding }) {
   const level = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
   return <div><p><strong>{finding.title || finding.package}</strong></p><p><code>{finding.package}@{finding.version}</code> · {finding.aliases[0] || finding.id} · sévérité {level}</p>{finding.explanation && <p>{finding.explanation}</p>}{finding.fixedVersions?.length ? <p>Version(s) correctrice(s) référencée(s) : {finding.fixedVersions.join(", ")}. Leur compatibilité doit être vérifiée avant installation.</p> : null}{finding.url && <a href={finding.url} target="_blank" rel="noreferrer">Consulter la source du signalement</a>}</div>;
+}
+export function RemainingNpmFindings({ result, proposal = false }: { result: UpdateResult; proposal?: boolean }) {
+  const findings = remainingNpmFindings(result);
+  if (!findings.length) return null;
+  const before = result.checks?.findLast(check => check.tool === "OSV" && check.phase === "before");
+  const final = result.checks?.findLast(check => check.tool === "OSV" && check.phase !== "before");
+  const fixed = result.stage === "completed" && final?.status === "warning" ? before?.findings.filter(finding => !final.findings.some(candidate =>
+    candidate.scope === finding.scope && candidate.package === finding.package && [finding.id, ...finding.aliases].some(id => candidate.id === id || candidate.aliases.includes(id)))) : undefined;
+  const title = result.stage !== "completed" ? "Failles npm encore présentes dans la version testée"
+    : proposal ? "Failles npm qui resteraient après la mise à jour" : "Failles npm qui restent à corriger";
+  return <div className="updates-note">
+    {!!fixed?.length && <p>{proposal ? "Failles npm corrigées dans la proposition" : "Failles npm corrigées"} · {fixed.map(finding => `${finding.package} (${finding.aliases[0] || finding.id})`).join(", ")}</p>}
+    <p><strong>{title}</strong></p><ul>{findings.map((finding, index) => <li key={`${finding.id}:${index}`}>
+    <strong>{finding.package} {finding.version}</strong> ({finding.aliases[0] || finding.id}). {finding.explanation}
+  </li>)}</ul></div>;
 }
 export const updateStageLabels: Record<UpdateStage, string> = { queued: "En attente", checking: "Vérification", updating: "Mise à jour", publishing: "Publication", verifying: "Contrôle du déploiement", completed: "Terminé", failed: "Non publiée", attention: "À vérifier" };
 export function MaintenanceScope({ targets }: { targets: UpdateTarget[] }) {
@@ -162,7 +177,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false }
     <details className="updates-details"><summary>Configuration et compte rendu</summary>
       <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "Sauvegarde fichiers et base avant modification, contrôle gratuit WPVulnerability. PHP reste géré par l’hébergeur ; pour les thèmes, utilisez WordPress → Apparence → Thèmes."}</p>
       {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : target.mode === "image" ? "Image officielle Railway" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && target.mode !== "image" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
-      {latest?.results.map(result => <div className="updates-target" key={result.targetId}><strong>{result.name} — {updateStageLabels[result.stage]}</strong><p>{result.message}</p>{result.commit && <p>Commit publié : <code>{result.commit.slice(0, 10)}</code></p>}{result.deploymentId && <p>Déploiement : <code>{result.deploymentId}</code></p>}{result.previousDeploymentId && <p>Déploiement précédent conservé : <code>{result.previousDeploymentId}</code></p>}{result.imageUpdate?.rollbackDeploymentId && <p>Retour et connexion contrôlés : <code>{result.imageUpdate.rollbackDeploymentId}</code></p>}{result.backup && <p>Sauvegarde privée sur o2switch : <code>{result.backup}</code>. Sa restauration reste manuelle pour ne pas écraser de nouvelles données.</p>}{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
+      {latest?.results.map(result => <div className="updates-target" key={result.targetId}><strong>{result.name} — {updateStageLabels[result.stage]}</strong><p>{result.message}</p><RemainingNpmFindings result={result} />{result.commit && <p>Commit publié : <code>{result.commit.slice(0, 10)}</code></p>}{result.deploymentId && <p>Déploiement : <code>{result.deploymentId}</code></p>}{result.previousDeploymentId && <p>Déploiement précédent conservé : <code>{result.previousDeploymentId}</code></p>}{result.imageUpdate?.rollbackDeploymentId && <p>Retour et connexion contrôlés : <code>{result.imageUpdate.rollbackDeploymentId}</code></p>}{result.backup && <p>Sauvegarde privée sur o2switch : <code>{result.backup}</code>. Sa restauration reste manuelle pour ne pas écraser de nouvelles données.</p>}{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
         {result.checks?.map((check, index) => <details key={index}><summary>{check.tool === "Static" ? "Fichiers statiques" : check.tool} · {check.phase === "before" ? "Avant mise à jour" : check.phase === "candidate" ? "Version candidate" : "Après installation"} · {check.status === "blocked" ? "Bloqué" : check.status === "warning" ? "Avec réserves" : "Vérifié"}</summary><p>{check.scope} · {formatDate(check.checkedAt)}</p><p>{check.message}</p>{check.staticEvidence && <p>{check.staticEvidence.fileCount} fichier(s) · Node du build de validation : {check.staticEvidence.buildNodeVersion} · Déploiement : <code>{check.staticEvidence.deploymentId}</code> · Empreinte SHA-256 : <code>{check.staticEvidence.artifactHash}</code></p>}{check.findings.slice(0, 20).map((finding, findingIndex) => <p key={findingIndex}><code>{finding.package}@{finding.version}</code> · {finding.id} · {finding.severity}</p>)}{check.findings.length > 20 && <p>{check.findings.length - 20} autre(s) alerte(s) conservée(s) dans le rapport.</p>}</details>)}
       </div>)}
       {latest && !["completed", "failed"].includes(latest.stage) && Date.now() - Date.parse(latest.updatedAt) > 30 * 60_000 && <button className="button secondary" onClick={async () => {

@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nodeServiceConcurrency, prepareNodeServices } from "../src/lib/updates/node-services";
+import { NodePreparationError, nodeServiceConcurrency, prepareNodeServices } from "../src/lib/updates/node-services";
 import type { NodeUpdateChecks } from "../src/lib/updates/node";
-import { nodeValidationRuntime } from "../src/lib/updates/node";
+import { nodeValidationRuntime, prepareNodeSources } from "../src/lib/updates/node";
 import { ApiError } from "../src/lib/http";
-import { runCommand } from "../src/lib/updates/process";
+import { DependencyValidationError, runCommand } from "../src/lib/updates/process";
 
 const checks = (): NodeUpdateChecks => ({ resolved: async () => {}, image: async () => {}, validated: async () => {} });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -29,6 +29,38 @@ async function proposal(folder: string, roots: string[]) {
   await writeFile(join(folder, path), JSON.stringify({ ...manifest, version: "1.1.0", engines: { node: "24.22.1" } }));
   return { allowed: new Set([path]), warnings: [`${root}: prepared`] };
 }
+
+test("npm : un repli du verrou ne contraint pas la combinaison directe choisie après un échec des tests", async () => {
+  const { folder, names } = await fixture([""]);
+  const manifestFile = join(folder, "package.json"), lockFile = join(folder, "package-lock.json");
+  const manifest = { name: "fixture", version: "1.0.0", dependencies: { tool: "1.0.0" }, scripts: { test: "node --test" } };
+  const writeLock = (candidate: typeof manifest, library: string) => writeFile(lockFile, JSON.stringify({ lockfileVersion: 3, packages: {
+    "": candidate,
+    "node_modules/tool": { version: candidate.dependencies.tool, dependencies: { library: "*" } },
+    "node_modules/library": { version: library, resolved: `https://registry.npmjs.org/library/-/library-${library}.tgz`, integrity: "sha512-YWJj" },
+  } }));
+  const transport: typeof fetch = async (url, options) => String(url).includes("api.osv.dev")
+    ? Response.json({ results: JSON.parse(String(options?.body)).queries.map(() => ({})) })
+    : Response.json(String(url).endsWith("/latest") ? { version: "2.0.0" } : { versions: { "1.0.0": { version: "1.0.0" }, "2.0.0": { version: "2.0.0" } } });
+  const validated: string[] = [];
+  try {
+    await writeFile(manifestFile, JSON.stringify(manifest));
+    await writeLock(manifest, "1.0.0");
+    await prepareNodeSources(folder, [""], names, "24.22.1", transport, [], { limits: new Map(), attempt: 0, runtime: {
+      image: async () => "fixture-image",
+      execute: async (_command, args) => {
+        if (args[0] !== "run") return "";
+        const candidate = JSON.parse(await readFile(manifestFile, "utf8"));
+        if (args.at(-1)?.includes("--package-lock-only")) { await writeLock(candidate, "2.0.0"); return ""; }
+        validated.push(candidate.dependencies.tool);
+        if (validated.length === 1) throw new ApiError("échec après changement indirect", 502);
+        if (validated.length === 2) throw new DependencyValidationError("rupture de l’API", ["tool"]);
+        return "";
+      },
+    } }, checks());
+    assert.deepEqual(validated, ["2.0.0", "2.0.0", "1.0.0"]);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 
 test("Services : ressources bornées, au plus deux préparations", () => {
   assert.equal(nodeServiceConcurrency(8, 16 * 1024 ** 3), 2);
@@ -115,6 +147,29 @@ test("Services : préparations simultanées, reprises privées et validation de 
     for (const root of ["one", "two"]) assert.equal(JSON.parse(await readFile(join(folder, root, "package.json"), "utf8")).version, "1.1.0");
     await assert.rejects(stat(join(folder, "private-output")), { code: "ENOENT" });
     for (const path of directories) await assert.rejects(stat(path), { code: "ENOENT" });
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test("Bilan : un service refusé ne prive pas les suivants de leurs contrôles et aucun résultat n’est assemblé", async () => {
+  const roots = ["frontend", "docs-site", "backend"];
+  const { folder, names } = await fixture(roots);
+  const prepared: string[] = [];
+  const rejected = new ApiError("Trivy : zlib bloquant", 422);
+  try {
+    await assert.rejects(prepareNodeServices(folder, roots, names, "24.22.1", checks, {
+      concurrency: 1,
+      prepare: async (working, [root]) => {
+        if (root === "docs-site") throw rejected;
+        prepared.push(root);
+        return proposal(working, [root]);
+      },
+      onPreparationFailure: async root => {
+        assert.equal(root, "docs-site");
+      },
+      validate: async () => { assert.fail("Le groupe incomplet ne doit pas être assemblé."); },
+    }), error => error instanceof NodePreparationError && error.failures.size === 1 && error.failures.get("docs-site") === rejected);
+    assert.deepEqual(prepared, ["frontend", "backend"]);
+    for (const root of roots) assert.equal(JSON.parse(await readFile(join(folder, root, "package.json"), "utf8")).version, "1.0.0");
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 

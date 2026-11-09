@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { prepareNodeSources, snapshotSources, changedSources } from "../src/lib/updates/node";
+import { prepareNodeSources, snapshotSources, changedSources, nodeValidationRuntime } from "../src/lib/updates/node";
 import { createNodeRemediator } from "../src/lib/updates/remediation";
 import { requireSecurityPass, securityCheck } from "../src/lib/updates/security";
 import { runCommand } from "../src/lib/updates/process";
@@ -90,6 +90,66 @@ test("Docker réel : une alerte de sécurité arrête le parcours avant les scri
     assert.equal(validated, false);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+
+test("Docker réel : le graphe initial évite une résolution et un scan pour la même correction npm", docker, async t => {
+  const alert = { id: "GHSA-fixture-security", aliases: [], package: "has-flag", version: "4.0.0", severity: "high" as const, scope: "" };
+  const versions = [{ version: "8.1.1", dependencies: { "has-flag": "^4.0.0" } }, { version: "2.0.0" }];
+  // Fix the advisory and the available parent versions for reproducibility.
+  // npm still downloads and installs the actual published packages in Docker.
+  const transport: typeof fetch = async (input, options) => {
+    const url = new URL(String(input));
+    if (url.hostname === "api.osv.dev") {
+      const queries = JSON.parse(String(options?.body)).queries as { package: { name: string }; version: string }[];
+      return Response.json({ results: queries.map(query => query.package.name === alert.package && query.version === alert.version ? { vulns: [{ id: alert.id }] } : {}) });
+    }
+    if (url.pathname === "/has-flag") return Response.json({ "dist-tags": { latest: alert.version }, versions: { [alert.version]: { version: alert.version } } });
+    assert.match(url.pathname, /^\/supports-color(?:\/latest)?$/);
+    return Response.json(url.pathname.endsWith("/latest") ? versions[0] : { "dist-tags": { latest: versions[0].version }, versions: Object.fromEntries(versions.map(item => [item.version, item])) });
+  };
+  for (const planned of [false, true]) {
+    const { folder, names } = await fixture();
+    const runtime = nodeValidationRuntime(nodeVersion);
+    const resolutions: string[] = [], scans: string[] = [];
+    const current = async () => JSON.parse(await readFile(join(folder, "package.json"), "utf8")).dependencies["supports-color"] as string;
+    let validated = 0;
+    try {
+      const manifest = { name: "vigie-plan-fixture", private: true, dependencies: { "supports-color": "^2.0.0 || ^8.0.0" }, scripts: { test: `node -e "require('node:assert/strict').equal(require('supports-color/package.json').version, '2.0.0')"` } };
+      await writeFile(join(folder, "package.json"), JSON.stringify(manifest));
+      await writeFile(join(folder, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {
+        "": { dependencies: manifest.dependencies },
+        "node_modules/supports-color": versions[0],
+        "node_modules/has-flag": { version: alert.version },
+      } }));
+      const repair = createNodeRemediator(transport, async () => JSON.stringify({ patches: [] }));
+      await prepareNodeSources(folder, [""], names, nodeVersion, transport, [], {
+        limits: new Map(), attempt: 0, remediation: { iterations: 0, constraints: new Map(), tried: new Set(), seen: new Set(), repair },
+        runtime: { ...runtime, execute: async (command, args, options) => {
+          if (command === "docker" && args[0] === "run" && args.at(-1)?.includes("--package-lock-only")) resolutions.push(await current());
+          return runCommand(command, args, options);
+        } },
+      }, {
+        baseline: planned ? [alert] : undefined,
+        resolved: async () => {
+          scans.push(await current());
+          const lock = JSON.parse(await readFile(join(folder, "package-lock.json"), "utf8"));
+          const vulnerable = lock.packages["node_modules/has-flag"]?.version === alert.version;
+          requireSecurityPass(securityCheck("OSV", "candidate", "fixture", vulnerable ? [alert] : []));
+        },
+        image: async () => {}, validated: async () => { validated++; },
+      });
+      const expected = planned ? ["2.0.0"] : ["8.1.1", "2.0.0"];
+      assert.deepEqual(resolutions, expected);
+      assert.deepEqual(scans, expected);
+      assert.equal(await current(), "2.0.0");
+      assert.equal(validated, 1);
+      t.diagnostic(`${planned ? "Avec" : "Sans"} plan initial : ${resolutions.length} résolution(s) npm, ${scans.length} scan(s) du verrou candidat et ${validated} validation.`);
+    } finally {
+      await runtime.dispose?.();
+      await rm(folder, { recursive: true, force: true });
+    }
+  }
+});
+
 test("Docker réel : la boucle sécurité recherche une autre proposition si les tests refusent la première", docker, async () => {
   const program = "if(require('is-number/package.json').version.startsWith('6.')){console.error('error TS2614: Module \"is-number\" has no exported member fixture');process.exit(1)}";
   const { folder, names } = await fixture(undefined, `node -e ${JSON.stringify(program)}`);

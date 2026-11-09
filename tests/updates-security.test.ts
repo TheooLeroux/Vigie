@@ -8,6 +8,7 @@ import { checkWordPressRequirements, compareWordPressVersions, parseWordPressPla
 import { wordpressUpdateScript } from "../src/lib/updates/wordpress";
 import { runCommand } from "../src/lib/updates/process";
 import { managerCommands } from "../src/lib/updates/node";
+import { npmResidualPolicy } from "../src/lib/updates/node-security";
 import { dockerRuntimeBase } from "../src/lib/updates/dockerfile";
 import type { SecurityFinding } from "../src/lib/updates/types";
 
@@ -37,6 +38,39 @@ test("Objectif zéro faille : un ancien warning ne peut terminer un traitement ;
   assert.throws(() => requireZeroFinalFindings(multiple), /non résolue/);
   assert.deepEqual(multiple.map(result => result.stage), ["failed", "attention"], "aucun autre service vulnérable ne doit rester marqué terminé");
 });
+test("npm : une alerte préexistante expliquée reste visible, sans accepter une nouvelle exposition", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "vigie-retained-npm-"));
+  try {
+    const path = join(folder, "package-lock.json");
+    const manifest = { devDependencies: { eslint: "10.14.0" } };
+    const packages = { "": manifest, "node_modules/eslint": { version: "10.14.0", dev: true, dependencies: { library: "^1.0.0" } }, "node_modules/library": { version: "1.0.0", dev: true } };
+    const save = (entries: object) => writeFile(path, JSON.stringify({ lockfileVersion: 3, packages: entries }));
+    await save(packages);
+    const old = { ...finding("moderate"), scope: "" };
+    const blocked = { ...old, explanation: "Le parent stable exige la version majeure qui reste vulnérable." };
+    const policy = await npmResidualPolicy(folder, ["package-lock.json"], [old]);
+    const check = (findings: SecurityFinding[]) => policy.check(folder, "racine", findings);
+    assert.equal((await check([old])).status, "blocked");
+    assert.equal(await policy.retain(folder, [old]), false);
+    assert.equal(await policy.retain(folder, [blocked]), true);
+    const retained = await check([old]);
+    assert.equal(retained.status, "warning");
+    assert.deepEqual(retained.findings, [blocked]);
+    assert.deepEqual((await check([])).findings, []);
+    const result = { targetId: "fixture", name: "App", stage: "completed" as const, message: "done", warnings: [], checks: [securityCheck("OSV", "before", "racine", [old]), retained] };
+    assert.doesNotThrow(() => requireZeroFinalFindings([result]));
+    assert.throws(() => requireZeroFinalFindings([{ ...result, checks: [retained] }]), /non résolue/);
+    for (const other of [{ ...old, id: "GHSA-new", aliases: [] }, { ...old, scope: "other" }, { ...old, severity: "high" as const }, { ...old, version: "1.0.1" }]) {
+      const mixed = await check([old, other]);
+      assert.deepEqual(mixed.blockers, [other]);
+      assert.throws(() => requireSecurityPass(mixed), /Publication arrêtée/);
+    }
+    await save({ ...packages, "node_modules/library": { ...packages["node_modules/library"], dev: false } });
+    assert.equal((await check([old])).status, "blocked");
+    await save({ ...packages, "": { ...manifest, dependencies: { library: "^1.0.0" } } });
+    assert.equal((await check([old])).status, "blocked");
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 test("Sécurité : distinction des alertes préexistantes, nouvelles, aggravées, inconnues et malveillantes", () => {
   const old = finding();
   assert.equal(securityCheck("OSV", "before", "lock", [old]).status, "warning");
@@ -63,8 +97,9 @@ test("OSV : sévérité des groupes et conservation des alertes sans score", () 
   assert.equal(severity("7.5"), "high");
 });
 test("Trivy : paquets système et arrêt sur rapport incomplet ou système hors support", () => {
-  const report = { SchemaVersion: 2, Metadata: { OS: { Family: "debian", Eosl: false } }, Results: [{ Target: "debian", Vulnerabilities: [{ VulnerabilityID: "CVE-2026-12345", PkgName: "openssl", InstalledVersion: "3.0.0-1", Severity: "HIGH" }] }] };
+  const report = { SchemaVersion: 2, Metadata: { OS: { Family: "debian", Eosl: false } }, Results: [{ Target: "debian", Vulnerabilities: [{ VulnerabilityID: "CVE-2026-12345", PkgName: "openssl", InstalledVersion: "3.0.0-1", Severity: "HIGH", FixedVersion: "1:3.0.1-1~deb12u1, 3.1.0-r1" }] }] };
   assert.equal(parseTrivy(JSON.stringify(report))[0].severity, "high");
+  assert.deepEqual(parseTrivy(JSON.stringify(report))[0].fixedVersions, ["1:3.0.1-1~deb12u1", "3.1.0-r1"]);
   assert.throws(() => parseTrivy(JSON.stringify({ ...report, Metadata: {} })), /n’a pas identifié/);
   assert.throws(() => parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", Eosl: true } } })), /fin de support/);
   assert.ok(parseTrivy(JSON.stringify({ ...report, Metadata: { OS: { Family: "debian", Eosl: true } } }), true).some(item => item.id === "EOL-OS"));

@@ -1,6 +1,6 @@
 import { controlSource } from "../automatic-control-state";
 import type { ProjectDetail } from "../types";
-import type { UpdateResult, UpdateState, UpdateTarget } from "./types";
+import { remainingNpmFindings, type UpdateResult, type UpdateState, type UpdateTarget } from "./types";
 
 export const assessmentInterval = 24 * 60 * 60_000;
 
@@ -8,6 +8,7 @@ export function finishAssessment(result: UpdateResult, changes: string[], limita
   result.assessment = { changes: [...new Set(changes)], ...(limitation ? { limitation } : {}) };
   result.stage = "completed";
   result.message = changes.length ? "Une proposition stable a passé les contrôles avant installation." : "Aucune meilleure combinaison stable retenue par le parcours de maintenance.";
+  if (remainingNpmFindings(result).length) result.message += " Des failles npm déjà présentes restent à corriger.";
 }
 
 export function currentAssessmentResults(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
@@ -43,9 +44,10 @@ export function nodeAssessmentChanges(target: UpdateTarget, before: Record<strin
 }
 
 export function assessmentResultIsSafe(result: UpdateResult) {
+  const finalOsv = result.checks?.findLast(check => check.tool === "OSV" && check.phase === "candidate");
   return result.stage === "completed" && !!result.assessment && !result.commit && !result.deploymentId && !result.backup
     && !!result.checks?.some(check => check.phase === "candidate")
-    && !result.checks.some(check => check.status === "blocked");
+    && !result.checks.some(check => check.status === "blocked" && (check.tool !== "OSV" || check.phase !== "candidate" || check === finalOsv));
 }
 
 export function wordpressAssessmentChanges(plan: { wordpress: { current: string; target: string }; plugins: { slug: string; current: string; target: string }[] }) {

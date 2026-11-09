@@ -12,10 +12,11 @@ export function updateStopSummary(run: UpdateRun) {
   let wordpressReason: string | null = null;
   for (const result of run.results) {
     const latest = new Map<UpdateCheck["tool"], UpdateCheck>();
-    for (const check of result.checks || []) if (scanners.has(check.tool)) latest.set(check.tool, check);
+    for (const check of result.checks || []) if (scanners.has(check.tool) && check.phase !== "before") latest.set(check.tool, check);
     for (const check of latest.values()) {
-      if (check.status === "blocked") wordpressReason ||= wordpressBlockingMessage(check);
-      for (const finding of check.findings) {
+      if (check.status !== "blocked") continue;
+      wordpressReason ||= wordpressBlockingMessage(check);
+      for (const finding of check.blockers || check.findings) {
         const key = JSON.stringify([result.targetId, finding.package, finding.version, [...finding.aliases, finding.id].sort()[0]]);
         if (seen.has(key)) continue;
         seen.add(key);

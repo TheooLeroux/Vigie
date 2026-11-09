@@ -4,7 +4,7 @@ import { observedProjectDetail } from "../project-observations";
 import { controlSource } from "../automatic-control-state";
 import { updateTargets } from "./targets";
 import { updateStorage } from "./storage";
-import { activeUpdateStages, type UpdateRun, type UpdateResult } from "./types";
+import { activeUpdateStages, remainingNpmFindings, type UpdateRun, type UpdateResult } from "./types";
 
 // A successful installation already ran the solver. Bind that result to the
 // newly observed deployment instead of immediately re-advertising registry
@@ -30,7 +30,9 @@ export async function recordAssessmentAfterUpdate(run: UpdateRun, dependencies =
       : !!node && node.deploymentId === source.deploymentId && (!node.commit || node.commit === source.commit);
     if (!bound) continue;
     assessmentSources[target.id] = source.identity;
-    results.push({ targetId: target.id, name: target.name, stage: "completed", message: "La combinaison stable retenue a été installée et contrôlée lors de la dernière maintenance.", warnings: result.warnings, manualUpdates: result.manualUpdates, assessment: { changes: [], limitation: "Les versions de catalogue non retenues ne sont pas annoncées comme des propositions validées. La recherche quotidienne comparera les nouvelles publications." } });
+    const remaining = remainingNpmFindings(result);
+    const checks = remaining.length ? [result.checks?.findLast(check => check.tool === "OSV" && check.phase === "before"), result.checks?.findLast(check => check.tool === "OSV" && check.phase !== "before")].filter(check => check !== undefined) : undefined;
+    results.push({ targetId: target.id, name: target.name, stage: "completed", message: remaining.length ? result.message : "La combinaison stable retenue a été installée et contrôlée lors de la dernière maintenance.", warnings: result.warnings, manualUpdates: result.manualUpdates, checks, assessment: { changes: [], limitation: "Les versions de catalogue non retenues ne sont pas annoncées comme des propositions validées. La recherche quotidienne comparera les nouvelles publications." } });
   }
   if (!results.length) return;
   const now = new Date().toISOString();

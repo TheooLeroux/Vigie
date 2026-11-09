@@ -11,7 +11,7 @@ import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { changedSources, latestNode, nodeValidationRuntime, snapshotSources, type NodeUpdateChecks } from "./node";
-import { prepareNodeServices } from "./node-services";
+import { NodePreparationError, prepareNodeServices } from "./node-services";
 import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, readRailwayInstance, waitForDeployment } from "./providers";
 import { activeNodeImage, confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
@@ -20,9 +20,10 @@ import { createUpdateProgressTracker } from "./progress";
 import { updateScope, updateTargets } from "./targets";
 import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import { executeLocalWordPress } from "./wordpress-agent-execution";
-import type { UpdateRun, UpdateTarget, UpdateResult, UpdateStage, UpdateCheck, SecurityFinding } from "./types";
+import { remainingNpmFindings, type UpdateRun, type UpdateTarget, type UpdateResult, type UpdateStage, type UpdateCheck, type SecurityFinding } from "./types";
+import { npmResidualPolicy } from "./node-security";
 import { dockerNodeBases, dockerRuntimeBase, validateDockerfileCandidate, versionOnlyDockerfile } from "./dockerfile";
-import { requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck } from "./security";
+import { requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck, SecurityPolicyError } from "./security";
 import { nodeCatalogState } from "./node-catalog-state";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs, type NodeValidationReceipt } from "./node-current";
 import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
@@ -88,6 +89,9 @@ export async function checkNodeEndpoint(target: UpdateTarget, check = checkPubli
   await check(target.url);
 }
 export function nodeCompletionMessage(target: UpdateTarget, result: UpdateResult, unchanged = false) {
+  if (remainingNpmFindings(result).length) return unchanged
+    ? "Déploiement actuel vérifié. Des failles npm déjà présentes restent à corriger."
+    : "Mise à jour déployée et vérifiée. Des failles npm déjà présentes restent à corriger.";
   if (workerTarget(target)) return `${unchanged ? "Dépendances à jour et" : "Nouveau"} déploiement du traitement Node vérifié ; les résultats métier restent à contrôler.`;
   if (result.managedNode?.updatePending) return unchanged ? "Dépendances validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Dépendances déployées et validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur.";
   if (target.capability?.adapter === "node-static") return "Construction Node et publication du site statique vérifiées ; contrôle HTTPS réussi, sans runtime Node serveur revendiqué.";
@@ -202,10 +206,40 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await progress("updating", `${check.tool} : ${check.phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
       requireSecurityPass(check);
     }
+    async function recordOsv(phase: "before" | "candidate", scope: string, scan: Awaited<ReturnType<typeof nodeScan>>, selectedRoots = roots, workingFolder = sourceFolder) {
+      const checkFindings = (label: string, findings: SecurityFinding[]) => phase === "before"
+        ? securityCheck("OSV", phase, label, findings)
+        : npmPolicy.check(workingFolder, label, findings);
+      for (const [index, target] of targets.entries()) {
+        if (!selectedRoots.includes(target.root)) continue;
+        const findings = scan.findings.filter(finding => finding.scope === target.root);
+        const check = await checkFindings(`${scope} · ${target.root || "racine"}`, findings);
+        check.checkedAt = scan.checkedAt;
+        if (scan.reused.includes(target.root)) check.message += " Verrou inchangé : analyse de cette exécution réutilisée (moins de cinq minutes).";
+        const result = results[index];
+        result.checks ||= [];
+        result.checks.push(check);
+      }
+      await progress("updating", `OSV : ${phase === "before" ? "analyse de la version actuelle" : "contrôle de la version candidate"}.`);
+      // The resolver needs all affected roots to search for compatible fixes.
+      requireSecurityPass(await checkFindings(scope, scan.findings));
+    }
     await progress("checking", "Analyse de sécurité des dépendances actuelles.");
     const baselineScan = await nodeScan(names);
     const baseline = baselineScan.findings;
-    await record({ ...securityCheck("OSV", "before", "Dépendances verrouillées des services sélectionnés", baseline), checkedAt: baselineScan.checkedAt });
+    const scopedBaseline = await Promise.all(targets.map(async (target, index) => {
+      if (target.provider !== "railway" || target.mode !== "git" || !expected || !results[index].previousDeploymentId || !baseline.some(finding => finding.scope === target.root)) return false;
+      try {
+        const instance = (await readRailwayInstance(target)).serviceInstance;
+        activeNodeImage(target, { deploymentId: results[index].previousDeploymentId!, commit: expected }, version, instance.activeDeployments || []);
+        return true;
+      } catch { return false; }
+    }));
+    const npmPolicy = await npmResidualPolicy(sourceFolder, names, baseline.filter(finding => {
+      const matches = targets.flatMap((target, index) => target.root === finding.scope ? [scopedBaseline[index]] : []);
+      return matches.length > 0 && matches.every(Boolean);
+    }));
+    await recordOsv("before", "Dépendances verrouillées", baselineScan);
     const imageBaselines = new Map<string, SecurityFinding[]>();
     const imageSecurity = new Map<string, string>();
     const imageReferences = new Map<string, { image: string; digest: string }[] | null>();
@@ -241,7 +275,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         },
         finalScan: async () => {
           const final = await nodeScan(names, true);
-          await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de la configuration actuelle", final.findings, baseline), checkedAt: final.checkedAt });
+          await recordOsv("candidate", "Contrôle final frais de la configuration actuelle", final);
           return final.findings;
         },
         sources: async () => { await changedSources(sourceFolder, before, new Set()); },
@@ -283,10 +317,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const scanSources = createNodeScanCache(workingFolder, selectedRoots, scanWithInventory);
       const selectedResults = results.filter((_, index) => selectedRoots.includes(targets[index].root));
       return {
+      baseline,
+      retain: findings => npmPolicy.retain(workingFolder, findings),
       resolved: async resolvedNames => {
-        const scan = await scanSources(resolvedNames);
-        const check = securityCheck("OSV", "candidate", `Dépendances verrouillées : ${selectedRoots.map(root => root || "racine").join(", ")}`, scan.findings, baseline);
-        await record({ ...check, checkedAt: scan.checkedAt, message: check.message + (scan.reused.length ? ` ${scan.reused.length} verrou(s) inchangé(s) : analyse de cette exécution réutilisée (moins de cinq minutes).` : "") }, selectedResults);
+        await recordOsv("candidate", "Dépendances verrouillées", await scanSources(resolvedNames), selectedRoots, workingFolder);
       },
       image: async (root, image) => {
         const findings = (await scanImage(image)).map(entry => ({ ...entry, scope: root }));
@@ -314,6 +348,9 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         transport: catalogs.transport,
         runtime,
         dockerRoots: targets.filter(target => target.builder === "DOCKERFILE").map(target => target.root),
+        onPreparationFailure: run.purpose === "assessment" ? async root => {
+          await progress("updating", `${root || "racine"} : préparation interrompue. Poursuite des vérifications des autres services.`);
+        } : undefined,
         progress: async (root, phase) => {
           const message = { preparing: "Préparation des versions", prepared: "Versions préparées ; attente du contrôle de l’ensemble", validating: "Validation des versions assemblées", ready: "Proposition validée ; attente de publication" }[phase];
           for (const [index, target] of targets.entries()) if (target.root === root) {
@@ -339,7 +376,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
-    await record({ ...securityCheck("OSV", "candidate", "Contrôle final frais de tous les verrous avant publication", finalScan.findings, baseline), checkedAt: finalScan.checkedAt });
+    await recordOsv("candidate", "Contrôle final frais avant publication", finalScan);
+    requireZeroFinalFindings(results);
     for (const [index, result] of results.entries()) {
       const warnings = "services" in prepared ? prepared.services.find(service => service.root === targets[index].root)?.warnings || [] : prepared.warnings;
       result.warnings = [...new Set([...result.warnings, ...warnings])];
@@ -380,6 +418,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
     }
     async function rememberValidation() {
+      if (results.some(result => remainingNpmFindings(result).length)) return;
       try {
         const catalogEntries = await catalogs.snapshot();
         const validationImage = await runtime.image();
@@ -581,7 +620,20 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
         } catch (error) {
           const stage = run.purpose === "assessment" ? "failed" : failureStage(results, error);
           const reason = error instanceof ApiError ? error.message : "Le traitement de ce groupe a échoué. Les informations de récupération sont conservées.";
-          for (const result of results.filter(result => result.stage !== "completed" || result.checks?.some(check => check.status === "blocked"))) { result.stage = stage; result.message = reason; }
+          const blocked = error instanceof SecurityPolicyError && stage === "failed" ? results.filter(result => result.checks?.findLast(check => check.tool === error.check.tool)?.status === "blocked") : [];
+          for (const [index, result] of results.entries()) {
+            if (result.stage === "completed" && !result.checks?.some(check => check.status === "blocked")) continue;
+            result.stage = stage;
+            if (error instanceof NodePreparationError) {
+              const root = targets[index].root;
+              const localFailure = error.failures.get(root);
+              result.message = localFailure instanceof ApiError ? localFailure.message : error.failures.has(root)
+                ? "La préparation de ce service a échoué."
+                : "Contrôles isolés terminés. La validation de l’ensemble est bloquée par un autre service du dépôt.";
+            } else result.message = blocked.length && !blocked.includes(result)
+              ? `Validation du groupe arrêtée par un blocage de sécurité sur ${blocked.map(item => item.name).join(", ")}. Le résultat de ce service reste à confirmer.`
+              : reason;
+          }
           // A rejected final security guard also revokes a provisional success.
           if (results.every(result => result.stage === "completed")) for (const result of results) { result.stage = stage; result.message = reason; }
           failures.push(`${targets.map(target => target.name).join(", ")} : ${reason}`);
@@ -608,6 +660,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
       const imageFindings = run.results.reduce((count, result) => count + (result.imageUpdate?.remainingFindings || 0), 0);
       if (imageFindings) run.message += ` ${imageFindings} signalement(s) non classé(s) déjà présents dans les images restent à qualifier ; ils restent visibles dans le compteur de sécurité.`;
+      if (run.results.some(result => remainingNpmFindings(result).length)) run.message += " Des failles npm déjà présentes restent à corriger. Le motif est indiqué pour chaque service concerné.";
       if (run.excludedTargets?.length) run.message += ` ${run.excludedTargets.length} service(s) non sélectionné(s) restent à traiter séparément ; seuls les services sélectionnés sont couverts par ce résultat.`;
       await log("live", "updates.completed", run.message, run.projectId);
     });

@@ -43,6 +43,7 @@ export type UpdateCheck = {
   nodeEvidence?: { version: string; deploymentId: string; imageDigest?: string; source: "container" | "railpack" | "vercel-function"; usage: "runtime" | "build"; instances?: string[]; projectId?: string; commit?: string | null; region?: string };
   staticEvidence?: { projectId: string; deploymentId: string; commit: string | null; artifactHash: string; fileCount: number; buildNodeVersion: string };
   blockers?: SecurityFinding[];
+  npmRetained?: SecurityFinding[];
   wordpressRetained?: { package: string; version: string }[];
 };
 export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
@@ -64,6 +65,10 @@ export type UpdateResult = {
   managedNode?: ManagedNode;
   imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; networkChecks?: import("./socks-health").SocksHealthProof[]; rollbackDeploymentId?: string };
 };
+
+export function remainingNpmFindings(result: UpdateResult) {
+  return result.checks?.findLast(check => check.tool === "OSV" && check.phase !== "before")?.npmRetained || [];
+}
 export type UpdateRun = {
   purpose?: "assessment";
   assessmentOrigin?: "maintenance";

@@ -11,10 +11,10 @@ import { wordpressBlockingMessage } from "./wordpress-blocking";
 import { verifiedImageResiduals } from "./image-policy";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
-const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().regex(/^\d+\.\d+\.\d+$/)).max(200).optional() });
+const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().min(1).max(200)).max(200).optional() });
 const vulnerability = z.object({ id: identifier, aliases: z.array(identifier).max(100).optional(), database_specific: z.object({ severity: z.string().optional() }).passthrough().optional() }).passthrough();
 const osvSchema = z.object({ results: z.array(z.object({ source: z.object({ path: z.string() }), packages: z.array(z.object({ package: z.object({ name: identifier, version: z.string().max(200).optional(), ecosystem: z.string().optional() }), vulnerabilities: z.array(vulnerability).nullish(), groups: z.array(z.object({ ids: z.array(identifier), max_severity: z.string().optional() })).nullish() })) })) });
-const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), EOSL: z.boolean().optional(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
+const trivySchema = z.object({ SchemaVersion: z.number(), Results: z.array(z.object({ Target: z.string(), Vulnerabilities: z.array(z.object({ VulnerabilityID: identifier, PkgName: identifier, InstalledVersion: z.string().max(200), Severity: z.string(), FixedVersion: z.string().optional() })).nullish() })).default([]), Metadata: z.object({ OS: z.object({ Family: z.string(), EOSL: z.boolean().optional(), Eosl: z.boolean().optional() }).passthrough().optional() }).passthrough() });
 
 export function severity(value: unknown): SecurityFinding["severity"] {
   const label = typeof value === "string" ? value.toLowerCase() : "";
@@ -39,19 +39,24 @@ export function parseTrivy(raw: string, baseline = false) {
   if (!report.Metadata.OS?.Family || !report.Results.length) throw new ApiError("Trivy n’a pas identifié le système de l’image. Analyse incomplète.", 502);
   const endOfLife = report.Metadata.OS.EOSL || report.Metadata.OS.Eosl;
   if (endOfLife && !baseline) throw new ApiError("L’image utilise une distribution système en fin de support. Publication annulée.");
-  const findings: SecurityFinding[] = report.Results.flatMap(result => (result.Vulnerabilities || []).map(entry => findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity) })));
+  const findings: SecurityFinding[] = report.Results.flatMap(result => (result.Vulnerabilities || []).map(entry => {
+    const fixedVersions = [...new Set(entry.FixedVersion?.split(",").map(version => version.trim()).filter(version => /^[a-z0-9][a-z0-9.+:~_-]{0,199}$/i.test(version)))].slice(0, 200);
+    return findingSchema.parse({ id: entry.VulnerabilityID, aliases: [], package: entry.PkgName, version: entry.InstalledVersion, severity: severity(entry.Severity), ...(fixedVersions.length ? { fixedVersions } : {}) });
+  }));
   if (endOfLife) findings.push({ id: "EOL-OS", aliases: [], package: "base-image", version: "unsupported", severity: "critical" });
   return findings;
 }
 export function securityCheck(tool: UpdateCheck["tool"], phase: UpdateCheck["phase"], scope: string, findings: SecurityFinding[], _before: SecurityFinding[] = []): UpdateCheck {
-  // The baseline describes what must be repaired; it is never an allowlist.
-  // Every reported vulnerability, including low/unknown and unpatched issues,
-  // excludes a candidate. Neither old versions nor missing fixes waive this gate.
   const blockers = phase === "before" ? [] : findings;
-  const check: UpdateCheck = { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Cette proposition ne peut pas être publiée ; aucune exception pour les alertes préexistantes.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
+  const check: UpdateCheck = { tool, phase, scope, checkedAt: new Date().toISOString(), status: blockers.length ? "blocked" : findings.length ? "warning" : "passed", message: blockers.length ? `Publication arrêtée : ${blockers.length} vulnérabilité(s) connue(s) non résolue(s). Cette proposition ne peut pas être publiée.` : findings.length ? `${findings.length} vulnérabilité(s) à corriger ; cet état initial n’autorise pas la publication.` : "Aucune vulnérabilité connue signalée dans le périmètre analysé.", findings, ...(blockers.length ? { blockers } : {}) };
   check.message = wordpressBlockingMessage(check) || check.message;
   return check;
 }
+export function sameScopedFinding(first: SecurityFinding, second: SecurityFinding) {
+  return first.scope !== undefined && first.scope === second.scope && first.package === second.package && first.version === second.version
+    && first.severity === second.severity && [first.id, ...first.aliases].some(id => id === second.id || second.aliases.includes(id));
+}
+
 export class SecurityPolicyError extends ApiError {
   constructor(readonly check: UpdateCheck) { super(`${check.tool} : ${check.message}`, 422); }
 }
@@ -69,7 +74,13 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
     }
     for (const check of latest.values()) {
       if (verifiedImageResiduals(result, check)) continue;
-      const findings = check.tool === "WPVulnerability" && check.phase !== "before" ? check.findings.filter(finding => !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version)) : check.findings;
+      const baseline = result.checks?.findLast(item => item.tool === "OSV" && item.phase === "before")?.findings || [];
+      const findings = check.findings.filter(finding => {
+        if (check.phase === "before") return true;
+        if (check.tool === "WPVulnerability") return !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version);
+        if (check.tool !== "OSV" || check.status !== "warning") return true;
+        return !baseline.some(item => sameScopedFinding(item, finding)) || !check.npmRetained?.some(item => item.explanation && sameScopedFinding(item, finding));
+      });
       if (!findings.length && check.status !== "blocked") continue;
       const failure = findings.length ? securityCheck(check.tool, "after", check.scope, findings) : check;
       result.stage = result.commit || result.deploymentId || result.backup ? "attention" : "failed";
