@@ -916,3 +916,19 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
     margin-left: 24px;
   }
 }
+
+.client-detail-header { margin-bottom: 24px; }
+.client-detail-header .page-heading { flex-direction: row; align-items: center; gap: 12px; margin-bottom: 0; }
+.client-detail-header h1 { overflow-wrap: anywhere; }
+.client-contact { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 12px 0 0; font-size: 12px; }
+.client-contact > div { display: flex; flex-wrap: wrap; gap: 2px 6px; min-width: 0; }
+.client-contact dt { color: var(--muted); }
+.client-contact dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.client-contact a { text-decoration: underline; text-underline-offset: 3px; }
+.client-notes { margin-top: 10px; color: var(--text); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.client-unassigned { flex-shrink: 0; color: var(--green); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+
+.client-projects .panel-heading { flex-wrap: wrap; }
+.client-projects .heading-actions { flex-wrap: wrap; gap: 8px; }
+.client-projects .project-table { min-width: 0; white-space: normal; }
+.client-projects .project-name-cell { overflow-wrap: anywhere; }

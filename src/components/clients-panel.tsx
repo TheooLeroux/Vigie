@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   Building2,
@@ -8,31 +8,40 @@ import {
   Plus,
   Search,
 } from "lucide-react";
-import type { Client, WorkspaceData } from "@/lib/types";
-import { domain, EmptyState, OutLink, ProviderBadge } from "./ui";
+import type { Client, Project, WorkspaceData } from "@/lib/types";
+import { domain, EmptyState, OutLink } from "./ui";
 import { RecordLink } from "./record-link";
+
+export const unassignedClientFilter = "unassigned";
+export const unassignedProjectsHref = `/?view=sites&clientFilter=${unassignedClientFilter}`;
+export function isActiveUnassignedProject(project: Project) {
+  return project.lifecycle === "active" && !project.clientId;
+}
 
 export function ClientsPanel({
   data,
-  selectedId,
+  client,
   onSelect,
   onCreate,
   onEdit,
   onProject,
   onAddProject,
   onLinkProject,
+  onUnassignedProjects,
+  renderProviders,
 }: {
   data: WorkspaceData;
-  selectedId: string | null;
+  client?: Client;
   onSelect: (id: string | null) => void;
   onCreate: () => void;
   onEdit: (client: Client) => void;
   onProject: (id: string) => void;
   onAddProject: () => void;
   onLinkProject: () => void;
+  onUnassignedProjects: () => void;
+  renderProviders: (projectId: string) => ReactNode;
 }) {
   const [query, setQuery] = useState("");
-  const client = data.clients.find((c) => c.id === selectedId);
   if (client) {
     const sites = data.projects
       .filter((p) => p.clientId === client.id)
@@ -43,57 +52,27 @@ export function ClientsPanel({
           <ArrowLeft size={15} />
           Tous les clients
         </button>
-        <section className="panel client-summary">
-          <div className="panel-heading">
-            <div>
-              <h2>{client.name}</h2>
-              <p>
-                {sites.length} site{sites.length > 1 ? "s" : ""} rattaché
-                {sites.length > 1 ? "s" : ""}
-              </p>
-            </div>
+        <header className="client-detail-header">
+          <div className="page-heading">
+            <h1>{client.name}</h1>
             <button className="button secondary" onClick={() => onEdit(client)}>
               <Pencil size={15} />
               Modifier
             </button>
           </div>
-          <dl className="client-contact">
-            <div>
-              <dt>Contact</dt>
-              <dd>{client.contactName || "Non renseigné"}</dd>
-            </div>
-            <div>
-              <dt>Email</dt>
-              <dd>
-                {client.email ? (
-                  <a href={`mailto:${client.email}`}>{client.email}</a>
-                ) : (
-                  "Non renseigné"
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>Téléphone</dt>
-              <dd>{client.phone || "Non renseigné"}</dd>
-            </div>
-            <div>
-              <dt>Site</dt>
-              <dd>
-                {client.website ? (
-                  <OutLink href={client.website}>
-                    {domain(client.website)}
-                  </OutLink>
-                ) : (
-                  "Non renseigné"
-                )}
-              </dd>
-            </div>
-          </dl>
+          {(client.contactName || client.email || client.phone || client.website) && (
+            <dl className="client-contact">
+              {client.contactName && <div><dt>Contact</dt><dd>{client.contactName}</dd></div>}
+              {client.email && <div><dt>Email</dt><dd><a href={`mailto:${client.email}`}>{client.email}</a></dd></div>}
+              {client.phone && <div><dt>Téléphone</dt><dd>{client.phone}</dd></div>}
+              {client.website && <div><dt>Site</dt><dd><OutLink href={client.website}>{domain(client.website)}</OutLink></dd></div>}
+            </dl>
+          )}
           {client.notes && <p className="client-notes">{client.notes}</p>}
-        </section>
-        <section className="panel">
+        </header>
+        <section className="panel client-projects">
           <div className="panel-heading">
-            <h2>Sites & applications</h2>
+            <div className="panel-title-line"><h2>Sites & applications</h2><span className="badge neutral">{sites.length}</span></div>
             <div className="heading-actions">
               <button className="button secondary" onClick={onLinkProject}>
                 <Link2 size={15} />
@@ -135,14 +114,7 @@ export function ClientsPanel({
                           </span>
                         </RecordLink>
                       </td>
-                      <td>
-                        <ProviderBadge
-                          name={
-                            data.services.find((s) => s.projectId === p.id)
-                              ?.provider || ""
-                          }
-                        />
-                      </td>
+                      <td>{renderProviders(p.id)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -164,7 +136,7 @@ export function ClientsPanel({
       .toLocaleLowerCase("fr")
       .includes(query.toLocaleLowerCase("fr")),
   );
-  const unassigned = data.projects.filter((p) => !p.clientId);
+  const unassigned = data.projects.filter(isActiveUnassignedProject).length;
   return (
     <section className="panel">
       <div className="filter-toolbar">
@@ -177,9 +149,9 @@ export function ClientsPanel({
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <span className="subtle">
-          {unassigned.length} site{unassigned.length > 1 ? "s" : ""} à rattacher
-        </span>
+        <RecordLink className="client-unassigned" href={unassignedProjectsHref} onNavigate={onUnassignedProjects}>
+          {unassigned} projet{unassigned === 1 ? "" : "s"} à rattacher
+        </RecordLink>
       </div>
       {!clients.length ? (
         <EmptyState

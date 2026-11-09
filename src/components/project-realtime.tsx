@@ -106,11 +106,11 @@ export function ProjectRealtime({ children }: { children: React.ReactNode }) {
   return <Context.Provider value={{ subscribe, status, reconnect }}>{children}</Context.Provider>;
 }
 
-export function ProjectRealtimeStatus({ onlyProblems = false }: { onlyProblems?: boolean }) {
+export function ProjectRealtimeStatus() {
   const { status, reconnect } = useProjectRealtime();
-  if (onlyProblems && status !== "stale" && status !== "error") return null;
+  if (status !== "stale" && status !== "error") return null;
   return <div className="project-realtime-status" role="status">
-    <span className={`badge ${status === "live" ? "sage" : "neutral"}`}><span className="status-dot" />{status === "live" ? "En direct" : status === "connecting" ? "Connexion au direct…" : status === "stale" ? "Notifications interrompues" : "Notifications indisponibles"}</span>
-    {(status === "stale" || status === "error") && <button className="text-button" onClick={reconnect}>Reconnecter</button>}
+    <span className="badge neutral"><span className="status-dot" />{status === "stale" ? "Notifications interrompues" : "Notifications indisponibles"}</span>
+    <button className="text-button" onClick={reconnect}>Reconnecter</button>
   </div>;
 }

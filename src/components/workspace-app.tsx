@@ -42,7 +42,7 @@ import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
 import { SecurityWatchPanel, securityWatchCacheKey } from "./security-watch-panel";
 import type { SecurityWatchSnapshot } from "@/lib/security-watch";
-import { ClientsPanel } from "./clients-panel";
+import { ClientsPanel, isActiveUnassignedProject, unassignedClientFilter, unassignedProjectsHref } from "./clients-panel";
 import { ConnectionsPanel } from "./connections-panel";
 import { ExistingProjectForm } from "./existing-project-form";
 import {
@@ -244,6 +244,17 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
       setSelected(params.get("project"));
       setSelectedClient(params.get("project") ? null : params.get("client"));
       setView(params.get("project") ? "sites" : params.get("client") ? "clients" : navigation.find(n => n.id === params.get("view"))?.id || defaultView);
+      const unassigned = !params.has("project") && !params.has("client") &&
+        params.get("view") === "sites" && params.get("clientFilter") === unassignedClientFilter;
+      if (unassigned) {
+        setQuery("");
+        setProvider("");
+        setTechnology("");
+        setIncompleteOnly(false);
+        setClientFilter(unassignedClientFilter);
+      } else {
+        setClientFilter(previous => previous === unassignedClientFilter ? "" : previous);
+      }
       setProjectTab(projectTabs.find(tab => tab.id === params.get("tab"))?.id || "overview");
       setDialog(null); setMobileNav(false); setError("");
     };
@@ -341,6 +352,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
   }, []);
   function go(v: View, updateHistory = true) {
     setView(v);
+    if (v === "sites") setClientFilter(previous => previous === unassignedClientFilter ? "" : previous);
     setSelected(null);
     setSelectedClient(null);
     setDialog(null);
@@ -352,7 +364,14 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
   function openClient(id: string | null) {
     go("clients", false);
     setSelectedClient(id);
-    window.history.pushState({}, "", id ? `/?client=${encodeURIComponent(id)}` : "/?view=clients");
+    const href = id ? `?client=${encodeURIComponent(id)}` : "?view=clients";
+    if (window.location.search !== href) window.history.pushState({}, "", "/" + href);
+  }
+  function openUnassignedProjects() {
+    go("sites", false);
+    resetFilters();
+    setClientFilter(unassignedClientFilter);
+    window.history.pushState({}, "", unassignedProjectsHref);
   }
   function openProject(id: string) {
     setProjectTab("overview");
@@ -371,10 +390,20 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
     params.set("tab", tab);
     window.history.replaceState({}, "", "/?" + params.toString());
   }
+  function changeClientFilter(value: string) {
+    setClientFilter(value);
+    const params = new URLSearchParams(window.location.search);
+    if (value === unassignedClientFilter) {
+      window.history.replaceState({}, "", unassignedProjectsHref);
+    } else if (params.get("clientFilter") === unassignedClientFilter) {
+      params.delete("clientFilter");
+      window.history.replaceState({}, "", `/?${params}`);
+    }
+  }
   function resetFilters() {
     setQuery("");
     setProvider("");
-    setClientFilter("");
+    changeClientFilter("");
     setTechnology("");
     setIncompleteOnly(false);
   }
@@ -390,6 +419,8 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
     notify(message);
   }
   const projects = data?.projects || [];
+  const currentClient = view === "clients" ? data?.clients.find(client => client.id === selectedClient) : undefined;
+  const unassignedOnly = clientFilter === unassignedClientFilter;
   const providers = Array.from(
     new Set(data?.services.map((s) => s.provider).filter(Boolean)),
   ).sort();
@@ -403,8 +434,8 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
         (!provider || services.some((s) => s.provider === provider)) &&
         (!technology || services.some((s) => s.technology === technology)) &&
         (!clientFilter ||
-          (clientFilter === "__none"
-            ? !p.clientId
+          (unassignedOnly
+            ? isActiveUnassignedProject(p)
             : p.clientId === clientFilter)) &&
         (!incompleteOnly || needsInfo(p, data!.services)) &&
         [
@@ -1036,7 +1067,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           </div>
         </header>
         <main className="main-content">
-          {(view === "sites" || view === "clients") && <ProjectRealtimeStatus onlyProblems={view === "sites"} />}
+          {(view === "sites" || view === "clients") && <ProjectRealtimeStatus />}
           {error && !selected && (
             <div className="error-banner" role="alert">
               {error}
@@ -1071,42 +1102,44 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                   renderDetail()
                 ) : (
                   <>
-                    <div className="page-heading">
-                      <div>
-                        <div className="eyebrow">{titles[view].kicker}</div>
-                        <h1>{titles[view].title}</h1>
-                        <p>{titles[view].description}</p>
-                      </div>
-                      <div className="heading-actions">
-                        {view === "clients" && (
-                          <button
-                            className="button primary"
-                            onClick={() => {
-                              setEditClient(undefined);
-                              setDialog("client");
-                            }}
-                          >
-                            <Plus size={17} />
-                            Ajouter un client
-                          </button>
-                        )}
-                        {view === "sites" && (
-                          <>
+                    {!currentClient && (
+                      <div className="page-heading">
+                        <div>
+                          <div className="eyebrow">{titles[view].kicker}</div>
+                          <h1>{titles[view].title}</h1>
+                          <p>{titles[view].description}</p>
+                        </div>
+                        <div className="heading-actions">
+                          {view === "clients" && (
                             <button
                               className="button primary"
-                              onClick={() => setDialog("project")}
+                              onClick={() => {
+                                setEditClient(undefined);
+                                setDialog("client");
+                              }}
                             >
                               <Plus size={17} />
-                              Ajouter un projet
+                              Ajouter un client
                             </button>
-                          </>
-                        )}
+                          )}
+                          {view === "sites" && (
+                            <>
+                              <button
+                                className="button primary"
+                                onClick={() => setDialog("project")}
+                              >
+                                <Plus size={17} />
+                                Ajouter un projet
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    )}
                     {view === "clients" && (
                       <ClientsPanel
                         data={data}
-                        selectedId={selectedClient}
+                        client={currentClient}
                         onSelect={openClient}
                         onCreate={() => {
                           setEditClient(undefined);
@@ -1119,15 +1152,17 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                         onProject={openProject}
                         onAddProject={() => setDialog("project")}
                         onLinkProject={() => setDialog("linkClientProject")}
+                        onUnassignedProjects={openUnassignedProjects}
+                        renderProviders={renderProjectProviders}
                       />
                     )}
                     {view === "sites" && (
                       <section className="panel sites-panel">
                         <div className="sites-tabs">
                           <span className="sites-list-label">
-                            Tous les projets{" "}
+                            {unassignedOnly ? "Projets à rattacher" : "Tous les projets"}{" "}
                             <span className="badge neutral">
-                              {projects.length}
+                              {unassignedOnly ? filtered.length : projects.length}
                             </span>
                           </span>
                           <div className="project-list-controls">
@@ -1202,10 +1237,10 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                           <select
                             aria-label="Filtrer par client"
                             value={clientFilter}
-                            onChange={(e) => setClientFilter(e.target.value)}
+                            onChange={(e) => changeClientFilter(e.target.value)}
                           >
                             <option value="">Tous les clients</option>
-                            <option value="__none">À rattacher</option>
+                            <option value={unassignedClientFilter}>À rattacher</option>
                             {data.clients.map((c) => (
                               <option key={c.id} value={c.id}>
                                 {c.name}
@@ -1337,7 +1372,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
             const clientId =
               view === "clients"
                 ? selectedClient
-                : clientFilter === "__none"
+                : unassignedOnly
                   ? null
                   : clientFilter;
             if (clientId && !alreadyFollowed)
@@ -1356,7 +1391,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
           defaultClientId={
             view === "clients"
               ? selectedClient || undefined
-              : clientFilter === "__none"
+              : unassignedOnly
                 ? undefined
                 : clientFilter || undefined
           }
@@ -1401,8 +1436,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               input,
             );
             await refresh();
-            setSelectedClient(client.id);
-            setDialog(null);
+            openClient(client.id);
             notify("Fiche client enregistrée.");
           }}
         />
