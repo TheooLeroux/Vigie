@@ -1,9 +1,9 @@
 "use client";
 
-import { RefreshCw, ShieldAlert } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { RefreshCw, Search, ShieldAlert, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRefreshQueue } from "@/lib/project-realtime";
-import { severityLabels, type SecurityWatch, type SecurityWatchSnapshot, type WatchItem } from "@/lib/security-watch";
+import { filterSecurityWatch, severityLabels, type SecurityWatch, type SecurityWatchSnapshot, type WatchItem } from "@/lib/security-watch";
 import { useProjectRealtime } from "./project-realtime";
 import { formatDate, OutLink } from "./ui";
 import "./security-watch.css";
@@ -75,6 +75,13 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState(false);
   const [showAllFindings, setShowAllFindings] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searching = !!query.trim();
+  const matches = useMemo(() => watch && {
+    detected: filterSecurityWatch(watch.detected, query),
+    recent: filterSecurityWatch(watch.recent, query),
+  }, [watch, query]);
   const refresh = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -123,23 +130,37 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
       </button>
     </div>
     {error && <p className="error-banner" role="alert">{watch ? "Actualisation indisponible. Le dernier relevé reste affiché." : "La veille est indisponible. Utilisez « Actualiser » pour réessayer."}</p>}
-    {watch && <>
+    {watch && matches && <>
+      <div className="search-input watch-search" role="search">
+        <Search size={17} aria-hidden="true" />
+        <input
+          ref={searchInput}
+          aria-label="Rechercher une faille, un hébergeur, un client, un projet, une technologie ou une dépendance"
+          placeholder="Rechercher une faille, un hébergeur, un client, une dépendance…"
+          value={query}
+          onChange={event => { setQuery(event.target.value); setShowAllFindings(false); }}
+        />
+        {query && <button type="button" className="icon-button" aria-label="Effacer la recherche" onClick={() => { setQuery(""); setShowAllFindings(false); searchInput.current?.focus(); }}>
+          <X size={15} aria-hidden="true" />
+        </button>}
+      </div>
       <section className="panel watch-panel" aria-labelledby="watch-detected">
         <header>
-          <h2 id="watch-detected"><ShieldAlert size={19} aria-hidden="true" /> Failles relevées sur votre parc {(watch.detected.length > 0 || !!watch.coverage?.fullyCovered) && <span className="count-pill">{watch.detected.length}</span>}</h2>
+          <h2 id="watch-detected"><ShieldAlert size={19} aria-hidden="true" /> Failles relevées sur votre parc {(searching || watch.detected.length > 0 || !!watch.coverage?.fullyCovered) && <span className="count-pill" aria-live="polite">{matches.detected.length}</span>}</h2>
           {watch.coverage ? <p>
             {watch.coverage.projects === 0 ? "Aucun projet actif à surveiller." : `${watch.coverage.fullyCovered} sur ${watch.coverage.projects} projets actifs disposent d’un contrôle récent couvrant tous leurs services suivis.`}
           </p> : <p role="status">Les contrôles du parc sont indisponibles.</p>}
         </header>
-        {watch.detected.length > 0
+        {matches.detected.length > 0
           ? <>
-            <AdvisoryList items={showAllFindings ? watch.detected : watch.detected.slice(0, visibleFindings)} onProject={onProject} />
-            {watch.detected.length > visibleFindings && <div className="watch-list-footer">
+            <AdvisoryList items={showAllFindings ? matches.detected : matches.detected.slice(0, visibleFindings)} onProject={onProject} />
+            {matches.detected.length > visibleFindings && <div className="watch-list-footer">
               <button type="button" className="button secondary" aria-expanded={showAllFindings} onClick={() => setShowAllFindings(!showAllFindings)}>
-                {showAllFindings ? "Afficher les dix premières failles" : `Afficher toutes les failles (${watch.detected.length})`}
+                {showAllFindings ? "Afficher les dix premières failles" : `Afficher toutes les failles (${matches.detected.length})`}
               </button>
             </div>}
           </>
+          : searching ? <p className="watch-empty">Aucune faille du parc ne correspond à cette recherche.</p>
           : !!watch.coverage?.projects && <p className="watch-empty">{watch.coverage.fullyCovered === watch.coverage.projects
             ? "Aucune faille relevée dans les contrôles récents."
             : "Les relevés disponibles ne permettent pas d’établir le nombre de failles sur tout le parc."}</p>}
@@ -149,9 +170,11 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
           <h2 id="watch-recent">Derniers avis publics</h2>
           <p>Les avis récents de <OutLink href="https://github.com/advisories">GitHub Advisory Database</OutLink> sans correspondance dans les relevés affichés ci-dessus.</p>
         </header>
-        {watch.recent.length > 0
-          ? <AdvisoryList items={watch.recent} onProject={onProject} />
-          : <p className="watch-empty" role="status">{watch.feedCheckedAt ? "Aucun autre avis dans les résultats du flux." : "Le flux public est indisponible pour le moment."}</p>}
+        {matches.recent.length > 0
+          ? <AdvisoryList items={matches.recent} onProject={onProject} />
+          : <p className="watch-empty" role="status">{watch.feedCheckedAt
+            ? searching ? "Aucun avis public ne correspond à cette recherche." : "Aucun autre avis dans les résultats du flux."
+            : "Le flux public est indisponible pour le moment."}</p>}
       </section>
     </>}
   </div>;

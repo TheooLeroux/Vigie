@@ -26,7 +26,10 @@ export type ProjectFinding = {
   project: Pick<Project, "id" | "name">;
   finding: ProjectVulnerability;
   historical?: boolean;
+  searchLabels?: string[];
 };
+
+type SearchOccurrence = { text: string; historical: boolean };
 
 export type WatchItem = {
   id: string;
@@ -37,8 +40,28 @@ export type WatchItem = {
   publishedAt?: string;
   latestCheckedAt?: string;
   packages: string[];
-  affected: { project: ProjectFinding["project"]; historical: boolean }[];
+  affected: { project: ProjectFinding["project"]; historical: boolean; search?: SearchOccurrence[] }[];
 };
+
+function searchText(parts: readonly string[]) {
+  return parts.join(" ").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+export function filterSecurityWatch(items: WatchItem[], query: string) {
+  const words = searchText([query]).split(" ").filter(Boolean);
+  if (!words.length) return items;
+  return items.flatMap(item => {
+    const advisory = searchText([item.id, ...item.aliases, item.title, ...(!item.affected.length ? item.packages : []), severityLabels[item.severity]]);
+    const matches = (text: string) => words.every(word => advisory.includes(word) || text.includes(word));
+    if (!item.affected.length) return matches("") ? [item] : [];
+    const affected = item.affected.flatMap(entry => {
+      if (!entry.search) return matches(searchText([entry.project.name])) ? [entry] : [];
+      const matching = entry.search.filter(occurrence => matches(occurrence.text));
+      return matching.length ? [{ ...entry, historical: matching.every(occurrence => occurrence.historical) }] : [];
+    });
+    return affected.length ? [{ ...item, affected }] : [];
+  });
+}
 
 function publicLink(value?: string) {
   if (!value) return undefined;
@@ -58,9 +81,15 @@ export function rankSecurityWatch(advisories: PublicAdvisory[], findings: Projec
     const projectFindings = group.items.filter(item => "finding" in item);
     const advisory = publicItems.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
     const severities = [...publicItems.map(item => item.severity), ...projectFindings.map(item => item.finding.severity)];
-    const projects = new Map<string, WatchItem["affected"][number]>();
-    for (const { project, historical } of projectFindings) {
-      if (!projects.has(project.id) || !historical) projects.set(project.id, { project, historical: !!historical });
+    const projects = new Map<string, WatchItem["affected"][number] & { search: SearchOccurrence[] }>();
+    for (const { project, historical, finding, searchLabels } of projectFindings) {
+      const entry = projects.get(project.id) ?? { project, historical: true, search: [] };
+      entry.historical &&= !!historical;
+      const text = searchText([project.name, finding.service, finding.package, finding.version, finding.title || "", ...(searchLabels ?? [])]);
+      if (!entry.search.some(occurrence => occurrence.text === text && occurrence.historical === !!historical)) {
+        entry.search.push({ text, historical: !!historical });
+      }
+      projects.set(project.id, entry);
     }
     const item: WatchItem = {
       id,

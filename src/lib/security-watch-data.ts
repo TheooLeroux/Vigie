@@ -3,7 +3,8 @@ import { controlInterval } from "./automatic-control-state";
 import { list } from "./db";
 import { observedProjectDetail } from "./project-observations";
 import { lastRecordedSecurity, projectSecurity } from "./project-security";
-import { rankSecurityWatch, type PublicAdvisory, type SecurityWatch } from "./security-watch";
+import { rankSecurityWatch, type ProjectFinding, type PublicAdvisory, type SecurityWatch } from "./security-watch";
+import { railwayRuntimeDeployments } from "./railway-status";
 import type { Project, Workspace } from "./types";
 import { mapConcurrent } from "./updates/planning";
 import { projectUpdates } from "./updates/service";
@@ -72,9 +73,25 @@ async function readProjectFindings(workspace: Workspace, signal: AbortSignal) {
         return age >= 0 && age < controlInterval && monitored.has(finding.targetId) && !historicalKeys.has(finding.key);
       });
       const projectRef = { id: detail.project.id, name: detail.project.name };
+      const projectLabels = [detail.project.client, ...detail.project.tags, ...detail.services.flatMap(service => [service.technology, service.runtime])];
+      const targetLabels = new Map(updates.targets.map(target => {
+        const vercel = detail.vercel?.find(item => target.provider === "vercel" && item.id === target.remoteId && item.connectionId === target.connectionId);
+        const railway = detail.railway?.find(item => target.provider === "railway" && item.connectionId === target.connectionId && item.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId))
+          ?.services.find(service => service.id === target.remoteId && service.environmentId === target.environmentId);
+        const hosting = detail.hosting?.find(item => target.provider === "o2switch" && item.id === target.remoteId);
+        const evidence = railway ? railwayRuntimeDeployments(railway).flatMap(item => item.evidence ? [item.evidence] : []) : [];
+        const labels = [vercel?.production?.framework ?? vercel?.framework, vercel?.production?.nodeBranch ? "Node.js" : null, railway?.image, hosting?.kind,
+          ...evidence.flatMap(item => [item.framework, ...item.packages.map(pkg => pkg.name)])];
+        return [target.id, labels.filter((label): label is string => !!label)];
+      }));
+      const providers = new Map(security.services.map(service => [service.id, service.provider]));
+      const searchable = (finding: ProjectFinding["finding"], historical = false): ProjectFinding => ({
+        project: projectRef, finding, historical,
+        searchLabels: [...projectLabels, providers.get(finding.targetId) || "", ...(targetLabels.get(finding.targetId) ?? [])],
+      });
       return { known: security.known, findings: [
-        ...current.map(finding => ({ project: projectRef, finding })),
-        ...historical.map(finding => ({ project: projectRef, finding, historical: true })),
+        ...current.map(finding => searchable(finding)),
+        ...historical.map(finding => searchable(finding, true)),
       ] };
     } catch {
       // Count a project whose data is unavailable as a gap in coverage.

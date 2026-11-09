@@ -12,6 +12,12 @@
 .watch-toolbar {
   align-items: center;
 }
+.watch-search input {
+  min-width: 0;
+}
+.watch-search > svg, .watch-search > button {
+  flex-shrink: 0;
+}
 .watch-panel {
   overflow-wrap: anywhere;
 }

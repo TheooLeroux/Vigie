@@ -6,7 +6,7 @@ import { controlInterval, controlSource } from "../src/lib/automatic-control-sta
 import { writeAutomaticControl } from "../src/lib/automatic-control-storage";
 import { createProject } from "../src/lib/db";
 import { observedProjectDetail } from "../src/lib/project-observations";
-import { rankSecurityWatch, type ProjectFinding, type PublicAdvisory } from "../src/lib/security-watch";
+import { filterSecurityWatch, rankSecurityWatch, type ProjectFinding, type PublicAdvisory } from "../src/lib/security-watch";
 import { updateTargets } from "../src/lib/updates/targets";
 import { createProjectSchema } from "../src/lib/validation";
 import { applyVercelSnapshot, linkVercelProject, saveVercelConnection } from "../src/lib/vercel";
@@ -28,9 +28,9 @@ test("Veille : regroupe les alias entre projets et sépare les avis publics des 
   };
   const project = { id: "one", name: "Premier projet" };
   const { detected, recent } = rankSecurityWatch([publicItem, newer], [
-    { project, finding },
-    { project, historical: true, finding: { ...finding, key: "duplicate", targetId: "other-service" } },
-    { project: { id: "two", name: "Second projet" }, historical: true, finding: { ...finding, key: "second", id: "osv-2026-123", aliases: [], severity: "critical", version: "2.0.0" } },
+    { project, finding, searchLabels: ["Vercel", "Client Étoile"] },
+    { project, historical: true, searchLabels: ["Railway"], finding: { ...finding, key: "duplicate", targetId: "other-service" } },
+    { project: { id: "two", name: "Second projet" }, historical: true, searchLabels: ["Railway"], finding: { ...finding, key: "second", id: "osv-2026-123", aliases: [], severity: "critical", version: "2.0.0", package: "lib-beta" } },
     { project, finding: { ...finding, key: "third", id: "CVE-2026-4321", aliases: [], severity: "low" } },
   ]);
   assert.deepEqual(detected.map(item => item.id), ["CVE-2026-1234", "CVE-2026-4321"]);
@@ -39,6 +39,14 @@ test("Veille : regroupe les alias entre projets et sépare les avis publics des 
   assert.equal(detected[0].severity, "critical");
   assert.equal(detected[0].title, "Avis GitHub");
   assert.deepEqual(recent.map(item => item.id), [newer.id]);
+  const matches = (query: string) => filterSecurityWatch(detected, query).flatMap(item => item.affected.map(entry => [entry.project.id, entry.historical]));
+  assert.deepEqual(matches("vercel client etoile"), [["one", false]]);
+  assert.deepEqual(matches("railway lib-beta"), [["two", true]]);
+  assert.deepEqual(matches("railway premier projet"), [["one", true]]);
+  assert.deepEqual(matches("Avis GitHub CVE-2026-1234"), [["one", false], ["two", true]]);
+  assert.deepEqual(matches("vercel lib-beta"), []);
+  assert.equal(filterSecurityWatch(recent, "example npm").length, 1);
+  assert.equal(filterSecurityWatch(recent, "railway").length, 0);
 });
 
 test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse privée", async t => {
@@ -73,7 +81,7 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   assert.deepEqual(result.recent.map((item: PublicAdvisory) => [item.id, item.severity]), [["GHSA-AAAA-BBBB-CCCC", "moderate"]]);
 
   process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
-  const project = await createProject("live", createProjectSchema.parse({ name: "Site de test", url: "https://watch.example.test" }));
+  const project = await createProject("live", createProjectSchema.parse({ name: "Site de test", url: "https://watch.example.test", client: "Client Étoile" }));
   const connection = await saveVercelConnection({ name: "Veille QA", teamId: "team_watch", secret: "unit-test-only" });
   const at = new Date().toISOString();
   const production = { id: "deployed", state: "READY", target: "production", createdAt: at, url: project.url, framework: "nextjs", nodeBranch: "24.x", repository: "qa/observed", branch: "main", commit: "c".repeat(40), regions: [] };
@@ -91,6 +99,7 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   assert.equal(matched.detected[0].affected[0].project.id, project.id);
   assert.equal(matched.detected[0].affected[0].historical, false);
   assert.deepEqual(matched.recent, []);
+  assert.equal(filterSecurityWatch(matched.detected, "vercel client etoile next.js library").length, 1);
 
   await writeAutomaticControl({ ...report, error: "Dernier contrôle en erreur" });
   const failed = await (await read()).json();
