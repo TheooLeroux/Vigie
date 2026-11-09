@@ -26,7 +26,7 @@ import {
 } from "@/lib/railway-status";
 import { RecordLink } from "./record-link";
 import { RailwayBuildDetails, railwayVersionPreview } from "./railway-build-details";
-import { ObservationDetails, useObservationTime } from "./observation-details";
+import { DeploymentConnectionReading, ObservationDetails, useObservationTime } from "./observation-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -119,27 +119,111 @@ export function RailwayConnectionsPanel({
         <div className="connections-list">
           {state.connections.map((c) => {
             const items = state.projects.filter((p) => p.connectionId === c.id);
+            const linked = items.filter(p => p.projectId && !p.missingSince);
+            const needsAttention = items.filter(p => !p.projectId || p.missingSince);
+            const renderProject = (p: RailwayProjectView) => (
+              <div className="railway-project record-row" key={p.id}>
+                <div>
+                  {p.projectId ? (
+                    <RecordLink
+                      stretch
+                      href={`/?workspace=live&project=${p.projectId}`}
+                      onNavigate={() => onProject(p.projectId!)}
+                    >
+                      <strong>{p.projectName}</strong>
+                    </RecordLink>
+                  ) : (
+                    <strong>{p.name}</strong>
+                  )}
+                  {p.projectId && p.projectName !== p.name && (
+                    <small>Railway : {p.name}</small>
+                  )}
+                  <p>
+                    {p.environments.length} environnement
+                    {p.environments.length > 1 ? "s" : ""} ·{" "}
+                    {p.services.length} service
+                    {p.services.length > 1 ? "s" : ""}
+                  </p>
+                  <div className="railway-badges">
+                    {p.missingSince ? (
+                      <span className="badge warning">
+                        Absent du dernier relevé
+                      </span>
+                    ) : (
+                      <>
+                        <span
+                          className={`badge ${p.projectId ? "sage" : "neutral"}`}
+                        >
+                          {p.projectId ? "Rattaché" : "À rattacher"}
+                        </span>
+                        {p.services.some(railwayAttention) && (
+                          <span className="badge warning">
+                            {p.services.filter(railwayAttention).length}{" "}
+                            service(s) à vérifier
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="railway-row-actions record-secondary">
+                  {!p.projectId && !p.missingSince && (
+                    <>
+                      <button
+                        className="button secondary"
+                        disabled={!!busy}
+                        onClick={() => setLink(p)}
+                      >
+                        Rattacher
+                      </button>
+                      <button
+                        className="button secondary"
+                        disabled={!!busy}
+                        onClick={async () => {
+                          setBusy(p.id);
+                          setError("");
+                          try {
+                            const created = await request(
+                              `railway/${c.id}/projects/${p.id}/create`,
+                              "POST",
+                              {},
+                            );
+                            setState(await request("railway"));
+                            await onRefresh();
+                            onProject(created.projectId);
+                          } catch (e) {
+                            setError((e as Error).message);
+                          } finally {
+                            setBusy("");
+                          }
+                        }}
+                      >
+                        Ajouter une fiche
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
             return (
               <section className="panel connection-card" key={c.id}>
                 <div className="panel-heading">
                   <div>
                     <h2>{c.name}</h2>
-                    <p>
-                      {items.length} projets ·{" "}
-                      {items.filter((p) => p.projectId).length} rattachés
-                    </p>
+                    <p>{linked.length} dans le parc{needsAttention.length > 0 && ` · ${needsAttention.length} à traiter`}</p>
                   </div>
-                  <span
-                    className={`badge ${!c.configured ? "neutral" : c.error ? "warning" : c.lastSuccessAt ? "sage" : "neutral"}`}
-                  >
-                    {!c.configured
-                      ? "Déconnecté"
-                      : c.error
-                        ? "Relevé en échec"
-                        : c.lastSuccessAt
-                          ? "Connecté"
-                          : "À synchroniser"}
-                  </span>
+                  <div className="connection-card-tools">
+                    <DeploymentConnectionReading configured={c.configured} error={c.error} lastSuccessAt={c.lastSuccessAt} />
+                    <button
+                      className="button primary"
+                      disabled={!!busy}
+                      onClick={() => c.configured ? void sync(c.id) : setEdit(c)}
+                    >
+                      {busy === c.id ? <Loader2 size={15} className="spin" />
+                        : c.configured ? <RefreshCw size={15} /> : <Pencil size={14} />}
+                      {busy === c.id ? "Synchronisation…" : c.configured ? "Synchroniser" : "Configurer l’accès"}
+                    </button>
+                  </div>
                 </div>
                 <div className="connection-body">
                   {c.error && (
@@ -147,130 +231,28 @@ export function RailwayConnectionsPanel({
                       {c.error}
                     </p>
                   )}
-                  <p className="subtle">
-                    Dernier relevé réussi : {formatDate(c.lastSuccessAt)}
-                    {c.lastAttemptAt !== c.lastSuccessAt &&
-                      c.lastAttemptAt &&
-                      ` · Dernière tentative : ${formatDate(c.lastAttemptAt)}`}
-                  </p>
-                  <div className="railway-projects">
-                    {items.map((p) => (
-                      <div className="railway-project record-row" key={p.id}>
-                        <div>
-                          {p.projectId ? (
-                            <RecordLink
-                              stretch
-                              href={`/?workspace=live&project=${p.projectId}`}
-                              onNavigate={() => onProject(p.projectId!)}
-                            >
-                              <strong>{p.projectName}</strong>
-                            </RecordLink>
-                          ) : (
-                            <strong>{p.name}</strong>
-                          )}
-                          {p.projectId && p.projectName !== p.name && (
-                            <small>Railway : {p.name}</small>
-                          )}
-                          <p>
-                            {p.environments.length} environnement
-                            {p.environments.length > 1 ? "s" : ""} ·{" "}
-                            {p.services.length} service
-                            {p.services.length > 1 ? "s" : ""}
-                          </p>
-                          <div className="railway-badges">
-                            {p.missingSince ? (
-                              <span className="badge warning">
-                                Absent du dernier relevé
-                              </span>
-                            ) : (
-                              <>
-                                <span
-                                  className={`badge ${p.projectId ? "sage" : "neutral"}`}
-                                >
-                                  {p.projectId ? "Rattaché" : "À rattacher"}
-                                </span>
-                                {p.services.some(railwayAttention) && (
-                                  <span className="badge warning">
-                                    {p.services.filter(railwayAttention).length}{" "}
-                                    service(s) à vérifier
-                                  </span>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </div>
-                        <div className="railway-row-actions record-secondary">
-                          {!p.projectId && !p.missingSince && (
-                            <>
-                              <button
-                                className="button secondary"
-                                disabled={!!busy}
-                                onClick={() => setLink(p)}
-                              >
-                                Rattacher
-                              </button>
-                              <button
-                                className="button secondary"
-                                disabled={!!busy}
-                                onClick={async () => {
-                                  setBusy(p.id);
-                                  setError("");
-                                  try {
-                                    const created = await request(
-                                      `railway/${c.id}/projects/${p.id}/create`,
-                                      "POST",
-                                      {},
-                                    );
-                                    setState(await request("railway"));
-                                    await onRefresh();
-                                    onProject(created.projectId);
-                                  } catch (e) {
-                                    setError((e as Error).message);
-                                  } finally {
-                                    setBusy("");
-                                  }
-                                }}
-                              >
-                                Ajouter une fiche
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="connection-actions">
-                    <button
-                      className="button primary"
-                      disabled={!!busy || !c.configured}
-                      onClick={() => sync(c.id)}
-                    >
-                      {busy === c.id ? (
-                        <Loader2 size={15} className="spin" />
-                      ) : (
-                        <RefreshCw size={15} />
+                  {c.configured && (
+                    <details className="connection-settings">
+                      <summary>Accès au compte</summary>
+                      {c.lastAttemptAt && c.lastAttemptAt !== c.lastSuccessAt && (
+                        <p className="subtle">Dernière tentative le {formatDate(c.lastAttemptAt)}</p>
                       )}
-                      Synchroniser Railway
-                    </button>
-                    <button
-                      className="button secondary"
-                      disabled={!!busy}
-                      onClick={() => setEdit(c)}
-                    >
-                      <Pencil size={14} />
-                      Modifier l’accès
-                    </button>
-                    {c.configured && (
-                      <button
-                        className="button secondary"
-                        disabled={!!busy}
-                        onClick={() => setDisconnect(c)}
-                      >
-                        <Unplug size={14} />
-                        Déconnecter
-                      </button>
-                    )}
-                  </div>
+                      <div className="heading-actions">
+                        <button className="button secondary" disabled={!!busy} onClick={() => setEdit(c)}>
+                          <Pencil size={14} /> Modifier l’accès
+                        </button>
+                        <button className="button secondary" disabled={!!busy} onClick={() => setDisconnect(c)}>
+                          <Unplug size={14} /> Déconnecter
+                        </button>
+                      </div>
+                    </details>
+                  )}
+                  {!!needsAttention.length && <div className="railway-projects">{needsAttention.map(renderProject)}</div>}
+                  {!!linked.length && <details className="connection-project-group">
+                    <summary>Projets déjà rattachés ({linked.length})</summary>
+                    <div className="railway-projects">{linked.map(renderProject)}</div>
+                  </details>}
+                  {!items.length && c.lastSuccessAt && <p className="subtle">Aucun projet découvert.</p>}
                 </div>
               </section>
             );

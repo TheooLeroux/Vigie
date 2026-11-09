@@ -38,6 +38,21 @@ test("Historique serveur : caractères LIKE littéraux et date civile de Paris s
   await assert.rejects(activityPage({ since: "2026-02-30" }, "live"), /invalide/);
 });
 
+test("Historique serveur : les bilans et les mises à jour sont filtrés séparément", async () => {
+  const p = await project("Maintenance history fixture");
+  const actions = ["updates.assessment_started", "updates.assessed", "updates.assessment_failed", "updates.completed", "updates.failed", "project.updated"];
+  for (const [index, action] of actions.entries()) {
+    await save("activity", "live", {
+      id: randomUUID(), projectId: p.id, projectName: p.name, action,
+      detail: "Maintenance history marker", createdAt: new Date(Date.UTC(2025, 0, 1) + index * 1000).toISOString(),
+    }, p.id);
+  }
+  const rows = async (kind: string) => (await activityPage({ projectId: p.id, query: "Maintenance history marker", kind }, "live")).items.map(item => item.action);
+  assert.deepEqual(await rows("Bilans automatiques"), actions.slice(0, 3).reverse());
+  assert.deepEqual(await rows("Mises à jour"), actions.slice(3, 5).reverse());
+  assert.deepEqual(await rows("Modifications"), ["project.updated"]);
+});
+
 test("Actualisation : seules les connexions liées et périmées sont relues, avec déduplication des appels concurrents", async () => {
   const p = healthFixture().project; let calls = 0; let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });

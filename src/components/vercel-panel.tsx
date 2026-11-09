@@ -19,7 +19,7 @@ import type {
   VercelDeployment,
 } from "@/lib/vercel-types";
 import { RecordLink } from "./record-link";
-import { ObservationDetails, useObservationTime } from "./observation-details";
+import { DeploymentConnectionReading, ObservationDetails, useObservationTime } from "./observation-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -154,30 +154,154 @@ export function VercelConnectionsPanel({
               .filter((p) =>
                 `${p.name} ${p.clientName || p.clientSuggestion || ""} ${p.domains.map((d) => d.name).join(" ")}`
                   .toLowerCase()
-                  .includes(search.toLowerCase()),
+                  .includes(search.trim().toLowerCase()),
               );
+          const groupDefaultView = filter === "all" && !search.trim();
+          const linked = all.filter(p => p.projectId && !p.excluded && !p.missingSince);
+          const excluded = all.filter(p => p.excluded);
+          const needsAttention = all.filter(p => !p.excluded && (!p.projectId || p.missingSince));
+          const renderProject = (p: VercelProjectView) => (
+            <div
+              className={`vercel-project record-row ${p.excluded ? "is-excluded" : ""}`}
+              key={p.id}
+            >
+              <div className="vercel-project-text">
+                {p.projectId ? (
+                  <RecordLink
+                    stretch
+                    href={`/?workspace=live&project=${p.projectId}`}
+                    onNavigate={() => onProject(p.projectId!)}
+                  >
+                    <strong>{p.projectName}</strong>
+                  </RecordLink>
+                ) : p.excluded ? (
+                  <strong>{p.name}</strong>
+                ) : (
+                  <button
+                    className="record-link vercel-name"
+                    onClick={() => setInspect(p)}
+                  >
+                    <strong>{p.name}</strong>
+                  </button>
+                )}
+                {p.projectName && p.projectName !== p.name && (
+                  <small>Vercel : {p.name}</small>
+                )}
+                <p>
+                  {p.excluded
+                    ? "À virer — exclu du suivi, aucune action sur Vercel"
+                    : p.clientName
+                      ? `Client : ${p.clientName}`
+                      : p.clientSuggestion
+                        ? `Client prévu : ${p.clientSuggestion}`
+                        : "Client à préciser"}
+                </p>
+                {!p.excluded && (
+                  <>
+                    <small>
+                      {p.domains
+                        .filter((d) => d.environment === "production")
+                        .map((d) => d.name)
+                        .join(" · ") ||
+                        "Aucun domaine de production renseigné"}
+                    </small>
+                    <div className="vercel-badges">
+                      <span
+                        className={`badge ${p.projectId ? "sage" : "neutral"}`}
+                      >
+                        {p.projectId ? "Dans le parc" : "À ajouter"}
+                      </span>
+                      {p.missingSince ? (
+                        <span className="badge warning">
+                          Absent du dernier relevé
+                        </span>
+                      ) : (
+                        <>
+                          <span
+                            className={`badge ${p.production ? tone(p.production.state) : "neutral"}`}
+                          >
+                            {p.production
+                              ? `Production : ${labels[p.production.state] || p.production.state}`
+                              : "Sans déploiement de production"}
+                          </span>
+                          {p.production?.nodeBranch && (
+                            <span
+                              className={`badge ${p.production.nodeRelease?.supported === false ? "warning" : "neutral"}`}
+                            >
+                              Node {p.production.nodeBranch}
+                              {p.production.nodeRelease?.supported ===
+                              false
+                                ? " · fin de support"
+                                : ""}
+                            </span>
+                          )}
+                          {p.production?.analysis?.technologies
+                            .filter((t) => t.usage === "framework")
+                            .map((t) => (
+                              <span
+                                className="badge neutral"
+                                key={`${t.name}:${t.version}`}
+                              >
+                                {t.name} {t.version}
+                              </span>
+                            ))}
+                          {!!p.production?.analysis?.technologies.some(
+                            (t) => t.update === "available",
+                          ) && (
+                            <span className="badge warning">
+                              Versions à examiner
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+              {!p.projectId && !p.excluded && !p.missingSince && (
+                <div className="vercel-row-actions record-secondary">
+                  <button
+                    className="button primary"
+                    disabled={!!busy}
+                    onClick={() => add(p)}
+                  >
+                    {busy === p.id ? (
+                      <Loader2 className="spin" size={14} />
+                    ) : (
+                      <Plus size={14} />
+                    )}
+                    Ajouter au parc
+                  </button>
+                  <button
+                    className="button secondary"
+                    disabled={!!busy}
+                    onClick={() => setLink(p)}
+                  >
+                    Rattacher à une fiche
+                  </button>
+                </div>
+              )}
+            </div>
+          );
           return (
             <section className="panel connection-card" key={c.id}>
               <div className="panel-heading">
                 <div>
                   <h2>{c.name}</h2>
-                  <p>
-                    {all.length} découverts ·{" "}
-                    {all.filter((p) => p.projectId).length} dans le parc ·{" "}
-                    {all.filter((p) => p.excluded).length} exclus
-                  </p>
+                  <p>{linked.length} dans le parc{needsAttention.length > 0 && ` · ${needsAttention.length} à traiter`}</p>
                 </div>
-                <span
-                  className={`badge ${!c.configured ? "neutral" : c.error ? "warning" : c.lastSuccessAt ? "sage" : "neutral"}`}
-                >
-                  {!c.configured
-                    ? "Déconnecté"
-                    : c.error
-                      ? "Relevé en échec"
-                      : c.lastSuccessAt
-                        ? "Connecté"
-                        : "À synchroniser"}
-                </span>
+                <div className="connection-card-tools">
+                  <DeploymentConnectionReading configured={c.configured} error={c.error} lastSuccessAt={c.lastSuccessAt} />
+                  <button
+                    className="button primary"
+                    disabled={!!busy}
+                    onClick={() => c.configured ? void sync(c.id) : setEdit(c)}
+                  >
+                    {busy === c.id ? <Loader2 size={15} className="spin" />
+                      : c.configured ? <RefreshCw size={15} /> : <Pencil size={14} />}
+                    {busy === c.id ? "Synchronisation…" : c.configured ? "Synchroniser" : "Configurer l’accès"}
+                  </button>
+                </div>
               </div>
               <div className="connection-body">
                 {c.error && (
@@ -185,12 +309,22 @@ export function VercelConnectionsPanel({
                     {c.error}
                   </p>
                 )}
-                <p className="subtle">
-                  Dernier relevé réussi : {formatDate(c.lastSuccessAt)}
-                  {c.lastAttemptAt !== c.lastSuccessAt &&
-                    c.lastAttemptAt &&
-                    ` · Dernière tentative : ${formatDate(c.lastAttemptAt)}`}
-                </p>
+                {c.configured && (
+                  <details className="connection-settings">
+                    <summary>Accès au compte</summary>
+                    {c.lastAttemptAt && c.lastAttemptAt !== c.lastSuccessAt && (
+                      <p className="subtle">Dernière tentative le {formatDate(c.lastAttemptAt)}</p>
+                    )}
+                    <div className="heading-actions">
+                      <button className="button secondary" disabled={!!busy} onClick={() => setEdit(c)}>
+                        <Pencil size={14} /> Modifier l’accès
+                      </button>
+                      <button className="button secondary" disabled={!!busy} onClick={() => setDisconnect(c)}>
+                        <Unplug size={14} /> Déconnecter
+                      </button>
+                    </div>
+                  </details>
+                )}
                 <div className="vercel-tools">
                   <label className="vercel-search">
                     <Search size={15} />
@@ -219,168 +353,22 @@ export function VercelConnectionsPanel({
                     </option>
                   </select>
                 </div>
-                <div className="vercel-projects">
-                  {visible.map((p) => (
-                    <div
-                      className={`vercel-project record-row ${p.excluded ? "is-excluded" : ""}`}
-                      key={p.id}
-                    >
-                      <div className="vercel-project-text">
-                        {p.projectId ? (
-                          <RecordLink
-                            stretch
-                            href={`/?workspace=live&project=${p.projectId}`}
-                            onNavigate={() => onProject(p.projectId!)}
-                          >
-                            <strong>{p.projectName}</strong>
-                          </RecordLink>
-                        ) : p.excluded ? (
-                          <strong>{p.name}</strong>
-                        ) : (
-                          <button
-                            className="record-link vercel-name"
-                            onClick={() => setInspect(p)}
-                          >
-                            <strong>{p.name}</strong>
-                          </button>
-                        )}
-                        {p.projectName && p.projectName !== p.name && (
-                          <small>Vercel : {p.name}</small>
-                        )}
-                        <p>
-                          {p.excluded
-                            ? "À virer — exclu du suivi, aucune action sur Vercel"
-                            : p.clientName
-                              ? `Client : ${p.clientName}`
-                              : p.clientSuggestion
-                                ? `Client prévu : ${p.clientSuggestion}`
-                                : "Client à préciser"}
-                        </p>
-                        {!p.excluded && (
-                          <>
-                            <small>
-                              {p.domains
-                                .filter((d) => d.environment === "production")
-                                .map((d) => d.name)
-                                .join(" · ") ||
-                                "Aucun domaine de production renseigné"}
-                            </small>
-                            <div className="vercel-badges">
-                              <span
-                                className={`badge ${p.projectId ? "sage" : "neutral"}`}
-                              >
-                                {p.projectId ? "Dans le parc" : "À ajouter"}
-                              </span>
-                              {p.missingSince ? (
-                                <span className="badge warning">
-                                  Absent du dernier relevé
-                                </span>
-                              ) : (
-                                <>
-                                  <span
-                                    className={`badge ${p.production ? tone(p.production.state) : "neutral"}`}
-                                  >
-                                    {p.production
-                                      ? `Production : ${labels[p.production.state] || p.production.state}`
-                                      : "Sans déploiement de production"}
-                                  </span>
-                                  {p.production?.nodeBranch && (
-                                    <span
-                                      className={`badge ${p.production.nodeRelease?.supported === false ? "warning" : "neutral"}`}
-                                    >
-                                      Node {p.production.nodeBranch}
-                                      {p.production.nodeRelease?.supported ===
-                                      false
-                                        ? " · fin de support"
-                                        : ""}
-                                    </span>
-                                  )}
-                                  {p.production?.analysis?.technologies
-                                    .filter((t) => t.usage === "framework")
-                                    .map((t) => (
-                                      <span
-                                        className="badge neutral"
-                                        key={`${t.name}:${t.version}`}
-                                      >
-                                        {t.name} {t.version}
-                                      </span>
-                                    ))}
-                                  {!!p.production?.analysis?.technologies.some(
-                                    (t) => t.update === "available",
-                                  ) && (
-                                    <span className="badge warning">
-                                      Versions à examiner
-                                    </span>
-                                  )}
-                                </>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                      {!p.projectId && !p.excluded && !p.missingSince && (
-                        <div className="vercel-row-actions record-secondary">
-                          <button
-                            className="button primary"
-                            disabled={!!busy}
-                            onClick={() => add(p)}
-                          >
-                            {busy === p.id ? (
-                              <Loader2 className="spin" size={14} />
-                            ) : (
-                              <Plus size={14} />
-                            )}
-                            Ajouter au parc
-                          </button>
-                          <button
-                            className="button secondary"
-                            disabled={!!busy}
-                            onClick={() => setLink(p)}
-                          >
-                            Rattacher à une fiche
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  {!visible.length && (
-                    <p className="vercel-empty">
-                      Aucun projet ne correspond à ces filtres.
-                    </p>
-                  )}
-                </div>
-                <div className="connection-actions">
-                  <button
-                    className="button primary"
-                    disabled={!!busy || !c.configured}
-                    onClick={() => sync(c.id)}
-                  >
-                    {busy === c.id ? (
-                      <Loader2 className="spin" size={15} />
-                    ) : (
-                      <RefreshCw size={15} />
-                    )}
-                    Synchroniser Vercel
-                  </button>
-                  <button
-                    className="button secondary"
-                    disabled={!!busy}
-                    onClick={() => setEdit(c)}
-                  >
-                    <Pencil size={14} />
-                    Modifier l’accès
-                  </button>
-                  {c.configured && (
-                    <button
-                      className="button secondary"
-                      disabled={!!busy}
-                      onClick={() => setDisconnect(c)}
-                    >
-                      <Unplug size={14} />
-                      Déconnecter
-                    </button>
-                  )}
-                </div>
+                {groupDefaultView ? (
+                  <>
+                    {!!needsAttention.length && <div className="vercel-projects">{needsAttention.map(renderProject)}</div>}
+                    {!!linked.length && <details className="connection-project-group">
+                      <summary>Projets déjà rattachés ({linked.length})</summary>
+                      <div className="vercel-projects">{linked.map(renderProject)}</div>
+                    </details>}
+                    {!!excluded.length && <details className="connection-project-group">
+                      <summary>Projets exclus ({excluded.length})</summary>
+                      <div className="vercel-projects">{excluded.map(renderProject)}</div>
+                    </details>}
+                  </>
+                ) : <div className="vercel-projects">{visible.map(renderProject)}</div>}
+                {!visible.length && <p className="vercel-empty">
+                  {groupDefaultView ? "Aucun projet découvert." : "Aucun projet ne correspond à ces filtres."}
+                </p>}
               </div>
             </section>
           );

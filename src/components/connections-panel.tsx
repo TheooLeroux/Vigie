@@ -211,12 +211,34 @@ export function ConnectionsPanel({
                         </p>
                       </div>
                     </div>
-                    <span
-                      className={`badge ${connection.status === "connected" ? "sage" : connection.status === "error" ? "warning" : "neutral"}`}
-                    >
-                      {connection.status === "connected" && <Check size={12} />}
-                      {labels[connection.status]}
-                    </span>
+                    <div className="connection-card-tools">
+                      <div className="connection-reading">
+                        <span
+                          className={`badge ${connection.status === "connected" ? "sage" : connection.status === "error" ? "warning" : "neutral"}`}
+                        >
+                          {connection.status === "connected" && <Check size={12} />}
+                          {labels[connection.status]}
+                        </span>
+                        {connection.lastSuccessAt && <small>Dernier accès réussi le {formatDate(connection.lastSuccessAt)}</small>}
+                      </div>
+                      <button
+                        className="button primary"
+                        onClick={() => connection.configured ? void synchronize(connection) : setEdit(connection)}
+                        disabled={busy !== null}
+                      >
+                        {busy === connection.id ? (
+                          <Loader2 className="spin" size={15} />
+                        ) : (
+                          connection.configured ? <RefreshCw size={15} /> : <Pencil size={14} />
+                        )}
+                        {busy === connection.id
+                          ? "Synchronisation…"
+                          : !connection.configured ? "Configurer l’accès"
+                          : discoveries[connection.id]?.lastSuccessAt
+                            ? "Synchroniser les sites"
+                            : "Rechercher les sites"}
+                      </button>
+                    </div>
                   </div>
                   <div className="connection-body">
                     {connection.error && (
@@ -232,39 +254,47 @@ export function ConnectionsPanel({
                         </p>
                       </div>
                     )}
-                    {!connection.configured && (
-                      <p className="subtle">
-                        Renseignez un jeton API cPanel pour ce compte.
-                      </p>
-                    )}
-                    <dl className="connection-meta">
-                      <div>
-                        <dt>Accès enregistré</dt>
-                        <dd>
-                          {connection.configured
-                            ? connection.authMode === "token"
-                              ? "Jeton API chiffré"
-                              : "Mot de passe chiffré"
-                            : "Aucun secret"}
-                        </dd>
+                    <details className="connection-settings">
+                      <summary>Accès au compte</summary>
+                      {!connection.configured && (
+                        <p className="subtle">
+                          Renseignez un accès cPanel pour ce compte.
+                        </p>
+                      )}
+                      <dl className="connection-meta">
+                        <div>
+                          <dt>Accès enregistré</dt>
+                          <dd>
+                            {connection.configured
+                              ? connection.authMode === "token"
+                                ? "Jeton API chiffré"
+                                : "Mot de passe chiffré"
+                              : "Aucun secret"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Dernière tentative</dt>
+                          <dd>
+                            {connection.lastCheckedAt
+                              ? formatDate(connection.lastCheckedAt)
+                              : "Pas encore testée"}
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="connection-settings-actions">
+                        <OutLink href={connection.endpoint}>Ouvrir cPanel</OutLink>
+                        {connection.configured && (
+                          <div className="heading-actions">
+                            <button className="button secondary" onClick={() => setEdit(connection)} disabled={busy !== null}>
+                              <Pencil size={14} /> Modifier l’accès
+                            </button>
+                            <button className="button secondary" onClick={() => setDisconnect(connection)} disabled={busy !== null}>
+                              <Unplug size={14} /> Déconnecter
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <div>
-                        <dt>Dernière tentative</dt>
-                        <dd>
-                          {connection.lastCheckedAt
-                            ? formatDate(connection.lastCheckedAt)
-                            : "Pas encore testée"}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Dernier accès réussi</dt>
-                        <dd>
-                          {connection.lastSuccessAt
-                            ? formatDate(connection.lastSuccessAt)
-                            : "Aucun"}
-                        </dd>
-                      </div>
-                    </dl>
+                    </details>
                     <HostingDiscoveryPanel
                       discovery={discoveries[connection.id]}
                       projects={projects}
@@ -279,48 +309,6 @@ export function ConnectionsPanel({
                         await onRefresh();
                       }}
                     />
-                  </div>
-                  <div className="connection-actions">
-                    <OutLink href={connection.endpoint}>Ouvrir cPanel</OutLink>
-                    <div className="heading-actions">
-                      {connection.configured && (
-                        <button
-                          className="icon-button"
-                          title="Retirer le secret de Vigie"
-                          aria-label={`Déconnecter ${connection.name}`}
-                          onClick={() => setDisconnect(connection)}
-                          disabled={busy !== null}
-                        >
-                          <Unplug size={17} />
-                        </button>
-                      )}
-                      <button
-                        className="button secondary"
-                        onClick={() => setEdit(connection)}
-                        disabled={busy !== null}
-                      >
-                        <Pencil size={14} />
-                        {connection.configured
-                          ? "Configurer"
-                          : "Renseigner le jeton"}
-                      </button>
-                      <button
-                        className="button primary"
-                        onClick={() => synchronize(connection)}
-                        disabled={!connection.configured || busy !== null}
-                      >
-                        {busy === connection.id ? (
-                          <Loader2 className="spin" size={15} />
-                        ) : (
-                          <RefreshCw size={15} />
-                        )}
-                        {busy === connection.id
-                          ? "Synchronisation…"
-                          : discoveries[connection.id]?.lastSuccessAt
-                            ? "Synchroniser les sites"
-                            : "Rechercher les sites"}
-                      </button>
-                    </div>
                   </div>
                 </section>
               );

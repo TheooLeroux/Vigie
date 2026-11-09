@@ -1,9 +1,9 @@
 import { ApiError } from "./http";
 import { z } from "zod";
 import { database, requireProject } from "./db";
-import { activityCategories } from "./activity-model";
+import { activityCategories, activityKinds } from "./activity-model";
 import type { Activity, Workspace } from "./types";
-const filtersSchema = z.object({ query: z.string().trim().max(300).default(""), projectId: z.string().uuid().optional(), kind: z.enum(["Ajouts", "Revues", "Connexions & relevés", "Modifications"]).optional(), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), page: z.coerce.number().int().min(0).max(40_000).default(0) });
+const filtersSchema = z.object({ query: z.string().trim().max(300).default(""), projectId: z.string().uuid().optional(), kind: z.enum(activityKinds).optional(), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), page: z.coerce.number().int().min(0).max(40_000).default(0) });
 export async function activityPage(raw: unknown, workspace: Workspace) {
   const filters = filtersSchema.parse(raw), where = ["workspace=?"], args: (string | number)[] = [workspace];
   if (filters.projectId) { await requireProject(filters.projectId, workspace); where.push("project_id=?"); args.push(filters.projectId); }

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { observationIsFresh } from "@/lib/observation-freshness";
+import { deploymentObservationLifetime, observationIsFresh } from "@/lib/observation-freshness";
+import { formatDate } from "./ui";
 
 export function useObservationTime(observedAt: string | null | undefined, lifetime: number) {
   const [time, setTime] = useState(Date.now);
@@ -22,4 +23,28 @@ export function ObservationDetails({ label, action }: { label: ReactNode; action
     <summary>{label}</summary>
     {action}
   </details>;
+}
+
+export function DeploymentConnectionReading({ configured, error, lastSuccessAt }: {
+  configured: boolean;
+  error?: string | null;
+  lastSuccessAt?: string | null;
+}) {
+  const time = useObservationTime(lastSuccessAt, deploymentObservationLifetime);
+  let label = "À synchroniser";
+  let tone = "neutral";
+  if (!configured) {
+    label = "Déconnecté";
+  } else if (error) {
+    label = "Relevé en échec";
+    tone = "warning";
+  } else if (lastSuccessAt) {
+    const fresh = observationIsFresh(lastSuccessAt, deploymentObservationLifetime, time);
+    label = fresh ? "Relevé récent" : "Relevé expiré";
+    tone = fresh ? "sage" : "warning";
+  }
+  return <div className="connection-reading">
+    <span className={`badge ${tone}`}>{label}</span>
+    {lastSuccessAt && <small>Dernier relevé réussi le {formatDate(lastSuccessAt)}</small>}
+  </div>;
 }

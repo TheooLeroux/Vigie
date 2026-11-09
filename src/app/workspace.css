@@ -564,27 +564,10 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   padding: 18px 0;
   border-bottom: 1px solid var(--line);
 }
-.activity-event-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--soft);
-  color: var(--green);
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-}
 .activity-event-body {
   flex: 1;
   min-width: 0;
 }
-.activity-event-title {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.activity-event-title .text-button,
 .activity-event-title > strong {
   font-size: 13px;
   font-weight: 600;
@@ -595,10 +578,6 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   color: var(--text);
   margin: 8px 0;
   overflow-wrap: anywhere;
-}
-.activity-event-author {
-  font-size: 11px;
-  color: var(--muted);
 }
 .activity-event time {
   font-size: 11px;
@@ -850,14 +829,8 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   .activity-event {
     gap: 10px;
   }
-  .activity-event-icon {
-    display: none;
-  }
   .activity-event-body p {
     font-size: 12px;
-  }
-  .activity-event-title .badge {
-    font-size: 9px;
   }
   .activity-pagination {
     padding: 16px;
@@ -932,3 +905,18 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 .client-projects .heading-actions { flex-wrap: wrap; gap: 8px; }
 .client-projects .project-table { min-width: 0; white-space: normal; }
 .client-projects .project-name-cell { overflow-wrap: anywhere; }
+
+.connection-card .panel-heading { flex-wrap: wrap; gap: 12px 20px; }
+.connection-card-tools, .connection-settings-actions { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
+.connection-reading { display: grid; justify-items: start; gap: 6px; }
+.connection-reading small { color: var(--muted); }
+.connection-settings, .connection-project-group { border-top: 1px solid var(--line); margin-top: 12px; }
+.connection-settings > summary, .connection-project-group > summary { cursor: pointer; padding: 12px 0; font-size: 12px; font-weight: 600; }
+.connection-settings .heading-actions { margin: 8px 0 12px; gap: 8px; flex-wrap: wrap; }
+.connection-settings .connection-meta { margin: 0 0 12px; }
+.connection-settings-actions { margin-bottom: 10px; }
+.connection-project-group .railway-projects { margin-top: 0; }
+.activity-event { padding: 12px 0; }
+.activity-event-body p { margin: 4px 0; }
+.activity-event-meta { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.activity-event-meta a { color: var(--green); text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }

@@ -13,7 +13,7 @@ import { RecordLink } from "./record-link";
 import { useProjectRealtime } from "./project-realtime";
 import { EmptyState, formatDate } from "./ui";
 
-import { activityCategory as category } from "@/lib/activity-model";
+import { activityCategory as category, activityKinds, activityTitle } from "@/lib/activity-model";
 const dayKey = (value: string) =>
   new Intl.DateTimeFormat("fr-CA", {
     timeZone: "Europe/Paris",
@@ -61,7 +61,13 @@ export function ActivityPanel({
           .includes(query.trim().toLocaleLowerCase("fr")),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const [remote, setRemote] = useState<{ items: Activity[]; total: number; page: number } | null>(null);
+  const params = new URLSearchParams({ query, page: String(page) });
+  if (projectId || project) params.set("projectId", projectId || project);
+  if (kind) params.set("kind", kind);
+  if (since) params.set("since", since);
+  const queryKey = params.toString();
+  const [result, setResult] = useState<{ key: string; items: Activity[]; total: number; page: number } | null>(null);
+  const remote = result?.key === queryKey ? result : null;
   const [loading, setLoading] = useState(!!request), [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
   const { subscribe } = useProjectRealtime();
   useEffect(() => subscribe(change => {
@@ -70,16 +76,17 @@ export function ActivityPanel({
   }), [subscribe, projectId, project]);
   useEffect(() => {
     if (!request) return;
-    const controller = new AbortController(); setLoading(true); setError(""); setRemote(null);
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
     const timer = setTimeout(() => {
-      const params = new URLSearchParams({ query, page: String(page) });
-      if (projectId || project) params.set("projectId", projectId || project);
-      if (kind) params.set("kind", kind);
-      if (since) params.set("since", since);
-      request("activity?" + params.toString(), "GET", undefined, { signal: controller.signal }).then(data => { if (!controller.signal.aborted) setRemote(data); }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      request("activity?" + queryKey, "GET", undefined, { signal: controller.signal })
+        .then(data => { if (!controller.signal.aborted) setResult({ ...data, key: queryKey }); })
+        .catch(error => { if (!controller.signal.aborted) setError(error.message); })
+        .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [request, query, project, projectId, kind, since, page, attempt]);
+  }, [request, queryKey, attempt]);
   const total = request ? remote?.total || 0 : filtered.length;
   const currentPage = request ? remote?.page ?? page : Math.min(page, Math.max(0, Math.ceil(total / pageSize) - 1));
   const visible = request ? remote?.items || [] : filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
@@ -99,7 +106,7 @@ export function ActivityPanel({
           <Search size={17} />
           <input
             aria-label="Rechercher dans l’activité"
-            placeholder="Rechercher un projet, une action, une personne…"
+            placeholder="Projet, action ou personne…"
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -151,12 +158,7 @@ export function ActivityPanel({
               }}
             >
               <option value="">Toutes les actions</option>
-              {[
-                "Ajouts",
-                "Modifications",
-                "Revues",
-                "Connexions & relevés",
-              ].map((k) => (
+              {activityKinds.map((k) => (
                 <option key={k}>{k}</option>
               ))}
             </select>
@@ -179,9 +181,12 @@ export function ActivityPanel({
           )}
         </div>
       </div>
-      <div className="activity-results" role="status">{loading ? "Recherche dans l’historique…" : `${total} action(s) ${hasFilters ? "correspondante(s)" : "enregistrée(s)"}`}{request && <span className="activity-limit">Recherche dans tout l’historique conservé.</span>}</div>
+      <div className="activity-results" role="status">
+        {loading && !remote ? "Recherche dans l’historique…" : `${total} action${total === 1 ? "" : "s"}`}
+        {loading && remote && <span className="activity-limit">Actualisation…</span>}
+      </div>
       {error && <p role="alert">{error} <button className="text-button" onClick={() => setAttempt(value => value + 1)}>Réessayer</button></p>}
-      {loading || error ? null : !visible.length ? (
+      {(loading || error) && !remote ? null : !visible.length ? (
         <EmptyState
           icon={ActivityIcon}
           title={
@@ -204,57 +209,54 @@ export function ActivityPanel({
         />
       ) : (
         <ol className="activity-timeline">
-          {visible.map((item, index) => (
-            <li key={item.id}>
-              {(index === 0 ||
-                dayKey(visible[index - 1].createdAt) !==
-                  dayKey(item.createdAt)) && (
-                <h3 className="activity-day">
-                  {new Intl.DateTimeFormat("fr-FR", {
-                    dateStyle: "full",
-                    timeZone: "Europe/Paris",
-                  }).format(new Date(item.createdAt))}
-                </h3>
-              )}
-              <article className="activity-event">
-                <span className="activity-event-icon">
-                  <ActivityIcon size={16} />
-                </span>
-                <div className="activity-event-body">
-                  <div className="activity-event-title">
-                    {item.projectId ? (
-                      <RecordLink
-                        className="text-button"
-                        href={`/?project=${encodeURIComponent(item.projectId)}`}
-                        onNavigate={() => onProject(item.projectId!)}
-                      >
-                        {item.projectName}
-                      </RecordLink>
-                    ) : (
-                      <strong>{item.projectName || "Parc web"}</strong>
-                    )}
-                    <span className="badge neutral">
-                      {category(item.action)}
-                    </span>
+          {visible.map((item, index) => {
+            const title = activityTitle(item.action);
+            return (
+              <li key={item.id}>
+                {(index === 0 ||
+                  dayKey(visible[index - 1].createdAt) !==
+                    dayKey(item.createdAt)) && (
+                  <h3 className="activity-day">
+                    {new Intl.DateTimeFormat("fr-FR", {
+                      dateStyle: "full",
+                      timeZone: "Europe/Paris",
+                    }).format(new Date(item.createdAt))}
+                  </h3>
+                )}
+                <article className="activity-event">
+                  <div className="activity-event-body">
+                    <div className="activity-event-title">
+                      <strong>{title || item.detail || category(item.action)}</strong>
+                    </div>
+                    {title && item.detail && <p>{item.detail}</p>}
+                    <div className="activity-event-meta">
+                      {item.projectId ? (
+                        <RecordLink
+                          href={`/?project=${encodeURIComponent(item.projectId)}`}
+                          onNavigate={() => onProject(item.projectId!)}
+                        >
+                          {item.projectName}
+                        </RecordLink>
+                      ) : (
+                        <span>{item.projectName || "Parc web"}</span>
+                      )}
+                      <span>{item.actorName || "Système"}</span>
+                    </div>
                   </div>
-                  <p>{item.detail}</p>
-                  <span className="activity-event-author">
-                    {item.actorName || "Système"}
-                  </span>
-                </div>
-                <time
-                  dateTime={item.createdAt}
-                  title={formatDate(item.createdAt)}
-                >
-                  {new Intl.DateTimeFormat("fr-FR", {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    timeZone: "Europe/Paris",
-                  }).format(new Date(item.createdAt))}
-                </time>
-              </article>
-            </li>
-          ))}
+                  <time
+                    dateTime={item.createdAt}
+                    title={formatDate(item.createdAt)}
+                  >
+                    {new Intl.DateTimeFormat("fr-FR", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      timeZone: "Europe/Paris",
+                    }).format(new Date(item.createdAt))}
+                  </time>
+                </article>
+              </li>
+            );
+          })}
         </ol>
       )}
       {total > pageSize && (
