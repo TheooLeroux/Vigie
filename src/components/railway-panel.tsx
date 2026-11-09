@@ -26,6 +26,7 @@ import {
 } from "@/lib/railway-status";
 import { RecordLink } from "./record-link";
 import { RailwayBuildDetails, railwayVersionPreview } from "./railway-build-details";
+import { ObservationDetails, useObservationTime } from "./observation-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -546,18 +547,9 @@ export function RailwayInventoryPanel({
 }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
-  const [observationTime, setObservationTime] = useState(Date.now);
+  const observationTime = useObservationTime(item.observedAt, deploymentObservationLifetime);
   const stale = !observationIsFresh(item.observedAt, deploymentObservationLifetime, observationTime);
   const showRefresh = item.configured && (stale || Boolean(error || item.connectionError));
-
-  useEffect(() => {
-    const now = Date.now();
-    setObservationTime(now);
-    if (!observationIsFresh(item.observedAt, deploymentObservationLifetime, now)) return;
-    const expiresAt = Date.parse(item.observedAt) + deploymentObservationLifetime;
-    const timer = window.setTimeout(() => setObservationTime(expiresAt), expiresAt - now);
-    return () => window.clearTimeout(timer);
-  }, [item.observedAt]);
 
   async function refreshObservations() {
     setBusy(true);
@@ -585,12 +577,7 @@ export function RailwayInventoryPanel({
       <div className="panel-heading">
         <div>
           <h2>Railway · {item.name}</h2>
-          {showRefresh || !item.configured ? <p>Relevé du {formatDate(item.observedAt)}</p> : (
-            <details className="railway-observation-details">
-              <summary>Relevé du {formatDate(item.observedAt)}</summary>
-              {refreshButton}
-            </details>
-          )}
+          <ObservationDetails label={`Relevé du ${formatDate(item.observedAt)}`} action={item.configured && !showRefresh && refreshButton} />
         </div>
         {showRefresh && refreshButton}
       </div>

@@ -14,6 +14,8 @@ import type {
   UpdateInfo,
 } from "@/lib/types";
 import { formatDate, Modal } from "./ui";
+import { observationIsFresh, wordpressObservationLifetime } from "@/lib/observation-freshness";
+import { ObservationDetails, useObservationTime } from "./observation-details";
 type Request = (
   path: string,
   method?: string,
@@ -188,16 +190,25 @@ export function WordPressInventoryPanel({
 }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
+    [collectionError, setCollectionError] = useState(""),
     [plan, setPlan] = useState<any>(null);
   const inventory = installation.inventory;
+  const observedAt = inventory?.observedAt;
+  const observationTime = useObservationTime(observedAt, wordpressObservationLifetime);
+  const stale = Boolean(observedAt) && !observationIsFresh(observedAt, wordpressObservationLifetime, observationTime);
+  const canRefresh = !installation.missingSince;
+  const showRefresh = canRefresh && (stale || Boolean(collectionError || inventory?.error) || inventory?.collectionMode === "early");
+  const observationLabel = observedAt
+    ? `Relevé du ${formatDate(observedAt)} · ${inventory?.source === "wordpress-observer" ? "Depuis WordPress" : "Depuis les fichiers o2switch"}`
+    : "Aucun relevé enregistré";
   async function collect() {
     setBusy(true);
-    setError("");
     try {
       await request(`installations/${installation.id}/inventory`, "POST", {});
       await onRefresh();
+      setCollectionError("");
     } catch (e) {
-      setError((e as Error).message);
+      setCollectionError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -217,29 +228,18 @@ export function WordPressInventoryPanel({
       ? [...inventory.plugins, ...inventory.themes]
       : [],
     updates = components.filter((i) => i.updateState === "available").length;
+  const refreshButton = <button className="button secondary small" onClick={collect} disabled={busy}>
+    {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+    Actualiser le relevé
+  </button>;
   return (
     <section className="panel wordpress-inventory">
       <div className="panel-heading">
         <div>
           <h2>WordPress · {installation.domains[0]}</h2>
-          <p>
-            {inventory?.observedAt
-              ? `Relevé du ${formatDate(inventory.observedAt)} · ${inventory.source === "wordpress-observer" ? "Depuis WordPress" : "Depuis les fichiers o2switch"}`
-              : "Informations de ce site"}
-          </p>
+          <ObservationDetails label={observationLabel} action={canRefresh && !showRefresh && refreshButton} />
         </div>
-        <button
-          className="button secondary small"
-          onClick={collect}
-          disabled={busy || Boolean(installation.missingSince)}
-        >
-          {busy ? (
-            <Loader2 size={14} className="spin" />
-          ) : (
-            <RefreshCw size={14} />
-          )}
-          Actualiser le relevé
-        </button>
+        {showRefresh && refreshButton}
       </div>
       <div className="wp-inventory-body">
         {inventory?.collectionMode === "early" && (
@@ -249,15 +249,19 @@ export function WordPressInventoryPanel({
             de mises à jour n’ont pas été rafraîchis.
           </p>
         )}
-        {(error || inventory?.error) && (
+        {(collectionError || error || inventory?.error) && (
           <p className="wp-warning" role="alert">
             <AlertCircle size={15} />
-            {error || inventory?.error}
+            {collectionError || error || inventory?.error}
             {inventory?.error &&
               inventory.observedAt &&
               " Le dernier relevé est conservé."}
           </p>
         )}
+        {stale && !inventory?.error && <p className="wp-warning">
+          <AlertCircle size={15} />
+          Le relevé a expiré. Les informations affichées datent de la dernière collecte réussie.
+        </p>}
         {!inventory?.observedAt ? (
           <p className="subtle">
             Actualisez pour relever les versions, extensions et thèmes de ce

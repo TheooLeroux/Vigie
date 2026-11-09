@@ -1,4 +1,5 @@
 "use client";
+import { deploymentObservationLifetime, observationIsFresh } from "@/lib/observation-freshness";
 import "./vercel.css";
 import { useEffect, useState } from "react";
 import {
@@ -18,6 +19,7 @@ import type {
   VercelDeployment,
 } from "@/lib/vercel-types";
 import { RecordLink } from "./record-link";
+import { ObservationDetails, useObservationTime } from "./observation-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -1007,42 +1009,42 @@ export function VercelInventoryPanel({
   onRefresh: () => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    stale = Date.now() - Date.parse(item.observedAt) > 24 * 3600_000;
+    [error, setError] = useState("");
+  const observationTime = useObservationTime(item.observedAt, deploymentObservationLifetime);
+  const stale = !observationIsFresh(item.observedAt, deploymentObservationLifetime, observationTime);
+  const showRefresh = item.configured && (stale || Boolean(error || item.connectionError));
+  const production = item.production
+    ? `Production : ${labels[item.production.state] || item.production.state}`
+    : "Aucun déploiement de production identifié";
+
+  async function refreshObservations() {
+    setBusy(true);
+    try {
+      await request(`vercel/${item.connectionId}/sync`, "POST", {});
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      await onRefresh().catch(() => {});
+      setBusy(false);
+    }
+  }
+
+  const refreshButton = <button className="button secondary" disabled={busy} onClick={() => void refreshObservations()}>
+    {busy ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+    Actualiser les relevés
+  </button>;
   return (
     <section className="panel vercel-inventory">
       <div className="panel-heading">
         <div>
           <h2>Vercel · {item.name}</h2>
-          <p>
-            Relevé du {formatDate(item.observedAt)} · {item.production
-              ? `Production : ${labels[item.production.state] || item.production.state}`
-              : "Aucun déploiement de production identifié"}
-          </p>
+          <ObservationDetails
+            label={`Relevé du ${formatDate(item.observedAt)} · ${production}`}
+            action={item.configured && !showRefresh && refreshButton}
+          />
         </div>
-        <button
-          className="button secondary"
-          disabled={busy || !item.configured}
-          onClick={async () => {
-            setBusy(true);
-            setError("");
-            try {
-              await request(`vercel/${item.connectionId}/sync`, "POST", {});
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              await onRefresh().catch(() => {});
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? (
-            <Loader2 className="spin" size={14} />
-          ) : (
-            <RefreshCw size={14} />
-          )}
-          Actualiser les relevés
-        </button>
+        {showRefresh && refreshButton}
       </div>
       <div className="connection-body">
         {(error || item.connectionError) && (
@@ -1064,8 +1066,7 @@ export function VercelInventoryPanel({
         )}
         {stale && (
           <p className="vercel-notice">
-            Ce relevé a plus de 24 heures. Actualisez-le pour vérifier la
-            situation.
+            Le relevé a expiré. Les informations affichées datent de la dernière collecte réussie.
           </p>
         )}
         <details className="technical-disclosure">
