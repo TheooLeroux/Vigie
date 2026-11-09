@@ -2,6 +2,7 @@ import { ApiError } from "./http";
 import { hostingConnections, discoverHostingConnection } from "./hosting-connections";
 import { vercelState, synchronizeVercel } from "./vercel";
 import { railwayState, synchronizeRailway } from "./railway";
+import { deploymentObservationLifetime, observationIsFresh } from "./observation-freshness";
 
 export type ControlProvider = "o2switch" | "vercel" | "railway";
 type ControlConnection = { id: string; configured: boolean };
@@ -28,9 +29,8 @@ export async function reconcileHostingConnections(provider: ControlProvider, dep
   return result;
 }
 
-export function hostingControlIssue(provider: string, observation: { connectionError: string | null; observedAt: string }, now = Date.now()) {
-  if (observation.connectionError) return `Le contrôle ${provider} est indisponible. Vérifiez la connexion ; une reprise automatique est prévue.`;
-  const age = now - Date.parse(observation.observedAt);
-  if (!Number.isFinite(age) || age < -30_000 || age > 15 * 60_000) return `Le contrôle ${provider} a expiré. La synchronisation automatique est attendue.`;
+export function hostingControlIssue(provider: string, observation: { connectionError: string | null; observedAt: string; configured?: boolean }, now = Date.now()) {
+  if (observation.connectionError || observation.configured === false) return `Le contrôle ${provider} est indisponible. Vérifiez la connexion ; une reprise automatique est prévue.`;
+  if (!observationIsFresh(observation.observedAt, deploymentObservationLifetime, now)) return `Le contrôle ${provider} a expiré. La synchronisation automatique est attendue.`;
   return null;
 }

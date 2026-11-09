@@ -59,7 +59,7 @@ test("WordPress : WPVulnerability après installation montre les alertes applica
     healthCheck({ tool: "WPVulnerability", phase: "candidate", findings: [{ ...healthCheck().findings[0], package: "plugins/rejected", scope: undefined }] }),
     healthCheck({ tool: "WPVulnerability", phase: "after", findings: [
       { ...healthCheck().findings[0], package: "plugins/private-pro", version: "3.0.103", scope: undefined },
-      { ...healthCheck().findings[0], id: "WPV-core", package: "wordpress/wordpress", version: "7.1.3", scope: undefined },
+      { ...healthCheck().findings[0], id: "WPV-core", aliases: [], package: "wordpress/wordpress", version: "7.1.3", scope: undefined },
       { ...healthCheck().findings[0], id: "WPV-fixed", package: "plugins/webtoffee", version: "4.9.0", scope: undefined },
     ] }),
   ];

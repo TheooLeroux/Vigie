@@ -2,7 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { hostingStorage } from "./hosting-storage";
+import { claimHostingObservation, hostingStorage } from "./hosting-storage";
 import {
   withHostingCredentials,
   hostingConnections,
@@ -14,6 +14,7 @@ import { sealConnectorSecret, openConnectorSecret } from "./connector-secrets";
 import { cpanelReadClient } from "./connectors/cpanel-read";
 import { collectWordPressFiles } from "./connectors/wordpress-files";
 import { collectObserver } from "./connectors/wordpress-observer";
+import { refreshExpiredWordPressCatalogs } from "./connectors/wordpress-catalog";
 import { enrichPhpRelease } from "./connectors/php-releases";
 import type { HostingInstallationView, SiteInventory, Project } from "./types";
 const running = new Set<string>();
@@ -76,14 +77,17 @@ export async function collectHostingInventories(
   catalogTransport: typeof fetch = fetch,
   installationId?: string,
   resolveDns = lookup,
+  options: { readOnlyProjectId?: string } = {},
 ) {
-  if (running.has(connectionId))
+  const scope = options.readOnlyProjectId && installationId ? installationId : connectionId;
+  if (running.has(scope))
     throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
   let installations = (await hostingDiscovery(connectionId)).installations.filter(
     (i) =>
       i.kind === "wordpress" &&
       !i.ignored &&
       !i.missingSince &&
+      (!options.readOnlyProjectId || (i.observerConfigured && i.project?.id === options.readOnlyProjectId && i.project.lifecycle === "active")) &&
       (!installationId || i.id === installationId),
   );
   if (installationId && !installations.length)
@@ -107,7 +111,9 @@ export async function collectHostingInventories(
       !i.inventory ||
       Date.now() - Date.parse(i.inventory.lastAttemptAt) >= 10_000,
   );
-  running.add(connectionId);
+  if (running.has(scope))
+    throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
+  running.add(scope);
   try {
     return await withHostingCredentials(connectionId, async (input) => {
       const client = cpanelReadClient(input, transport);
@@ -117,6 +123,12 @@ export async function collectHostingInventories(
       async function worker() {
         while (cursor < installations.length) {
           const item = installations[cursor++];
+          const release = await claimHostingObservation(`wordpress:${item.id}`);
+          if (!release) {
+            if (installationId) throw new ApiError("Une collecte est déjà en cours pour ce site.", 409);
+            failed++;
+            continue;
+          }
           let snapshot: SiteInventory;
           try {
             const observer = (await observerRow(item.id));
@@ -127,16 +139,19 @@ export async function collectHostingInventories(
               } catch (error) {
                 // A database registration does not prove that a restored site still has our file.
                 // Repair only linked active sites; ownership/hash checks still apply before writing.
-                if (!item.project || item.project.lifecycle !== "active") throw error;
+                if (options.readOnlyProjectId || !item.project || item.project.lifecycle !== "active") throw error;
                 const repaired = await installObserverOnAccount(await observerPlan(item.id), item, transport, resolveDns);
                 snapshot = repaired.installation.inventory!;
               }
+            } else if (options.readOnlyProjectId) {
+              throw new ApiError("Connecteur WordPress indisponible.", 409);
             } else if (item.project?.lifecycle === "active") {
               const installed = await installObserverOnAccount(await observerPlan(item.id), item, transport, resolveDns);
               snapshot = installed.installation.inventory!;
             } else {
               snapshot = await collectWordPressFiles(client, item.documentRoot, catalogTransport);
             }
+            if (snapshot.source === "wordpress-observer") snapshot = await refreshExpiredWordPressCatalogs(snapshot, catalogTransport);
             snapshot = await enrichPhpRelease(snapshot, catalogTransport);
             (await transaction(async () => {
               (await assertCurrent(item));
@@ -148,7 +163,7 @@ export async function collectHostingInventories(
                 item.project?.id || null,
               ));
             }));
-            if (item.project) await enqueueLocalAgent(item.id);
+            if (item.project && !options.readOnlyProjectId) await enqueueLocalAgent(item.id);
             success++;
           } catch (e) {
             const message =
@@ -187,14 +202,14 @@ export async function collectHostingInventories(
               ));
             }));
             failed++;
-          }
+          } finally { await release(); }
         }
       }
       await Promise.all([worker(), worker(), worker()]);
       return { success, failed, discovery: (await hostingDiscovery(connectionId)) };
     });
   } finally {
-    running.delete(connectionId);
+    running.delete(scope);
   }
 }
 const observerFile = "vigie-observer.php";

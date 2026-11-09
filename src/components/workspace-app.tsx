@@ -41,7 +41,8 @@ import { createRefreshQueue } from "@/lib/project-realtime";
 import { observedInventory } from "@/lib/project-summary";
 import { BackupsPanel } from "./backups-panel";
 import { ActivityPanel } from "./activity-panel";
-import { SecurityWatchPanel } from "./security-watch-panel";
+import { SecurityWatchPanel, securityWatchCacheKey } from "./security-watch-panel";
+import type { SecurityWatchSnapshot } from "@/lib/security-watch";
 import { ClientsPanel } from "./clients-panel";
 import { ConnectionsPanel } from "./connections-panel";
 import { ExistingProjectForm } from "./existing-project-form";
@@ -194,14 +195,15 @@ function Status({ project, data, detail }: { project: Project; data: WorkspaceDa
     </span>
   );
 }
-export function WorkspaceApp({ user }: { user: { name: string; email: string } }) {
-  return <ProjectRealtime><WorkspaceContent user={user} /></ProjectRealtime>;
-}
-function WorkspaceContent({
-  user,
-}: {
+type WorkspaceProps = {
   user: { name: string; email: string };
-}) {
+  sessionId: string;
+  initialWatch: SecurityWatchSnapshot | null;
+};
+export function WorkspaceApp(props: WorkspaceProps) {
+  return <ProjectRealtime><WorkspaceContent {...props} /></ProjectRealtime>;
+}
+function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
   const workspace: Workspace = "live";
   const { subscribe } = useProjectRealtime();
   const [ready, setReady] = useState(false),
@@ -985,6 +987,7 @@ function WorkspaceContent({
                   notify("La déconnexion a échoué. Réessayez.");
                   return;
                 }
+                try { sessionStorage.removeItem(securityWatchCacheKey); } catch { /* Storage may be disabled. */ }
                 window.location.assign("/connexion");
               }}
             >
@@ -1034,7 +1037,18 @@ function WorkspaceContent({
               </button>
             </div>
           )}
-          {!data && !error ? (
+          {ready && view === "security" && !selected ? (
+            <>
+              <div className="page-heading">
+                <div>
+                  <div className="eyebrow">{titles.security.kicker}</div>
+                  <h1>{titles.security.title}</h1>
+                  <p>{titles.security.description}</p>
+                </div>
+              </div>
+              <SecurityWatchPanel key={sessionId} sessionId={sessionId} initialWatch={initialWatch} request={api} onProject={openProject} />
+            </>
+          ) : !data && !error ? (
             <div className="loading">
               <Loader2 size={23} className="spin" />
               Chargement de votre espace…
@@ -1233,7 +1247,6 @@ function WorkspaceContent({
                     {view === "backup" && (
                       <BackupsPanel request={api} onProject={openProject} />
                     )}
-                    {view === "security" && <SecurityWatchPanel request={api} onProject={openProject} />}
                     {view === "activity" && (
                       <ActivityPanel
                         items={data.activity}

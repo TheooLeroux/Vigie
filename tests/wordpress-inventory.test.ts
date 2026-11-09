@@ -10,6 +10,7 @@ import {
 import {
   catalogUpdate,
   compareVersions,
+  refreshExpiredWordPressCatalogs,
 } from "../src/lib/connectors/wordpress-catalog";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
 import {
@@ -88,6 +89,24 @@ const catalog = (async (url) => {
   const slug = u.searchParams.get("request[slug]");
   return Response.json({ slug, version: "2.0" });
 }) as typeof fetch;
+
+test("WordPress : le catalogue public renouvelle une preuve expirée et laisse le flux privé daté", async () => {
+  const observed = await collectWordPressFiles(cpanelReadClient(credentials, fileTransport()), root, catalog);
+  const expiredAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+  const publicPlugin = { ...observed.plugins[0], slug: "vigie-public-fixture", updateOrigin: "wordpress.org" as const, updateCheckedAt: expiredAt };
+  const privatePlugin = { ...publicPlugin, slug: "vigie-private-fixture", updateOrigin: "external" as const };
+  const requests: string[] = [];
+  const refreshed = await refreshExpiredWordPressCatalogs({ ...observed, plugins: [publicPlugin, privatePlugin], themes: [] }, (async (url) => {
+    const slug = new URL(String(url)).searchParams.get("request[slug]")!;
+    requests.push(slug);
+    return Response.json({ slug, version: "9.0" });
+  }) as typeof fetch);
+  assert.deepEqual(requests, [publicPlugin.slug]);
+  assert.equal(refreshed.plugins[0].latestVersion, "9.0");
+  assert.equal(refreshed.plugins[0].updateSource, "wordpress.org");
+  assert.notEqual(refreshed.plugins[0].updateCheckedAt, expiredAt);
+  assert.equal(refreshed.plugins[1].updateCheckedAt, expiredAt);
+});
 test("inventaire fichiers : tous les en-têtes, thèmes enfants, activité inconnue et flux privés exclus de l’annuaire", async () => {
   const calls: URL[] = [],
     catalogCalls: string[] = [];

@@ -579,6 +579,12 @@ test("installation : dépôt unique vérifié, secret propre au site chiffré, p
   // still records the observer. The next collection repairs it with the same key.
   directory = false;
   uploaded = "";
+  const lastObservedAt = (await hostingDiscovery(host.id)).installations[0].inventory?.observedAt;
+  await (await hostingStorage()).prepare("UPDATE hosting_site_inventories SET data=json_set(data,'$.lastAttemptAt',?) WHERE installation_id=?").run(new Date(0).toISOString(), item.id);
+  const observed = await collectHostingInventories(host.id, transport, transport, item.id, dns, { readOnlyProjectId: first.installation.project!.id });
+  assert.equal(observed.failed, 1);
+  assert.equal(writes, 2, "Une actualisation en lecture seule ne réinstalle pas un connecteur absent");
+  assert.equal(observed.discovery.installations[0].inventory?.observedAt, lastObservedAt);
   await (await hostingStorage()).prepare("UPDATE hosting_site_inventories SET data=json_set(data,'$.lastAttemptAt',?) WHERE installation_id=?").run(new Date(0).toISOString(), item.id);
   const repaired = await collectHostingInventories(host.id, transport, transport, item.id, dns);
   assert.equal(repaired.success, 1);

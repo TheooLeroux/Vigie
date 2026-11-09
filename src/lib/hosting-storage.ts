@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { database } from "./db";
 export async function hostingStorage() {
   const db = database();
@@ -9,4 +10,14 @@ export async function hostingStorage() {
     CREATE TABLE IF NOT EXISTS hosting_observers (installation_id TEXT PRIMARY KEY REFERENCES hosting_installations(id) ON DELETE CASCADE,secret_cipher TEXT NOT NULL,data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS wordpress_catalog (cache_key TEXT PRIMARY KEY,data TEXT NOT NULL,expires_at TEXT NOT NULL);`));
   return db;
+}
+
+export async function claimHostingObservation(scope: string) {
+  const db = await hostingStorage();
+  const key = `hosting:observation:lease:${scope}`;
+  const token = randomUUID();
+  const now = Date.now();
+  const claimed = await db.prepare("INSERT INTO wordpress_catalog(cache_key,data,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at WHERE wordpress_catalog.expires_at<=?")
+    .run(key, token, new Date(now + 10 * 60_000).toISOString(), new Date(now).toISOString());
+  return claimed.changes ? async () => { await db.prepare("DELETE FROM wordpress_catalog WHERE cache_key=? AND data=?").run(key, token); } : null;
 }

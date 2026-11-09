@@ -14,6 +14,7 @@ import { z } from "zod";
 import { parseWordPressLoadFailure, wordpressLoadFailureMessage } from "./wordpress-load-failure";
 import { ApiError } from "../http";
 import type { SiteInventory } from "../types";
+import { expiredWordPressCatalogWarning, wordpressUpdateIsFresh } from "../observation-freshness";
 const text = z.string().max(500),
   nullable = text.nullable();
 const update = {
@@ -187,16 +188,8 @@ export function parseObserverPayload(
       "WordPress ne reconnaît pas cette requête en HTTPS ; vérifier la configuration du proxy.",
     );
   const items = [data.wordpress, ...data.plugins, ...data.themes];
-  if (
-    items.some(
-      (i) =>
-        i.updateCheckedAt &&
-        Date.now() - Date.parse(i.updateCheckedAt) > 24 * 3600_000,
-    )
-  )
-    warnings.push(
-      "Certaines vérifications de mises à jour ont plus de 24 heures.",
-    );
+  if (items.some(item => item.updateCheckedAt && !wordpressUpdateIsFresh(item)))
+    warnings.push(expiredWordPressCatalogWarning);
   return {
     source: "wordpress-observer",
     ...(data.localAgent ? { localAgent: data.localAgent } : {}),

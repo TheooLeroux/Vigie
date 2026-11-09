@@ -1,5 +1,7 @@
 import { hostingStorage } from "../hosting-storage";
-import type { UpdateInfo } from "../types";
+import type { SiteInventory, UpdateInfo } from "../types";
+import { expiredWordPressCatalogWarning, wordpressUpdateIsFresh } from "../observation-freshness";
+import { mapConcurrent } from "../updates/planning";
 export const unknownUpdate = (): UpdateInfo => ({
   latestVersion: null,
   updateState: "unknown",
@@ -150,4 +152,33 @@ export async function catalogUpdate(
             ? "current"
             : "ahead",
   };
+}
+
+export async function refreshExpiredWordPressCatalogs(inventory: SiteInventory, transport: typeof fetch) {
+  const { wordpress, plugins, themes } = inventory;
+  const expired = (item: UpdateInfo | null) => !!item?.updateCheckedAt && !wordpressUpdateIsFresh(item);
+  const entries = [
+    ...(wordpress ? [{ kind: "core" as const, slug: wordpress.version, item: wordpress }] : []),
+    ...plugins.filter(item => !item.mustUse && item.updateOrigin === "wordpress.org").map(item => ({ kind: "plugin" as const, slug: item.slug, item })),
+    ...themes.filter(item => !item.template && item.updateOrigin === "wordpress.org").map(item => ({ kind: "theme" as const, slug: item.slug, item })),
+  ].filter(entry => expired(entry.item));
+  if (!entries.length) return inventory;
+
+  const deadline = AbortSignal.timeout(20_000);
+  const bounded: typeof fetch = (url, init) => transport(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline });
+  const refreshed = await mapConcurrent(entries, 4, async ({ kind, slug, item }) => {
+    if (deadline.aborted) return undefined;
+    const update = await catalogUpdate(kind, slug, item.version, bounded);
+    return update.updateState !== "unknown" && wordpressUpdateIsFresh(update) ? update : undefined;
+  });
+  const replacements = new Map<UpdateInfo, UpdateInfo | undefined>(entries.map(({ item }, index) => [item, refreshed[index]]));
+  const apply = <T extends UpdateInfo>(item: T): T => ({ ...item, ...replacements.get(item) });
+  const current = {
+    ...inventory,
+    wordpress: wordpress && apply(wordpress),
+    plugins: plugins.map(apply),
+    themes: themes.map(apply),
+  };
+  if (![current.wordpress, ...current.plugins, ...current.themes].some(expired)) current.warnings = current.warnings.filter(warning => warning !== expiredWordPressCatalogWarning);
+  return current;
 }

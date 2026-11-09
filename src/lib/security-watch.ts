@@ -86,3 +86,4 @@ export type SecurityWatch = ReturnType<typeof rankSecurityWatch> & {
   feedCheckedAt: string | null;
   coverage: { projects: number; fullyCovered: number } | null;
 };
+export type SecurityWatchSnapshot = { savedAt: string; watch: SecurityWatch };

@@ -3,12 +3,25 @@
 import { RefreshCw, ShieldAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createRefreshQueue } from "@/lib/project-realtime";
-import { severityLabels, type SecurityWatch, type WatchItem } from "@/lib/security-watch";
+import { severityLabels, type SecurityWatch, type SecurityWatchSnapshot, type WatchItem } from "@/lib/security-watch";
 import { useProjectRealtime } from "./project-realtime";
 import { formatDate, OutLink } from "./ui";
 import "./security-watch.css";
 
 const visibleFindings = 10;
+export const securityWatchCacheKey = "vigie.security-watch.v1";
+const watchRefreshInterval = 15 * 60_000;
+type WatchSnapshot = SecurityWatchSnapshot & { sessionId: string };
+
+function readWatchSnapshot(sessionId: string): WatchSnapshot | null {
+  try {
+    const snapshot = JSON.parse(sessionStorage.getItem(securityWatchCacheKey) || "null") as WatchSnapshot | null;
+    if (snapshot?.sessionId === sessionId && Number.isFinite(Date.parse(snapshot.savedAt)) &&
+      Array.isArray(snapshot.watch?.detected) && Array.isArray(snapshot.watch?.recent)) return snapshot;
+    sessionStorage.removeItem(securityWatchCacheKey);
+  } catch { /* Storage may be disabled. */ }
+  return null;
+}
 
 function AffectedProjects({ affected, onProject }: { affected: WatchItem["affected"]; onProject: (id: string) => void }) {
   return <div className="watch-affected">
@@ -16,7 +29,7 @@ function AffectedProjects({ affected, onProject }: { affected: WatchItem["affect
       const projects = affected.filter(item => item.historical === historical);
       if (!projects.length) return null;
       return <div key={String(historical)}>
-        <strong>{historical ? "À revérifier · anciens relevés" : "Projets concernés"}</strong>
+        <strong>{historical ? "Anciens relevés · contrôle automatique en attente" : "Projets concernés"}</strong>
         <ul>{projects.map(({ project }) => <li key={project.id}>
           <a href={`/?project=${encodeURIComponent(project.id)}`} onClick={event => {
             if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -47,12 +60,18 @@ function AdvisoryList({ items, onProject }: { items: WatchItem[]; onProject: (id
   </ul>;
 }
 
-export function SecurityWatchPanel({ request, onProject }: {
+export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject }: {
+  sessionId: string;
+  initialWatch: SecurityWatchSnapshot | null;
   request: (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<SecurityWatch>;
   onProject: (id: string) => void;
 }) {
   const { subscribe } = useProjectRealtime();
-  const [watch, setWatch] = useState<SecurityWatch | null>(null);
+  const [snapshot, setSnapshot] = useState(() => {
+    const local = readWatchSnapshot(sessionId);
+    return local && (!initialWatch || local.savedAt >= initialWatch.savedAt) ? local : initialWatch;
+  });
+  const watch = snapshot?.watch;
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState(false);
   const [showAllFindings, setShowAllFindings] = useState(false);
@@ -65,9 +84,24 @@ export function SecurityWatchPanel({ request, onProject }: {
       setError(false);
       try {
         const result = await request("security-watch", "GET", undefined, { signal: controller.signal });
-        if (!controller.signal.aborted) setWatch(result);
-      } catch {
-        if (!controller.signal.aborted) { setWatch(null); setError(true); }
+        if (controller.signal.aborted) return;
+        if (!result.coverage) {
+          setError(true);
+          return;
+        }
+        const next = { sessionId, savedAt: new Date().toISOString(), watch: result };
+        setSnapshot(next);
+        try {
+          sessionStorage.setItem(securityWatchCacheKey, JSON.stringify(next));
+        } catch { /* The live view remains available if storage is disabled or full. */ }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const status = (error as { status?: number } | null)?.status;
+        if (status === 401 || status === 403) {
+          setSnapshot(null);
+          try { sessionStorage.removeItem(securityWatchCacheKey); } catch { /* Storage may be disabled. */ }
+        }
+        setError(true);
       } finally {
         if (!controller.signal.aborted) setBusy(false);
       }
@@ -77,18 +111,18 @@ export function SecurityWatchPanel({ request, onProject }: {
     const unsubscribe = subscribe(change => {
       if (change.all || change.workspace || change.projects.length) refresh.current();
     });
-    const timer = setInterval(refresh.current, 15 * 60_000);
+    const timer = setInterval(refresh.current, watchRefreshInterval);
     return () => { controller.abort(); queue.dispose(); unsubscribe(); clearInterval(timer); };
-  }, [request, subscribe]);
+  }, [request, sessionId, subscribe]);
 
   return <div className="security-watch">
     <div className="watch-toolbar">
-      <p aria-live="polite">{watch?.feedCheckedAt ? <>Flux consulté le <time dateTime={watch.feedCheckedAt}>{formatDate(watch.feedCheckedAt)}</time></> : busy ? "Chargement de la veille…" : "Veille des vulnérabilités"}</p>
+      <p aria-live="polite">{snapshot ? <>Relevé affiché du <time dateTime={snapshot.savedAt}>{formatDate(snapshot.savedAt)}</time></> : busy ? "Chargement de la veille…" : "Veille des vulnérabilités"}</p>
       <button type="button" className="button secondary" disabled={busy} onClick={() => refresh.current()}>
         <RefreshCw size={15} className={busy ? "spin" : undefined} aria-hidden="true" /> Actualiser
       </button>
     </div>
-    {error && <p className="error-banner" role="alert">La veille est indisponible. Utilisez « Actualiser » pour réessayer.</p>}
+    {error && <p className="error-banner" role="alert">{watch ? "Actualisation indisponible. Le dernier relevé reste affiché." : "La veille est indisponible. Utilisez « Actualiser » pour réessayer."}</p>}
     {watch && <>
       <section className="panel watch-panel" aria-labelledby="watch-detected">
         <header>

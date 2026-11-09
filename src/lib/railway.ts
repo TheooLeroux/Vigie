@@ -4,6 +4,7 @@ import { database, list, get, transaction, log, createProject } from "./db";
 import { ApiError } from "./http";
 import { sealConnectorSecret, openConnectorSecret } from "./connector-secrets";
 import { collectRailway } from "./connectors/railway";
+import { claimHostingObservation } from "./hosting-storage";
 import { createProjectSchema } from "./validation";
 import type { Access, Project, Service, Environment } from "./types";
 import type {
@@ -68,6 +69,7 @@ export async function withRailwayCredentials<T>(id: string, run: (token: string,
   if (!stored.secret_cipher) throw new ApiError("Jeton Railway manquant.");
   return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.workspace_id);
 }
+const running = new Set<string>();
 export async function railwayState(): Promise<RailwayState> {
   const connections = (
     (await (await storage())
@@ -263,45 +265,35 @@ export async function applyRailwaySnapshot(
   }));
   return railwayState();
 }
-const running = new Set<string>();
 export async function synchronizeRailway(
   id: string,
   transport: typeof fetch = fetch,
 ) {
-  const r = (await row(id));
-  if (!r.secret_cipher) throw new ApiError("Jeton Railway manquant.");
-  if (running.has(id))
+  const release = await claimHostingObservation(`railway:${id}`);
+  if (!release)
     throw new ApiError("Une synchronisation Railway est déjà en cours.", 409);
-  const c = publicConnection(r);
-  if (c.lastAttemptAt && Date.now() - Date.parse(c.lastAttemptAt) < 30_000)
-    throw new ApiError("Attendez 30 secondes entre deux relevés Railway.", 429);
   running.add(id);
-  (await (await storage())
-    .prepare("UPDATE railway_connections SET data=? WHERE id=?")
-    .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id));
   try {
-    return applyRailwaySnapshot(
-      id,
-      await collectRailway(
-        r.workspace_id,
-        openConnectorSecret(r.secret_cipher, context(r)),
-        transport,
-      ),
-    );
-  } catch (e) {
-    const message =
-      e instanceof ApiError
-        ? e.message
-        : "Le relevé Railway a échoué. Le dernier relevé est conservé.";
-    (await (await storage())
+    const r = await row(id), c = publicConnection(r);
+    if (!r.secret_cipher) throw new ApiError("Jeton Railway manquant.");
+    if (c.lastAttemptAt && Date.now() - Date.parse(c.lastAttemptAt) < 30_000)
+      throw new ApiError("Attendez 30 secondes entre deux relevés Railway.", 429);
+    await (await storage())
       .prepare("UPDATE railway_connections SET data=? WHERE id=?")
-      .run(
-        JSON.stringify({ ...publicConnection((await row(id))), error: message }),
-        id,
-      ));
-    throw new ApiError(message, e instanceof ApiError ? e.status : 502);
+      .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id);
+    try {
+      const projects = await collectRailway(r.workspace_id, openConnectorSecret(r.secret_cipher, context(r)), transport);
+      return await applyRailwaySnapshot(id, projects);
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : "Le relevé Railway a échoué. Le dernier relevé est conservé.";
+      await (await storage())
+        .prepare("UPDATE railway_connections SET data=? WHERE id=?")
+        .run(JSON.stringify({ ...publicConnection(await row(id)), error: message }), id);
+      throw new ApiError(message, e instanceof ApiError ? e.status : 502);
+    }
   } finally {
     running.delete(id);
+    await release();
   }
 }
 async function remoteRow(connectionId: string, remoteId: string) {

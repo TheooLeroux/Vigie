@@ -1,7 +1,7 @@
 import "./auth-fixture";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { automaticControlDue, automaticControlFresh, controlInterval, controlSource, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
+import { automaticControlDue, automaticControlFresh, controlInterval, controlRenewalInterval, controlSource, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
 import { claimAutomaticControl, readAutomaticControl, reconcileAutomaticControls, writeAutomaticControl } from "../src/lib/automatic-controls";
 import { healthCheck, healthFixture, healthUpdates } from "./project-health-fixture";
 import { projectHealth } from "../src/lib/project-health";
@@ -43,7 +43,9 @@ test("Contrôle autonome : une image publique identifiée est analysée même sa
 test("Contrôle autonome : cadence horaire, nouveau déploiement et reprise des erreurs", () => {
   const { report } = fixture(), now = Date.parse(report.checkedAt!);
   assert.equal(automaticControlDue(null, report.identity, now), true);
-  assert.equal(automaticControlDue(report, report.identity, now + controlInterval - 1), false);
+  assert.equal(automaticControlDue(report, report.identity, now + controlRenewalInterval - 1), false);
+  assert.equal(automaticControlDue(report, report.identity, now + controlRenewalInterval), true);
+  assert.equal(automaticControlFresh(report, now + controlRenewalInterval), true);
   assert.equal(automaticControlDue(report, report.identity, now + controlInterval), true);
   assert.equal(automaticControlDue(report, "new-deployment", now), true);
   assert.equal(automaticControlDue(report, report.identity, now, true), true);

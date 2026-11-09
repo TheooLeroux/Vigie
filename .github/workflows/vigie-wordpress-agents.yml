@@ -1,5 +1,5 @@
 name: Vigie automatic controls and WordPress agents
-run-name: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
+run-name: ${{ inputs.security_only && 'security-watch' || format('wordpress-agent-{0}', inputs.installation_id || 'reconcile') }}
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +15,10 @@ on:
         description: Projet à contrôler en lecture seule (vide pour le parc)
         required: false
         type: string
+      security_only:
+        description: Renouveler les relevés et analyses sans préparer les agents WordPress
+        default: false
+        type: boolean
   push:
     branches: [main]
   deployment_status:
@@ -24,10 +28,11 @@ permissions:
   contents: read
 jobs:
   install:
+    needs: wordpress-observations
     concurrency:
       group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
       cancel-in-progress: false
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -43,7 +48,7 @@ jobs:
         id: dependencies
       - name: Retrouver les installations après une remise en ligne
         id: discovery
-        if: inputs.installation_id == ''
+        if: inputs.installation_id == '' && !inputs.security_only
         continue-on-error: true
         run: node --import tsx scripts/hosting-control-worker.ts
         env:
@@ -51,6 +56,7 @@ jobs:
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
           VIGIE_CONTROL_PROVIDER: o2switch
       - name: Installer et vérifier les agents sans mettre à jour les sites
+        if: ${{ !inputs.security_only }}
         run: node --import tsx scripts/wordpress-agent-worker.ts
         env:
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
@@ -61,22 +67,84 @@ jobs:
       - name: Signaler une découverte incomplète après avoir contrôlé les agents connus
         if: always() && steps.discovery.outcome == 'failure'
         run: exit 1
-      - name: Installer les scanners pour les sources hébergées
+      - name: Identifier les analyses WordPress et o2switch à renouveler
+        id: plan
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' }}
+        run: node --import tsx scripts/automatic-control-worker.ts --plan
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_CONTROL_PROVIDER: o2switch
+          VIGIE_CONTROL_FORCE: ${{ github.event_name == 'push' || github.event_name == 'deployment_status' }}
+      - name: Installer les scanners pour les sources hébergées
+        if: ${{ !cancelled() && steps.plan.outputs.needed == 'true' }}
         run: node --import tsx scripts/install-update-scanners.ts
       - name: Analyser automatiquement les failles WordPress et les sources hébergées
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' && steps.plan.outputs.needed != 'false' }}
         run: node --import tsx scripts/automatic-control-worker.ts
         env:
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
           VIGIE_CONTROL_PROVIDER: o2switch
           VIGIE_CONTROL_FORCE: ${{ github.event_name == 'push' || github.event_name == 'deployment_status' }}
+  observations:
+    concurrency:
+      group: hosting-observation-${{ matrix.provider }}
+      cancel-in-progress: false
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [vercel, railway]
+    env:
+      DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+      VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+      VIGIE_CONTROL_PROVIDER: ${{ matrix.provider }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Relever les déploiements actuels
+        run: node --import tsx scripts/hosting-control-worker.ts
+  wordpress-observations:
+    concurrency:
+      group: hosting-observation-o2switch
+      cancel-in-progress: false
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Renouveler les inventaires WordPress en lecture seule
+        run: node --import tsx scripts/hosting-control-worker.ts --wordpress-observations
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_CONTROL_PROVIDER: o2switch
+          VIGIE_CONTROL_PROJECT_ID: ${{ inputs.project_id }}
+          VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app
   providers:
+    needs: observations
     concurrency:
       group: hosting-control-${{ matrix.provider }}-${{ inputs.project_id || 'fleet' }}
       cancel-in-progress: false
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    if: ${{ !cancelled() && needs.observations.result != 'skipped' }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -103,8 +171,6 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
         id: dependencies
-      - name: Vérifier les accès et retrouver les déploiements actuels
-        run: node --import tsx scripts/hosting-control-worker.ts
       - name: Identifier les analyses horaires ou les nouveaux déploiements
         id: plan
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}

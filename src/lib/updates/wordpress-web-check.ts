@@ -3,10 +3,11 @@ import { z } from "zod";
 import { ApiError } from "../http";
 import { hostingInstallation } from "../hosting-discovery";
 import { collectHostingInventories } from "../hosting-inventory";
+import { observationIsFresh } from "../observation-freshness";
 import { checkPublicSite } from "./providers";
 import type { UpdateTarget } from "./types";
 
-export const wordpressWebCheckBody = z.object({ installationId: z.string().uuid(), action: z.enum(["inventory", "preflight", "postflight"]) }).strict();
+export const wordpressWebCheckBody = z.object({ installationId: z.string().uuid(), action: z.enum(["observe", "inventory", "preflight", "postflight"]) }).strict();
 function signingKey() {
   const key = process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY || "";
   if (!/^[a-f0-9]{64}$/i.test(key)) throw new ApiError("Clé du contrôle web manquante.", 503);
@@ -25,10 +26,10 @@ export async function runWordPressWebCheck(input: z.infer<typeof wordpressWebChe
   if (site.kind !== "wordpress" || !site.project || site.project.lifecycle !== "active" || site.missingSince || site.ignored) throw new ApiError("Installation WordPress non éligible.", 409);
   let url = `https://${site.domains[0]}/`;
   try { const home = new URL(site.inventory?.site?.home || ""); if (home.protocol === "https:" && !home.username && !home.password && [...site.domains, ...site.aliases].includes(home.hostname)) url = home.href; } catch {}
-  if (input.action !== "inventory") await checkPublicSite(url);
-  await collectHostingInventories(site.connectionId, fetch, fetch, site.id);
+  if (input.action === "preflight" || input.action === "postflight") await checkPublicSite(url);
+  const collected = await collectHostingInventories(site.connectionId, fetch, fetch, site.id, undefined, { readOnlyProjectId: input.action === "observe" ? site.project.id : undefined });
   const fresh = (await hostingInstallation(site.id)).inventory;
-  if (!fresh || fresh.error || !fresh.observedAt || Date.now() - Date.parse(fresh.observedAt) > 5 * 60_000) throw new ApiError(fresh?.error || "L’inventaire WordPress récent n’a pas pu être confirmé.", 502);
+  if (!collected.success || !fresh?.observedAt || fresh.error || !observationIsFresh(fresh.observedAt, 5 * 60_000)) throw new ApiError(fresh?.error || "L’inventaire WordPress récent n’a pas pu être confirmé.", 502);
   return { ok: true as const, installationId: site.id, observedAt: fresh.observedAt };
 }
 
@@ -36,6 +37,7 @@ export async function runWordPressWebCheck(input: z.infer<typeof wordpressWebChe
 export async function refreshWordPressWeb(target: Pick<UpdateTarget, "remoteId" | "connectionId" | "url">, action: z.infer<typeof wordpressWebCheckBody>["action"]) {
   const origin = process.env.VIGIE_WORDPRESS_CONTROL_URL;
   if (!origin) {
+    if (action === "observe") { await runWordPressWebCheck({ installationId: target.remoteId, action }); return; }
     if (action !== "inventory") await checkPublicSite(target.url!);
     await collectHostingInventories(target.connectionId, fetch, fetch, target.remoteId);
     return;

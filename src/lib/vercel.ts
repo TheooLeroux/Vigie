@@ -14,6 +14,7 @@ import { resolveProjectClient } from "./db";
 import { ApiError } from "./http";
 import { sealConnectorSecret, openConnectorSecret } from "./connector-secrets";
 import { collectVercel } from "./connectors/vercel";
+import { claimHostingObservation } from "./hosting-storage";
 import type { Access, Project, Service, Environment, Client } from "./types";
 import type {
   VercelConnection,
@@ -293,37 +294,31 @@ export async function synchronizeVercel(
   id: string,
   transport: typeof fetch = fetch,
 ) {
-  const r = (await row(id)),
-    c = connection(r);
-  if (!r.secret_cipher) throw new ApiError("Jeton Vercel manquant.");
-  if (running.has(id))
+  const release = await claimHostingObservation(`vercel:${id}`);
+  if (!release)
     throw new ApiError("Une synchronisation Vercel est déjà en cours.", 409);
-  if (c.lastAttemptAt && Date.now() - Date.parse(c.lastAttemptAt) < 30_000)
-    throw new ApiError("Attendez 30 secondes entre deux relevés Vercel.", 429);
   running.add(id);
-  (await (await storage())
-    .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
-    .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id));
   try {
-    return applyVercelSnapshot(
-      id,
-      await collectVercel(
-        r.team_id,
-        openConnectorSecret(r.secret_cipher, context(r)),
-        transport,
-      ),
-    );
-  } catch (e) {
-    const message =
-      e instanceof ApiError
-        ? e.message
-        : "Le relevé Vercel a échoué. Le dernier relevé est conservé.";
-    (await (await storage())
+    const r = await row(id), c = connection(r);
+    if (!r.secret_cipher) throw new ApiError("Jeton Vercel manquant.");
+    if (c.lastAttemptAt && Date.now() - Date.parse(c.lastAttemptAt) < 30_000)
+      throw new ApiError("Attendez 30 secondes entre deux relevés Vercel.", 429);
+    await (await storage())
       .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
-      .run(JSON.stringify({ ...connection((await row(id))), error: message }), id));
-    throw new ApiError(message, e instanceof ApiError ? e.status : 502);
+      .run(JSON.stringify({ ...c, lastAttemptAt: new Date().toISOString() }), id);
+    try {
+      const projects = await collectVercel(r.team_id, openConnectorSecret(r.secret_cipher, context(r)), transport);
+      return await applyVercelSnapshot(id, projects);
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : "Le relevé Vercel a échoué. Le dernier relevé est conservé.";
+      await (await storage())
+        .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
+        .run(JSON.stringify({ ...connection(await row(id)), error: message }), id);
+      throw new ApiError(message, e instanceof ApiError ? e.status : 502);
+    }
   } finally {
     running.delete(id);
+    await release();
   }
 }
 async function remoteRow(connectionId: string, remoteId: string) {

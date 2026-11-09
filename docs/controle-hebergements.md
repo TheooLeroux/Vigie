@@ -1,6 +1,14 @@
 # Maintenir les contrôles des hébergements
 
+Le Dashboard affiche immédiatement le dernier bilan disponible, conservé côté serveur et dans la session du navigateur. Sa date reste visible pendant le renouvellement. Le cache navigateur est isolé par session de connexion et retiré à la déconnexion. Un échec réseau conserve le dernier relevé ; un refus d’accès le retire.
+
+Une tâche Vercel appelle `/api/maintenance/security-watch` toutes les cinq minutes, authentifiée par `CRON_SECRET`. Elle prépare le bilan serveur et déclenche le workflow en mode `security_only`, qui renouvelle les observations et les analyses sans préparer les agents WordPress. Les scans réussis deviennent renouvelables après cinquante minutes, avec une validité d’une heure et une reprise des erreurs après cinq minutes. Le déclencheur fonctionne indépendamment de l’ouverture de Vigie et complète le planning GitHub. Renseigner `CRON_SECRET` dans l’environnement de production Vercel avant le déploiement.
+
 Le workflow `vigie-wordpress-agents.yml` programme un contrôle toutes les cinq minutes, sans ouvrir Vigie. Il utilise les accès chiffrés existants et l’environnement GitHub `vigie-maintenance`. Le même workflow passe après toute publication sur `main`, après un événement GitHub `deployment_status` réussi sur cette branche et peut être lancé manuellement. La fréquence est une cadence demandée : les délais GitHub Actions, une panne réseau ou une installation longue peuvent retarder le passage. Ce dispositif ne garantit pas une disponibilité sans interruption.
+
+Les relevés Vercel et Railway s’exécutent séparément des analyses de sécurité. Une collecte planifiée renouvelle également les inventaires WordPress des sites actifs dont le connecteur est déjà installé. Une fiche ouverte relance les lectures Vercel et Railway après 10 minutes et les inventaires WordPress après 50 minutes. Les relevés expirent respectivement après 15 minutes et une heure. Le bouton **Actualiser les relevés** demande une lecture immédiate des connexions disponibles et des connecteurs WordPress en place.
+
+Chaque fiche indique la date du dernier relevé réussi. Les vérifications des versions disponibles sur WordPress expirent séparément après 24 heures. Vigie peut consulter WordPress.org pour le cœur et les extensions ou thèmes dont l’origine publique est déclarée. Si un flux privé est ancien ou inaccessible, son état reste à vérifier.
 
 ## Analyses autonomes des failles et des mises à jour
 
