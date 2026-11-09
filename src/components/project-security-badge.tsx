@@ -4,12 +4,6 @@ import { severityLabels } from "@/lib/security-watch";
 import { severityOrder } from "@/lib/vulnerability-references";
 import { formatDate } from "./ui";
 
-export function ProjectSeverityLegend() {
-  return <ul className="project-severity-legend" aria-label="Gravité des failles">
-    {severityOrder.map(severity => <li key={severity} className={`project-severity ${severity}`}>{severityLabels[severity]}</li>)}
-  </ul>;
-}
-
 export function ProjectSecurityBadge({ summary, onOpen }: { summary?: ProjectSummary; onOpen: () => void }) {
   const historical = summary?.lastKnown;
   const counts = projectSeverityCounts(summary);

@@ -138,11 +138,10 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .security-version { font-variant-numeric: tabular-nums; }
 .security-finding-reference { flex-shrink: 0; }
 .security-severity, .security-severities > .security-severity { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 68px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--text); font-size: 10px; font-weight: 600; }
-.project-list-controls, .project-provider-list, .project-severity-counts, .project-severity-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.project-list-controls, .project-provider-list, .project-severity-counts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .project-list-controls { justify-content: flex-end; gap: 12px; }
 .project-sort-button { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
 .project-sort-button:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
-.project-severity-legend { list-style: none; margin: 0; padding: 0 22px 12px; }
 .project-severity { min-width: 24px; border-radius: 4px; padding: 3px 6px; background: var(--soft); color: var(--text); text-align: center; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .project-severity.critical { color: #8c1e31; background: #f9dde3; }
 .project-severity.high { color: #863b15; background: #ffe5d4; }
