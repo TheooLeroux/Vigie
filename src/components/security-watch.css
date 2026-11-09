@@ -15,7 +15,7 @@
 .watch-panel {
   overflow-wrap: anywhere;
 }
-.watch-panel > header, .watch-advisory, .watch-empty {
+.watch-panel > header, .watch-advisory, .watch-empty, .watch-list-footer {
   padding: 16px clamp(14px, 3vw, 24px);
 }
 .watch-panel h2, .watch-link, .watch-panel header a {
@@ -42,12 +42,12 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.watch-list, .watch-affected {
+.watch-list, .watch-affected ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
-.watch-advisory, .watch-empty {
+.watch-advisory, .watch-empty, .watch-list-footer {
   border-top: 1px solid var(--line);
 }
 .watch-row > div {
@@ -63,14 +63,16 @@
   gap: 6px;
   margin-top: 12px;
 }
-.watch-affected li {
+.watch-affected ul {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
   gap: 4px 12px;
+  margin-top: 4px;
+}
+.watch-affected li {
   border-radius: 6px;
   background: var(--soft);
-  padding: 8px 10px;
+  padding: 4px 8px;
 }
 .watch-link {
   margin-top: 8px;

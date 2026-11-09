@@ -8,6 +8,27 @@ import { useProjectRealtime } from "./project-realtime";
 import { formatDate, OutLink } from "./ui";
 import "./security-watch.css";
 
+const visibleFindings = 10;
+
+function AffectedProjects({ affected, onProject }: { affected: WatchItem["affected"]; onProject: (id: string) => void }) {
+  return <div className="watch-affected">
+    {[false, true].map(historical => {
+      const projects = affected.filter(item => item.historical === historical);
+      if (!projects.length) return null;
+      return <div key={String(historical)}>
+        <strong>{historical ? "À revérifier · anciens relevés" : "Projets concernés"}</strong>
+        <ul>{projects.map(({ project }) => <li key={project.id}>
+          <a href={`/?project=${encodeURIComponent(project.id)}`} onClick={event => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            onProject(project.id);
+          }}>{project.name}</a>
+        </li>)}</ul>
+      </div>;
+    })}
+  </div>;
+}
+
 function AdvisoryList({ items, onProject }: { items: WatchItem[]; onProject: (id: string) => void }) {
   return <ul className="watch-list">
     {items.map(item => <li className="watch-advisory" key={item.id}>
@@ -20,18 +41,7 @@ function AdvisoryList({ items, onProject }: { items: WatchItem[]; onProject: (id
         </div>
         <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
       </div>
-      {item.affected.length > 0 && <ul className="watch-affected">
-        {item.affected.map(({ project, finding }) => <li key={JSON.stringify([project.id, finding.key])}>
-          <a className="text-button" href={`/?project=${encodeURIComponent(project.id)}`} onClick={event => {
-            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-            event.preventDefault();
-            onProject(project.id);
-          }}>{project.name}</a>
-          <span>{finding.service} · {finding.package} {finding.version}</span>
-          {!!finding.fixedVersions?.length && <span>Correctifs référencés {finding.fixedVersions.join(", ")}</span>}
-          <time dateTime={finding.checkedAt}>Contrôlé le {formatDate(finding.checkedAt)}</time>
-        </li>)}
-      </ul>}
+      {item.affected.length > 0 && <AffectedProjects affected={item.affected} onProject={onProject} />}
       {item.url && <OutLink href={item.url} className="watch-link">Consulter l’avis<span className="sr-only"> {item.id}</span></OutLink>}
     </li>)}
   </ul>;
@@ -45,6 +55,7 @@ export function SecurityWatchPanel({ request, onProject }: {
   const [watch, setWatch] = useState<SecurityWatch | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState(false);
+  const [showAllFindings, setShowAllFindings] = useState(false);
   const refresh = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -81,19 +92,28 @@ export function SecurityWatchPanel({ request, onProject }: {
     {watch && <>
       <section className="panel watch-panel" aria-labelledby="watch-detected">
         <header>
-          <h2 id="watch-detected"><ShieldAlert size={19} aria-hidden="true" /> Détectées sur votre parc {watch.coverage && <span className="count-pill">{watch.detected.length}</span>}</h2>
+          <h2 id="watch-detected"><ShieldAlert size={19} aria-hidden="true" /> Failles relevées sur votre parc {(watch.detected.length > 0 || !!watch.coverage?.fullyCovered) && <span className="count-pill">{watch.detected.length}</span>}</h2>
           {watch.coverage ? <p>
             {watch.coverage.projects === 0 ? "Aucun projet actif à surveiller." : `${watch.coverage.fullyCovered} sur ${watch.coverage.projects} projets actifs disposent d’un contrôle récent couvrant tous leurs services suivis.`}
           </p> : <p role="status">Les contrôles du parc sont indisponibles.</p>}
         </header>
         {watch.detected.length > 0
-          ? <AdvisoryList items={watch.detected} onProject={onProject} />
-          : !!watch.coverage?.projects && <p className="watch-empty">Aucune faille dans les contrôles récents disponibles.</p>}
+          ? <>
+            <AdvisoryList items={showAllFindings ? watch.detected : watch.detected.slice(0, visibleFindings)} onProject={onProject} />
+            {watch.detected.length > visibleFindings && <div className="watch-list-footer">
+              <button type="button" className="button secondary" aria-expanded={showAllFindings} onClick={() => setShowAllFindings(!showAllFindings)}>
+                {showAllFindings ? "Afficher les dix premières failles" : `Afficher toutes les failles (${watch.detected.length})`}
+              </button>
+            </div>}
+          </>
+          : !!watch.coverage?.projects && <p className="watch-empty">{watch.coverage.fullyCovered === watch.coverage.projects
+            ? "Aucune faille relevée dans les contrôles récents."
+            : "Les relevés disponibles ne permettent pas d’établir le nombre de failles sur tout le parc."}</p>}
       </section>
       <section className="panel watch-panel" aria-labelledby="watch-recent">
         <header>
           <h2 id="watch-recent">Derniers avis publics</h2>
-          <p>Les avis récents de <OutLink href="https://github.com/advisories">GitHub Advisory Database</OutLink> sans correspondance dans les contrôles récents du parc.</p>
+          <p>Les avis récents de <OutLink href="https://github.com/advisories">GitHub Advisory Database</OutLink> sans correspondance dans les relevés affichés ci-dessus.</p>
         </header>
         {watch.recent.length > 0
           ? <AdvisoryList items={watch.recent} onProject={onProject} />

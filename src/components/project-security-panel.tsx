@@ -82,7 +82,7 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
         {service.checkedAt && <small>Dernier rapport enregistré : {date(service.checkedAt)}. {!["covered", "partial"].includes(service.status) ? "Ce rapport ne valide pas l’état actuel." : ""}</small>}
       </section>)}</div>
       <p>Le périmètre couvert concerne les composants identifiés ci-dessus. Le code métier, les secrets, la configuration et les couches d’hébergement non inventoriées demandent des contrôles complémentaires.</p>
-      <p>Une même vulnérabilité est comptée une fois par composant, version et service. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>
+      <p>Le compteur compte chaque vulnérabilité une seule fois par projet, même si plusieurs blocs sont concernés. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>
       <p>Contrôle automatique toutes les heures et après détection d’un nouveau déploiement. Les erreurs techniques sont réessayées après cinq minutes.</p>
       {security.checkedAt && <p>Tous les services sont couverts ; le plus ancien contrôle date du {date(security.checkedAt)}.</p>}
       {unavailable && <p>Contrôle à actualiser ou indisponible. Les informations déjà connues restent affichées.</p>}

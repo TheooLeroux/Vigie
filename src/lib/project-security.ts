@@ -3,6 +3,7 @@ import { imageObservationPending } from "./updates/image-observation";
 import { projectHealth, type ProjectHealth } from "./project-health";
 import type { ProjectDetail } from "./types";
 import type { SecurityFinding, UpdateState, UpdateTarget } from "./updates/types";
+import { groupVulnerabilityReferences, severityOrder } from "./vulnerability-references";
 
 export type CoverageStatus = "covered" | "partial" | "missing" | "pending" | "stale" | "error" | "unsupported";
 export const coverageLabels: Record<CoverageStatus, string> = {
@@ -22,7 +23,6 @@ export type ProjectVulnerability = {
   title?: string; fixedVersions?: string[]; url?: string;
 };
 const securityTools = new Set(["OSV", "WPScan", "WPVulnerability", "Trivy"]);
-const severityOrder = ["critical", "high", "moderate", "low", "unknown"];
 
 // Merge overlapping alias sets, including bridges (CVE -> GHSA -> another CVE).
 // Each affected component/version is counted once per service, regardless of paths or scanners.
@@ -106,14 +106,14 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
 
 // Historical evidence is separate from current coverage. Expiring an observation
 // must not erase a recorded count, nor turn an old clean scan into a current zero.
-function lastRecordedSecurity(detail: ProjectDetail, targets: UpdateTarget[], state?: UpdateState | null) {
+export function lastRecordedSecurity(projectId: string, targets: Pick<UpdateTarget, "id" | "name">[], state?: UpdateState | null) {
   const evidence: ProjectHealth["securityEvidence"] = [], dates: string[] = [];
   let analyzedServices = 0, limited = false;
   for (const target of targets) {
     const control = state?.automaticControls?.find(item => item.targetId === target.id);
     if (!control?.checkedAt || !Number.isFinite(Date.parse(control.checkedAt))) continue;
     if (control.identity !== "unavailable") {
-      try { if (JSON.parse(control.identity)[1] !== detail.project.id) continue; } catch { continue; }
+      try { if (JSON.parse(control.identity)[1] !== projectId) continue; } catch { continue; }
     }
     const checks = control.checks.filter(check => securityTools.has(check.tool) && Number.isFinite(Date.parse(check.checkedAt)) && (check.status !== "blocked" || check.findings.length > 0));
     if (!checks.length) continue;
@@ -125,7 +125,8 @@ function lastRecordedSecurity(detail: ProjectDetail, targets: UpdateTarget[], st
   const entries = normalizedVulnerabilities(evidence), vulnerabilities = entries.filter(item => item.kind === "vulnerability");
   const signals = entries.filter(item => item.kind !== "vulnerability" && !item.id.startsWith("EOL-"));
   dates.sort((a, b) => Date.parse(a) - Date.parse(b));
-  return { count: vulnerabilities.length, signalCount: signals.length, checkedAt: dates[0], latestCheckedAt: dates.at(-1)!, analyzedServices, totalServices: targets.length, partial: limited || analyzedServices < targets.length, vulnerabilities, signals };
+  const count = groupVulnerabilityReferences(vulnerabilities, item => item).length;
+  return { count, signalCount: signals.length, checkedAt: dates[0], latestCheckedAt: dates.at(-1)!, analyzedServices, totalServices: targets.length, partial: limited || analyzedServices < targets.length, vulnerabilities, signals };
 }
 
 export function projectSecurity(detail: ProjectDetail, state?: UpdateState | null, health = projectHealth(detail, state)) {
@@ -141,8 +142,12 @@ export function projectSecurity(detail: ProjectDetail, state?: UpdateState | nul
   const partial = !known && analyzedServices > 0;
   const status: CoverageStatus = known ? "covered" : partial ? "partial" : services.some(item => item.status === "error") ? "error" : services.some(item => item.status === "stale") ? "stale" : services.some(item => item.status === "missing") || !services.length ? "missing" : services.some(item => item.status === "unsupported") ? "unsupported" : "pending";
   const severityCounts = { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 };
-  vulnerabilities.forEach(item => severityCounts[item.severity]++);
+  const unique = groupVulnerabilityReferences(vulnerabilities, item => item);
+  for (const group of unique) {
+    const severity = severityOrder.find(level => group.items.some(item => item.severity === level)) ?? "unknown";
+    severityCounts[severity]++;
+  }
   const checkedAt = known ? services.map(item => item.checkedAt!).sort()[0] : undefined;
-  const lastKnown = !known && !partial ? lastRecordedSecurity(detail, targets, state) : undefined;
-  return { count: vulnerabilities.length, vulnerabilities, signals, alerts, severityCounts, services, known, partial, status, label: coverageLabels[status], coveredServices, analyzedServices, totalServices: services.length, checkedAt, lastKnown };
+  const lastKnown = !known && !partial ? lastRecordedSecurity(detail.project.id, targets, state) : undefined;
+  return { count: unique.length, vulnerabilities, signals, alerts, severityCounts, services, known, partial, status, label: coverageLabels[status], coveredServices, analyzedServices, totalServices: services.length, checkedAt, lastKnown };
 }

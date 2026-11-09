@@ -2,7 +2,7 @@ import { z } from "zod";
 import { controlInterval } from "./automatic-control-state";
 import { list } from "./db";
 import { observedProjectDetail } from "./project-observations";
-import { projectSecurity } from "./project-security";
+import { lastRecordedSecurity, projectSecurity } from "./project-security";
 import { rankSecurityWatch, type PublicAdvisory, type SecurityWatch } from "./security-watch";
 import type { Project, Workspace } from "./types";
 import { mapConcurrent } from "./updates/planning";
@@ -62,15 +62,20 @@ async function readProjectFindings(workspace: Workspace, signal: AbortSignal) {
       if (detail.project.lifecycle !== "active") return null;
       const security = projectSecurity(detail, updates);
       const monitored = new Set(security.services.map(service => service.id));
+      const unverifiedServices = security.services.filter(service => service.status !== "covered" && service.status !== "partial");
+      const lastKnown = security.lastKnown ?? lastRecordedSecurity(detail.project.id, unverifiedServices, updates);
+      const historical = lastKnown?.vulnerabilities ?? [];
+      const historicalKeys = new Set(historical.map(finding => finding.key));
       const now = Date.now();
-      const findings = security.vulnerabilities.filter(finding => {
+      const current = security.vulnerabilities.filter(finding => {
         const age = now - Date.parse(finding.checkedAt);
-        return age >= 0 && age < controlInterval && monitored.has(finding.targetId);
+        return age >= 0 && age < controlInterval && monitored.has(finding.targetId) && !historicalKeys.has(finding.key);
       });
-      return { known: security.known, findings: findings.map(finding => ({
-        project: { id: detail.project.id, name: detail.project.name },
-        finding,
-      })) };
+      const projectRef = { id: detail.project.id, name: detail.project.name };
+      return { known: security.known, findings: [
+        ...current.map(finding => ({ project: projectRef, finding })),
+        ...historical.map(finding => ({ project: projectRef, finding, historical: true })),
+      ] };
     } catch {
       // Count a project whose data is unavailable as a gap in coverage.
       return null;

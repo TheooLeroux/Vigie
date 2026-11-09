@@ -1,8 +1,8 @@
 import type { ProjectVulnerability } from "./project-security";
 import type { Project } from "./types";
+import { groupVulnerabilityReferences, severityOrder } from "./vulnerability-references";
 
 type Severity = ProjectVulnerability["severity"];
-const severityOrder: Severity[] = ["critical", "high", "moderate", "low", "unknown"];
 
 export const severityLabels: Record<Severity, string> = {
   critical: "Critique",
@@ -25,6 +25,7 @@ export type PublicAdvisory = {
 export type ProjectFinding = {
   project: Pick<Project, "id" | "name">;
   finding: ProjectVulnerability;
+  historical?: boolean;
 };
 
 export type WatchItem = {
@@ -36,13 +37,7 @@ export type WatchItem = {
   publishedAt?: string;
   latestCheckedAt?: string;
   packages: string[];
-  affected: ProjectFinding[];
-};
-
-type WatchGroup = {
-  ids: Set<string>;
-  advisories: PublicAdvisory[];
-  affected: ProjectFinding[];
+  affected: { project: ProjectFinding["project"]; historical: boolean }[];
 };
 
 function publicLink(value?: string) {
@@ -54,42 +49,29 @@ function publicLink(value?: string) {
 }
 
 export function rankSecurityWatch(advisories: PublicAdvisory[], findings: ProjectFinding[]) {
-  const byId = new Map<string, WatchGroup>();
-  function groupFor(ids: string[]) {
-    const aliases = ids.map(id => id.toUpperCase());
-    const existing = new Set(aliases.flatMap(id => byId.get(id) ?? []));
-    const group: WatchGroup = existing.values().next().value ?? { ids: new Set(), advisories: [], affected: [] };
-    existing.delete(group);
-    // An advisory or scanner finding can connect two previously separate alias sets.
-    for (const previous of existing) {
-      previous.ids.forEach(id => group.ids.add(id));
-      group.advisories = group.advisories.concat(previous.advisories);
-      group.affected = group.affected.concat(previous.affected);
-    }
-    aliases.forEach(id => group.ids.add(id));
-    group.ids.forEach(id => byId.set(id, group));
-    return group;
-  }
-
-  for (const advisory of advisories) groupFor([advisory.id, ...advisory.aliases]).advisories.push(advisory);
-  for (const item of findings) groupFor([item.finding.id, ...item.finding.aliases]).affected.push(item);
-
+  const groups = groupVulnerabilityReferences([...advisories, ...findings], item => "finding" in item ? item.finding : item);
   const detected: WatchItem[] = [], recent: WatchItem[] = [];
-  for (const group of new Set(byId.values())) {
+  for (const group of groups) {
     const ids = [...group.ids].sort();
     const id = ids.find(value => value.startsWith("CVE-")) ?? ids[0];
-    const advisory = group.advisories.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
-    const severities = [...group.advisories.map(item => item.severity), ...group.affected.map(item => item.finding.severity)];
+    const publicItems = group.items.filter(item => "publishedAt" in item);
+    const projectFindings = group.items.filter(item => "finding" in item);
+    const advisory = publicItems.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
+    const severities = [...publicItems.map(item => item.severity), ...projectFindings.map(item => item.finding.severity)];
+    const projects = new Map<string, WatchItem["affected"][number]>();
+    for (const { project, historical } of projectFindings) {
+      if (!projects.has(project.id) || !historical) projects.set(project.id, { project, historical: !!historical });
+    }
     const item: WatchItem = {
       id,
       aliases: ids.filter(value => value !== id),
-      title: advisory?.title || group.affected.find(item => item.finding.title)?.finding.title || id,
+      title: advisory?.title || projectFindings.find(item => item.finding.title)?.finding.title || id,
       severity: severityOrder.find(severity => severities.includes(severity)) ?? "unknown",
-      url: advisory?.url || group.affected.map(item => publicLink(item.finding.url)).find(Boolean),
+      url: advisory?.url || projectFindings.map(item => publicLink(item.finding.url)).find(Boolean),
       publishedAt: advisory?.publishedAt,
-      latestCheckedAt: group.affected.map(item => item.finding.checkedAt).sort().at(-1),
-      packages: [...new Set(group.advisories.flatMap(item => item.packages))].sort(),
-      affected: group.affected.sort((a, b) => a.project.name.localeCompare(b.project.name, "fr") || a.finding.key.localeCompare(b.finding.key)),
+      latestCheckedAt: projectFindings.map(item => item.finding.checkedAt).sort().at(-1),
+      packages: [...new Set(publicItems.flatMap(item => item.packages))].sort(),
+      affected: [...projects.values()].sort((a, b) => a.project.name.localeCompare(b.project.name, "fr") || a.project.id.localeCompare(b.project.id)),
     };
     (item.affected.length ? detected : recent).push(item);
   }

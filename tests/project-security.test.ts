@@ -33,7 +33,7 @@ test("Compteur : vulnérabilités, soupçons et fins de support sont distincts",
   assert.equal(summary.severityCounts?.high, 1);
 });
 
-test("Compteur : fusion transitive des alias sans confondre composants, versions et services", () => {
+test("Signalements : fusion transitive des alias par composant, version et service", () => {
   const finding = healthCheck().findings[0];
   const items: SecurityFinding[] = [
     { ...finding, id: "GHSA-one", aliases: ["CVE-2026-0001"], severity: "low" },
@@ -84,7 +84,7 @@ test("Couverture : un scan complet sans alerte donne un zéro borné à son pér
   assert.doesNotMatch(html, /Contrôles incomplets|Non vérifiable/);
 });
 
-test("Fiche : les mêmes dépendances vulnérables sont attribuées à leur bloc respectif", () => {
+test("Compteur projet : une seule faille, de gravité maximale, même dans plusieurs blocs", () => {
   const { detail, target, report, state } = fixture();
   const service = structuredClone(detail.railway![0].services[0]);
   service.id = "tailscale";
@@ -92,9 +92,15 @@ test("Fiche : les mêmes dépendances vulnérables sont attribuées à leur bloc
   detail.railway![0].services.push(service);
   const secondTarget = { ...target, id: "tailscale-target", remoteId: service.id, name: service.name };
   state.targets.push(secondTarget);
-  state.automaticControls!.push({ ...report, targetId: secondTarget.id, identity: controlSource(secondTarget, detail)!.identity });
+  const finding = report.checks[0].findings[0];
+  const secondCheck = { ...report.checks[0], findings: [{ ...finding, id: finding.aliases[0], aliases: [finding.id], severity: "critical" as const }] };
+  state.automaticControls!.push({ ...report, targetId: secondTarget.id, identity: controlSource(secondTarget, detail)!.identity, checks: [secondCheck] });
+  const summary = summarizeProject(detail.project, detail, state);
+  assert.equal(summary.count, 1);
+  assert.equal(summary.severityCounts?.critical, 1);
+  assert.equal(summary.severityCounts?.high, 0);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
-  assert.match(html, /2 failles connues/);
+  assert.match(html, /1 faille connue/);
   const blocks = html.split('<details class="security-findings-block"').slice(1).map(section => section.split("</details>")[0]);
   assert.equal(blocks.length, 2);
   const backend = blocks.find(block => block.includes('Bloc : <strong>Backend</strong>'));
@@ -105,6 +111,8 @@ test("Fiche : les mêmes dépendances vulnérables sont attribuées à leur bloc
     assert.match(block, /CVE-2026-12345/);
     assert.match(block, /1 signalement/);
   }
+  detail.railway![0].observedAt = new Date(0).toISOString();
+  assert.equal(summarizeProject(detail.project, detail, state).lastKnown?.count, 1);
 });
 
 test("Couverture : aucun zéro depuis un runtime seul, un service absent ou un rapport vide", () => {

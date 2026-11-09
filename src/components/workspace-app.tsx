@@ -73,6 +73,7 @@ import { ProjectListActions } from "./project-list-actions";
 import type { UpdateState } from "@/lib/updates/types";
 
 type View = "sites" | "security" | "clients" | "connections" | "backup" | "activity";
+const defaultView = "security";
 const projectTabs = [
   { id: "overview", label: "Vue d’ensemble" },
   { id: "technical", label: "Technique" },
@@ -93,8 +94,8 @@ type Dialog =
   | "environment"
   | null;
 const navigation = [
+  { id: "security", label: "Dashboard", icon: ShieldAlert },
   { id: "sites", label: "Sites & projets", icon: Globe2 },
-  { id: "security", label: "Veille sécurité", icon: ShieldAlert },
   { id: "clients", label: "Clients", icon: Building2 },
   { id: "connections", label: "Connexions", icon: Link2 },
   { id: "backup", label: "Backup", icon: Database },
@@ -120,7 +121,7 @@ const titles: Record<
     kicker: "VOTRE PARC WEB",
   },
   security: {
-    title: "Veille sécurité",
+    title: "Dashboard",
     description: "Les failles détectées sur votre parc et les derniers avis publics.",
     kicker: "SÉCURITÉ DU PARC",
   },
@@ -206,7 +207,7 @@ function WorkspaceContent({
   const [ready, setReady] = useState(false),
     [data, setData] = useState<WorkspaceData | null>(null),
     [error, setError] = useState("");
-  const [view, setView] = useState<View>("sites"),
+  const [view, setView] = useState<View>(defaultView),
     [query, setQuery] = useState(""),
     [provider, setProvider] = useState(""),
     [clientFilter, setClientFilter] = useState(""),
@@ -240,7 +241,7 @@ function WorkspaceContent({
       const params = new URLSearchParams(window.location.search);
       setSelected(params.get("project"));
       setSelectedClient(params.get("project") ? null : params.get("client"));
-      setView(params.get("project") ? "sites" : params.get("client") ? "clients" : navigation.find(n => n.id === params.get("view"))?.id || "sites");
+      setView(params.get("project") ? "sites" : params.get("client") ? "clients" : navigation.find(n => n.id === params.get("view"))?.id || defaultView);
       setProjectTab(projectTabs.find(tab => tab.id === params.get("tab"))?.id || "overview");
       setDialog(null); setMobileNav(false); setError("");
     };

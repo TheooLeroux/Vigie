@@ -29,12 +29,13 @@ test("Veille : regroupe les alias entre projets et sépare les avis publics des 
   const project = { id: "one", name: "Premier projet" };
   const { detected, recent } = rankSecurityWatch([publicItem, newer], [
     { project, finding },
-    { project: { id: "two", name: "Second projet" }, finding: { ...finding, key: "second", id: "osv-2026-123", aliases: [], severity: "critical", version: "2.0.0" } },
+    { project, historical: true, finding: { ...finding, key: "duplicate", targetId: "other-service" } },
+    { project: { id: "two", name: "Second projet" }, historical: true, finding: { ...finding, key: "second", id: "osv-2026-123", aliases: [], severity: "critical", version: "2.0.0" } },
     { project, finding: { ...finding, key: "third", id: "CVE-2026-4321", aliases: [], severity: "low" } },
   ]);
   assert.deepEqual(detected.map(item => item.id), ["CVE-2026-1234", "CVE-2026-4321"]);
   assert.deepEqual(detected[0].aliases, ["GHSA-AAAA-BBBB-CCCC", "OSV-2026-123"]);
-  assert.deepEqual(detected[0].affected.map(item => [item.project.id, item.finding.version]), [["one", "1.0.0"], ["two", "2.0.0"]]);
+  assert.deepEqual(detected[0].affected.map(item => [item.project.id, item.historical]), [["one", false], ["two", true]]);
   assert.equal(detected[0].severity, "critical");
   assert.equal(detected[0].title, "Avis GitHub");
   assert.deepEqual(recent.map(item => item.id), [newer.id]);
@@ -88,19 +89,44 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   const matched = await (await read()).json();
   assert.deepEqual(matched.coverage, { projects: 1, fullyCovered: 1 });
   assert.equal(matched.detected[0].affected[0].project.id, project.id);
-  assert.equal(matched.detected[0].affected[0].finding.version, "1.0.0");
+  assert.equal(matched.detected[0].affected[0].historical, false);
   assert.deepEqual(matched.recent, []);
+
+  await writeAutomaticControl({ ...report, error: "Dernier contrôle en erreur" });
+  const failed = await (await read()).json();
+  assert.equal(failed.detected[0].affected.length, 1);
+  assert.equal(failed.detected[0].affected[0].historical, true);
 
   const expired = new Date(Date.now() - controlInterval).toISOString();
   await writeAutomaticControl({ ...report, checkedAt: expired, checks: [{ ...check, checkedAt: expired }] });
   const stale = await (await read()).json();
   assert.deepEqual(stale.coverage, { projects: 1, fullyCovered: 0 });
-  assert.deepEqual(stale.detected, []);
-  assert.equal(stale.recent[0].id, "GHSA-AAAA-BBBB-CCCC");
+  assert.equal(stale.detected[0].affected[0].historical, true);
+  assert.equal(stale.detected[0].latestCheckedAt, expired);
+  assert.deepEqual(stale.recent, []);
 
   await writeAutomaticControl(report);
   await applyVercelSnapshot(connection.id, [{ ...remote, production: { ...production, id: "redeployed" } }]);
   const redeployed = await (await read()).json();
-  assert.deepEqual(redeployed.detected, []);
+  assert.equal(redeployed.detected[0].affected[0].historical, true);
+
+  const redeployedDetail = await observedProjectDetail(project.id, "live");
+  await writeAutomaticControl({ ...report, identity: controlSource(target, redeployedDetail)!.identity, checks: [{ ...check, findings: [] }] });
+  const clean = await (await read()).json();
+  assert.deepEqual(clean.coverage, { projects: 1, fullyCovered: 1 });
+  assert.deepEqual(clean.detected, []);
+  assert.equal(clean.recent[0].id, "GHSA-AAAA-BBBB-CCCC");
+
+  const other = { ...remote, id: "prj_watch_other", name: "Autre service" };
+  await applyVercelSnapshot(connection.id, [{ ...remote, production: { ...production, id: "redeployed" } }, other]);
+  await linkVercelProject(connection.id, other.id, project.id);
+  const otherTarget = (await updateTargets(project.id)).find(item => item.remoteId === other.id)!;
+  const mixedDetail = await observedProjectDetail(project.id, "live");
+  await writeAutomaticControl({ ...report, targetId: otherTarget.id, identity: controlSource(otherTarget, mixedDetail)!.identity, checkedAt: expired, checks: [{ ...check, checkedAt: expired }] });
+  const mixed = await (await read()).json();
+  assert.deepEqual(mixed.coverage, { projects: 1, fullyCovered: 0 });
+  assert.equal(mixed.detected[0].affected.length, 1);
+  assert.equal(mixed.detected[0].affected[0].historical, true);
+  assert.equal(mixed.detected[0].affected[0].project.id, project.id);
   assert.equal(transport.mock.callCount(), 2);
 });
