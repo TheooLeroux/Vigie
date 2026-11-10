@@ -51,7 +51,7 @@ import { normalizeImageDigest } from "../image-reference";
 
 type Progress = (stage: UpdateStage, message: string) => Promise<void>;
 const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
-async function extractArchive(archive: string, folder: string, github = false): Promise<string[]> {
+export async function extractArchive(archive: string, folder: string, github = false): Promise<string[]> {
   return JSON.parse(await runCommand("python3", [archiveScript, github ? "extract-github" : "extract", archive, folder]));
 }
 export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>, caddyChanges?: ReadonlyMap<string, CaddyChange>) {
@@ -75,7 +75,7 @@ export async function publishGitVersions(repository: string, branch: string, exp
   await githubRequest(`/repos/${repository}/git/refs/heads/${encodeURIComponent(branch)}`, token, "PATCH", { sha: next.sha, force: false }, transport);
   return next.sha as string;
 }
-async function downloadGitArchive(repository: string, sha: string, destination: string) {
+export async function downloadGitArchive(repository: string, sha: string, destination: string) {
   const response = await fetch(`https://api.github.com/repos/${repository}/zipball/${sha}`, { headers: { Authorization: `Bearer ${githubUpdateToken(repository)}`, Accept: "application/vnd.github+json" }, redirect: "manual", signal: AbortSignal.timeout(30000) });
   const location = response.headers.get("location");
   if (response.status !== 302 || !location) throw new ApiError("Les sources GitHub n’ont pas pu être récupérées.", 502);

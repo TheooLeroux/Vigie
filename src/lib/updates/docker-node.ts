@@ -64,9 +64,28 @@ export async function readDockerNode(target: UpdateTarget, deploymentId: string,
 
 // Shared short-lived SSH lifecycle; probes provide only fixed, read-only commands.
 export async function readRailwayProbe<T extends object>(target: UpdateTarget, deploymentId: string, probe: { command: (nonce: string) => string; parse: (output: string, nonce: string) => T; maxInstances?: number }, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
+  return withRailwayInstances(target, deploymentId, probe.maxInstances ?? 32, async (id, args, options) => {
+    const nonce = randomUUID(), command = probe.command(nonce);
+    const output = await dependencies.execute("ssh", ["-T", "-a", "-x", ...args, `${id}@ssh.railway.com`, command], options);
+    return probe.parse(output, nonce);
+  }, dependencies);
+}
+
+export async function readRailwayStaticImage(target: UpdateTarget, deploymentId: string, inspect: (binary: string, listing: string) => Promise<void>) {
+  return withRailwayInstances(target, deploymentId, 8, async (id, args, options) => {
+    const binary = join(options.cwd, id + "-caddy");
+    const listing = await runCommand("sftp", ["-b", "-", ...args, `${id}@ssh.railway.com`], {
+      ...options, timeout: 60_000, input: `ls -1a /\nget /caddy ${id}-caddy\n`,
+    });
+    await inspect(binary, listing);
+    return {};
+  });
+}
+
+async function withRailwayInstances<T extends object>(target: UpdateTarget, deploymentId: string, limit: number, inspect: (id: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }) => Promise<T>, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
   identifier.parse(deploymentId);
   if (target.provider !== "railway") throw new ApiError("Sonde réservée aux conteneurs Railway.", 422);
-  const maxInstances = z.number().int().min(1).max(32).parse(probe.maxInstances ?? 32);
+  const maxInstances = z.number().int().min(1).max(32).parse(limit);
   async function instances() {
     const raw = await dependencies.request(target, instancesQuery, { id: deploymentId });
     const data = z.object({ deployment: z.object({ id: z.literal(deploymentId), status: z.literal("SUCCESS"), instances: z.array(z.object({ id: identifier, status: z.literal("RUNNING") })).min(1).max(maxInstances) }) }).safeParse(raw);
@@ -116,11 +135,9 @@ export async function readRailwayProbe<T extends object>(target: UpdateTarget, d
     if (!key.success) throw new ApiError("Railway n’a pas confirmé la clé temporaire de vérification.", 422);
     keyId = key.data.sshPublicKeyCreate.id;
     const results: ({ id: string } & T)[] = [];
+    const args = ["-F", config, "-i", identity, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${known}`, "-o", `GlobalKnownHostsFile=${known}`, "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"];
     for (const id of before) {
-      const nonce = randomUUID(), command = probe.command(nonce);
-      const args = ["-F", config, "-T", "-a", "-x", "-i", identity, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${known}`, "-o", `GlobalKnownHostsFile=${known}`, "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", `${id}@ssh.railway.com`, command];
-      const output = await dependencies.execute("ssh", args, { cwd: temporary, env: environment, timeout: 20_000 });
-      results.push({ id, ...probe.parse(output, nonce) });
+      results.push({ id, ...await inspect(id, args, { cwd: temporary, env: environment, timeout: 20_000 }) });
     }
     if (JSON.stringify(before) !== JSON.stringify(await instances())) throw new ApiError("Les instances ont changé pendant la vérification du conteneur. Attestation refusée.", 422);
     return results;

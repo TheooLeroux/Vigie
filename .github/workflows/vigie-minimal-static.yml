@@ -1,0 +1,50 @@
+name: Vigie minimal static preview
+run-name: Railway static preview for ${{ inputs.project_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
+      frontend:
+        required: true
+        type: string
+      backend:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: railway-static-preview-${{ inputs.project_id }}
+  cancel-in-progress: false
+jobs:
+  preview:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm install --global @railway/cli@5.71.0
+      - run: node --import tsx scripts/install-update-scanners.ts
+      - name: Valider l’image minimale sur un service Railway isolé
+        run: node --import tsx scripts/minimal-static-worker.ts
+        env:
+          VIGIE_STATIC_PROJECT: ${{ inputs.project_id }}
+          VIGIE_STATIC_COMMIT: ${{ inputs.commit }}
+          VIGIE_STATIC_FRONTEND: ${{ inputs.frontend }}
+          VIGIE_STATIC_BACKEND: ${{ inputs.backend }}
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
+          VIGIE_UPDATES_GITHUB_TOKENS: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKENS }}
+          VIGIE_UPDATES_REPOSITORIES: ${{ vars.VIGIE_MAINTENANCE_REPOSITORIES }}
