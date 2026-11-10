@@ -12,11 +12,11 @@ import { deployRailwayArchive, railwayUpdateRequest, readRailwayInstance, waitFo
 import { railpackCaddyVersion } from "./railpack-caddy";
 import { runCommand } from "./process";
 import { parseTrivy } from "./security";
-import type { UpdateTarget } from "./types";
+import type { SecurityFinding, UpdateTarget } from "./types";
 
 const caddyCommit = "9ea3108377d2abec102866808133c40ac9582162";
 const caddyArchiveHash = "5f71a0f071a4b80e52c8ed17b95b2dccc443c5e8468d39886b08dde78a7a90af";
-const dockerfile = `FROM golang:1.27.3-bookworm@sha256:025eefc1e8dbe63201734a72aaa0a55d7a077f2d8410432f8ae2f3e939f32871 AS caddy
+export const minimalStaticDockerfile = `FROM golang:1.27.3-bookworm@sha256:025eefc1e8dbe63201734a72aaa0a55d7a077f2d8410432f8ae2f3e939f32871 AS caddy
 ADD --checksum=sha256:${caddyArchiveHash} https://codeload.github.com/caddyserver/caddy/tar.gz/${caddyCommit} /caddy.tgz
 RUN mkdir /src && tar -xzf /caddy.tgz -C /src --strip-components=1
 WORKDIR /src
@@ -39,6 +39,16 @@ USER 65532:65532
 ENV HOME=/tmp PORT=8080
 ENTRYPOINT ["/caddy","run","--config","/Caddyfile","--adapter","caddyfile"]
 `;
+const nodeStage = /^FROM node:(\d+\.\d+\.\d+)-bookworm-slim@(sha256:[0-9a-f]{64}) AS frontend$/m;
+export function minimalStaticRecipe(node: string, digest: string) {
+  return minimalStaticDockerfile.replace(nodeStage, `FROM node:${node}-bookworm-slim@${digest} AS frontend`);
+}
+
+export function minimalStaticBuildNode(source: string) {
+  const pin = source.match(nodeStage);
+  return pin && source === minimalStaticRecipe(pin[1], pin[2]) ? pin[1] : undefined;
+}
+
 const bundleDockerfile = `FROM scratch
 COPY caddy /caddy
 COPY dist /dist
@@ -60,7 +70,7 @@ function assertMinimalListing(listing: string) {
   }
 }
 
-async function scanBinary(directory: string, cache: string) {
+async function scanBinary(directory: string, cache: string, requireClean = true) {
   const report = join(directory, "trivy.json");
   await runCommand("trivy", ["rootfs", "--scanners", "vuln", "--pkg-types", "library", "--list-all-pkgs", "--cache-dir", cache, "--quiet", "--format", "json", "--output", report, directory], {
     env: { NODE_ENV: "production", PATH: process.env.PATH, HOME: directory }, timeout: 150_000,
@@ -70,7 +80,26 @@ async function scanBinary(directory: string, cache: string) {
   const parsed = JSON.parse(raw);
   if (!parsed.Results?.some((result: { Type?: string; Packages?: unknown[] }) => result.Type === "gobinary" && result.Packages?.length)) throw new ApiError("Inventaire Go du binaire Caddy absent du scan.", 422);
   const findings = parseTrivy(raw, false, "gobinary");
-  if (findings.length) throw new ApiError(`L’image minimale contient encore ${findings.length} signalement(s) Go. Candidate refusée.`, 422);
+  if (requireClean && findings.length) throw new ApiError(`L’image minimale contient encore ${findings.length} signalement(s) Go. Candidate refusée.`, 422);
+  return findings;
+}
+
+export async function scanMinimalStaticImage(target: UpdateTarget, deploymentId: string, expectedHash?: string) {
+  const directory = await mkdtemp(join(tmpdir(), "vigie-static-scan-"));
+  try {
+    const root = join(directory, "root");
+    await mkdir(root);
+    const findings = new Map<string, SecurityFinding>();
+    const instances = await readRailwayStaticImage(target, deploymentId, async (binary, listing) => {
+      assertMinimalListing(listing);
+      if (expectedHash && await hashFile(binary) !== expectedHash) throw new ApiError("Le binaire déployé diffère de la candidate analysée.", 422);
+      await cp(binary, join(root, "caddy"));
+      for (const finding of await scanBinary(root, join(directory, "cache"), false)) {
+        findings.set(JSON.stringify([finding.id, finding.package, finding.version]), finding);
+      }
+    });
+    return { findings: [...findings.values()], instances: instances.length };
+  } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
 async function hashFile(path: string, artifact = "Caddy") {
@@ -101,15 +130,16 @@ function publicBuildVariables(vars: Record<string, string>) {
 
 const witnessProgram = String.raw`
 const http=require("node:http"), crypto=require("node:crypto");
-const [host,origin,nonce]=process.argv.slice(1);
+const [base,origin,nonce]=process.argv.slice(1);
 async function probe() {
- const base="http://"+host+":8080", options={redirect:"error",signal:AbortSignal.timeout(9000)};
+ const transport=base.startsWith("https:")?require("node:https"):http;
+ const options={redirect:"error",signal:AbortSignal.timeout(9000)};
  const [health,home,api]=await Promise.all([fetch(base+"/health",options),fetch(base+"/",options),fetch(base+"/api/auth/me",{...options,headers:{Origin:origin}})]);
  const [html,auth]=await Promise.all([home.text(),api.json()]);
  if(health.status!==200||home.status!==200||!home.headers.get("content-type")?.includes("text/html")||!html.includes("/assets/")||api.status!==401||auth.success!==false||typeof auth.error!=="string")throw Error("HTTP");
  const key=crypto.randomBytes(16).toString("base64"), accept=crypto.createHash("sha1").update(key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
  const upgrade=await new Promise((resolve,reject)=>{
-   const req=http.get(base+"/ws/terminal",{headers:{Connection:"Upgrade",Upgrade:"websocket","Sec-WebSocket-Version":"13","Sec-WebSocket-Key":key,Origin:origin},timeout:9000});
+   const req=transport.get(base+"/ws/terminal",{headers:{Connection:"Upgrade",Upgrade:"websocket","Sec-WebSocket-Version":"13","Sec-WebSocket-Key":key,Origin:origin},timeout:9000});
    req.on("upgrade",(res,socket)=>{socket.destroy();if(res.statusCode===101&&res.headers["sec-websocket-accept"]===accept)resolve(101);else reject(Error("Upgrade"))});
    req.on("response",res=>{res.resume();reject(Error("WebSocket "+res.statusCode))});
    req.on("timeout",()=>req.destroy(Error("WebSocket timeout")));
@@ -119,6 +149,16 @@ async function probe() {
 }
 probe().catch(e=>{console.error(e.message);process.exitCode=1});
 `;
+
+export async function checkPublicMinimalStatic(target: UpdateTarget) {
+  const origin = new URL(target.url!).origin;
+  if (origin !== target.url?.replace(/\/$/, "") || !/^https:\/\/[a-z0-9-]+\.up\.railway\.app$/.test(origin)) throw new ApiError("Domaine public Railway non qualifié.", 422);
+  const nonce = randomUUID();
+  const output = await runCommand(process.execPath, ["-e", witnessProgram, origin, origin, nonce], {
+    env: { NODE_ENV: "production", PATH: process.env.PATH }, timeout: 30_000,
+  });
+  return z.object({ nonce: z.literal(nonce), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output));
+}
 
 export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log = console.log) {
   sha.parse(commit);
@@ -158,7 +198,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
       await mkdir(dirname(output), { recursive: true });
       await cp(join(sources, file), output);
     }
-    await writeFile(join(context, "Dockerfile"), dockerfile);
+    await writeFile(join(context, "Dockerfile"), minimalStaticDockerfile);
     const env = { NODE_ENV: "production" as const, PATH: process.env.PATH, HOME: dir, DOCKER_CONFIG: join(dir, ".docker"), ...buildVars };
     await mkdir(env.DOCKER_CONFIG);
     log("Construction isolée de la candidate et exécution des tests frontend.");
@@ -202,11 +242,11 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     log(`Scan de l’image Railway ${digest} terminé : zéro signalement sur ${instances.length} instance(s).`);
     const backendId = uuid.parse(backend[0].id);
     const routes = await readRailwayProbe(witness, backendId, {
-      command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + witnessProgram.replace(/'/g, "'\\''") + `' '${name}.railway.internal' '${origin}' '${nonce}'`,
+      command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + witnessProgram.replace(/'/g, "'\\''") + `' 'http://${name}.railway.internal:8080' '${origin}' '${nonce}'`,
       parse: (output, nonce) => z.object({ nonce: z.literal(nonce), deployment: z.literal(backendId), service: z.literal(witness.remoteId), environment: z.literal(environmentId), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output)),
     });
     if (await active() !== digest) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
-    return { commit, caddyCommit, deploymentId, digest, scannedInstances: instances.length, witnesses: routes.length, imageFindings: 0, health: 200, site: 200, api: 401, websocket: 101 };
+    return { commit, caddyCommit, binaryHash, previousDeploymentId: current[0].id as string, witnessDeploymentId: backendId, deploymentId, digest, scannedInstances: instances.length, witnesses: routes.length, imageFindings: 0, health: 200, site: 200, api: 401, websocket: 101 };
   } finally {
     try {
       if (preview) {

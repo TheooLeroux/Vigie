@@ -1,6 +1,6 @@
 import { controlRenewalInterval } from "../automatic-control-state";
 import { hostingStorage } from "../hosting-storage";
-import type { UpdateTarget } from "./types";
+import type { UpdateCheck, UpdateTarget } from "./types";
 import { sameRailpackImage, type RailpackImageIdentity, type RailpackImageReport } from "./railpack-image-report";
 import { scanRailpackImage, type RailpackInventory } from "./railpack-image-scan";
 
@@ -23,6 +23,9 @@ async function write(key: string, value: Scan | Inventory) {
 }
 
 const scanKey = (id: string) => `railpack:scan:1:${id}`;
+export async function saveMinimalStaticScan(identity: RailpackImageIdentity, check: UpdateCheck) {
+  await write(scanKey(identity.targetId), { ...identity, attemptedAt: check.checkedAt, report: { ...identity, check } });
+}
 const inventoryKey = (id: string) => `railpack:inventory:1:${id}`;
 export const readRailpackScan = (id: string) => read<Scan>(scanKey(id));
 export async function cachedRailpackInventory(identity: RailpackImageIdentity) {
@@ -42,13 +45,28 @@ export async function refreshRailpackImage(target: UpdateTarget, identity: Railp
   const attempt = { ...identity, attemptedAt: new Date().toISOString(), attemptRevision: revision };
   const cached = await cachedRailpackInventory(identity);
   try {
+    if (identity.caddy === "minimal-static") {
+      const { scanMinimalStaticImage } = await import("./minimal-static");
+      const { readRailwayInstance } = await import("./providers");
+      const { deploymentEvidence } = await import("../connectors/railway-evidence");
+      const { normalizeImageDigest } = await import("../image-reference");
+      const { securityCheck } = await import("./security");
+      const { findings } = await scanMinimalStaticImage(target, identity.deploymentId);
+      const { serviceInstance } = await readRailwayInstance(target);
+      const [active] = serviceInstance.activeDeployments || [];
+      if (serviceInstance.activeDeployments?.length !== 1 || active.id !== identity.deploymentId ||
+        normalizeImageDigest(deploymentEvidence(active.meta)?.imageDigest) !== identity.imageDigest) throw Error("Image active modifiée pendant le scan.");
+      const check = securityCheck("Trivy", "after", "Image statique minimale déployée sur Railway", findings);
+      await write(scanKey(target.id), { ...attempt, report: { ...identity, check } });
+      return "checked" as const;
+    }
     const { check, inventory: scanned } = await scan(target, identity, cached);
     if (!cached) await write(inventoryKey(target.id), { ...identity, inventory: scanned });
     await write(scanKey(target.id), { ...attempt, report: { ...identity, check } });
     return "checked" as const;
   } catch {
     const report = previous && sameRailpackImage(previous, identity) ? previous.report : undefined;
-    await write(scanKey(target.id), { ...attempt, report, error: "Le scan de l’image Railpack n’a pas pu être renouvelé. Un nouveau contrôle est prévu." });
+    await write(scanKey(target.id), { ...attempt, report, error: "Le scan de l’image active n’a pas pu être renouvelé. Un nouveau contrôle est prévu." });
     return "failed" as const;
   }
 }

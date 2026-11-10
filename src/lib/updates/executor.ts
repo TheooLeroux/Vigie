@@ -46,6 +46,11 @@ import { caddyConfig, caddyPinVersion, caddyVersionChange, railpackCaddyVersion,
 import { planDebianFixes, verifyDebianFixes } from "./railpack-debian";
 import { cachedRailpackInventory } from "./railpack-image-control";
 import { scanRailpackImage } from "./railpack-image-scan";
+import { activeMinimalStaticImage, minimalStaticWitnessId, migrateMinimalStatic } from "./minimal-static-migration";
+import { checkPublicMinimalStatic, minimalStaticBuildNode, minimalStaticRecipe, scanMinimalStaticImage } from "./minimal-static";
+import { officialNodeImageDigest } from "./node-catalog-state";
+import { saveMinimalStaticScan } from "./railpack-image-control";
+import { deploymentEvidence } from "../connectors/railway-evidence";
 import type { RailpackImageIdentity } from "./railpack-image-report";
 import { normalizeImageDigest } from "../image-reference";
 
@@ -54,7 +59,7 @@ const archiveScript = join(process.cwd(), "scripts", "update-archive.py");
 export async function extractArchive(archive: string, folder: string, github = false): Promise<string[]> {
   return JSON.parse(await runCommand("python3", [archiveScript, github ? "extract-github" : "extract", archive, folder]));
 }
-export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>, caddyChanges?: ReadonlyMap<string, CaddyChange>) {
+export async function publishGitVersions(repository: string, branch: string, expected: string, files: { path: string; content: string }[], transport: typeof fetch = fetch, alpineRepairs?: ReadonlyMap<string, AlpineRepair>, caddyChanges?: ReadonlyMap<string, CaddyChange>, staticRecipes?: ReadonlyMap<string, string>) {
   if (!files.length || files.some(file => !/(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|\.nvmrc|\.node-version|Dockerfile|railpack\.json)$/.test(file.path) || file.path.split("/").some(part => !part || part === "." || part === ".." || part === ".git") || /[\\\x00-\x1f]/.test(file.path))) throw new ApiError("La publication doit se limiter aux versions et aux fichiers de verrouillage.");
   for (const file of files.filter(file => /(^|\/)railpack\.json$/.test(file.path))) {
     const change = caddyChanges?.get(file.path);
@@ -67,6 +72,7 @@ export async function publishGitVersions(repository: string, branch: string, exp
   if (head.object.sha !== expected) throw new ApiError("Le dépôt a changé pendant les tests. Aucun changement n’a été écrasé.", 409);
   for (const file of files.filter(file => /(^|\/)Dockerfile$/.test(file.path))) {
     const original = await githubRequest(`/repos/${repository}/contents/${file.path.split("/").map(encodeURIComponent).join("/")}?ref=${expected}`, token, "GET", undefined, transport);
+    if (staticRecipes?.get(file.path) === file.content && original.type === "file" && original.encoding === "base64" && typeof original.content === "string" && minimalStaticBuildNode(Buffer.from(original.content, "base64").toString("utf8")) && minimalStaticBuildNode(file.content)) continue;
     if (original.type !== "file" || original.encoding !== "base64" || typeof original.content !== "string" || typeof original.size !== "number" || original.size > 64_000 || !validatedDockerfileChange(Buffer.from(original.content, "base64").toString("utf8"), file.content, alpineRepairs?.get(file.path))) throw new ApiError("Le Dockerfile doit uniquement modifier les versions autorisées ou appliquer un correctif Alpine validé.");
   }
   const commit = await githubRequest(`/repos/${repository}/git/commits/${expected}`, token, "GET", undefined, transport);
@@ -118,6 +124,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const latestLts = await latestNode();
   const runtimeChecks: (UpdateCheck | null)[] = [];
   const staticFrameworks = new Map<string, string>();
+  const minimalStaticTargets = new Set<string>();
   const caddyDeployments = new Map<string, { current: string; commit: string | null; imageDigest: string | null }>();
   for (const [index, target] of targets.entries()) {
     results[index].previousDeploymentId = await providerPreflight(target, latestLts, undefined, evidence => {
@@ -134,7 +141,20 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       staticFrameworks.set(target.id, framework);
       results[index].warnings.push("Site statique : Node sert à construire et valider les sources dans un conteneur isolé. La version du build distant Vercel n’est pas mesurée. Aucun serveur Node n’est revendiqué ; les parcours métier restent à tester.");
     }
-    const check = results[index].previousDeploymentId && !vercelStaticTarget(target) ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
+    if (minimalStaticWitnessId(target) && results[index].previousDeploymentId && !caddyDeployments.has(target.id) && target.repository) {
+      const { serviceInstance } = await readRailwayInstance(target);
+      const active = serviceInstance.activeDeployments?.find((deployment: { id: string }) => deployment.id === results[index].previousDeploymentId);
+      const commit = deploymentEvidence(active?.meta)?.commit;
+      if (commit) {
+        const path = target.root.split("/").map(encodeURIComponent).join("/") + "/Dockerfile";
+        const file = await githubRequest(`/repos/${target.repository}/contents/${path}?ref=${commit}`, githubUpdateToken(target.repository)).catch(() => null);
+        if (file?.type === "file" && file.encoding === "base64" && typeof file.content === "string" && minimalStaticBuildNode(Buffer.from(file.content, "base64").toString("utf8"))) {
+          await activeMinimalStaticImage(target, active.id, commit);
+          minimalStaticTargets.add(target.id);
+        }
+      }
+    }
+    const check = results[index].previousDeploymentId && !vercelStaticTarget(target) && !minimalStaticTargets.has(target.id) ? await preflightNodeRuntime(target, results[index].previousDeploymentId!, latestLts) : null;
     runtimeChecks.push(check);
     if (check) {
       results[index].checks ||= []; results[index].checks.push(check);
@@ -185,6 +205,16 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const before = await snapshotSources(sourceFolder, names);
     const roots = targets.map(target => target.root);
     const railpackCaddyPins = new Set<string>();
+    const minimalStaticRoots = new Set<string>();
+    for (const target of targets.filter(item => minimalStaticTargets.has(item.id))) {
+      const prefix = target.root + "/";
+      const recipe = names.includes(prefix + "Dockerfile") && await readFile(join(sourceFolder, prefix + "Dockerfile"), "utf8");
+      if (!recipe || !minimalStaticBuildNode(recipe) || targets.some(item => item.id !== target.id && item.root === target.root)) {
+        throw new ApiError("La recette Docker statique ou le périmètre des sources a changé.", 409);
+      }
+      minimalStaticRoots.add(target.root);
+      railpackCaddyPins.add(prefix + "railpack.json");
+    }
     const caddyCandidates = new Map<string, CaddyChange>();
     const caddyChanges = new Map<string, CaddyChange>();
     const caddyTested = new Map<string, CaddyFingerprint>();
@@ -243,7 +273,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const policyHash = await nodePolicyHash();
     const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
     await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
-    const previous = run.purpose === "assessment" || caddyCandidates.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
+    const previous = run.purpose === "assessment" || caddyCandidates.size || minimalStaticRoots.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
     let receipt = previous.flatMap(prior => (prior.nodeReceipts || []).flatMap(raw => {
       const saved = reusableNodeReceipt(raw, key);
       return saved && nodeReceiptGroupCompleted(saved, prior.results || []) ? [saved] : [];
@@ -321,7 +351,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const imageReferences = new Map<string, DockerNodeBase[] | null>();
     for (const root of [...new Set(roots)]) {
       const dockerfile = (root ? root + "/" : "") + "Dockerfile";
-      if (!names.includes(dockerfile)) continue;
+      if (!names.includes(dockerfile) || minimalStaticRoots.has(root)) continue;
       const image = dockerRuntimeBase(await readFile(join(sourceFolder, dockerfile), "utf8"));
       const findings = (await scanImage(image, true)).map(entry => ({ ...entry, scope: root }));
       imageBaselines.set(root, findings);
@@ -402,6 +432,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       return {
       baseline,
       railpackCaddyPins,
+      minimalStaticRoots,
       retain: findings => npmPolicy.retain(workingFolder, findings),
       alpineRepaired: (root, repair) => { alpineRepairs.set(root ? `${root}/Dockerfile` : "Dockerfile", repair); },
       resolved: async resolvedNames => {
@@ -510,6 +541,15 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         message: `${debian ? "Correctifs Debian " + candidate.debianPins!.join(", ") : `Caddy ${candidate.current} → ${candidate.version}`} : plan Railpack, image, scan Trivy et démarrage HTTP validés en ${Math.round(performance.now() - started)} ms.`,
       }, selected);
     }
+    const staticRecipes = new Map<string, string>();
+    for (const root of minimalStaticRoots) {
+      const path = root + "/Dockerfile";
+      if (minimalStaticBuildNode(await readFile(join(sourceFolder, path), "utf8")) === version) continue;
+      const recipe = minimalStaticRecipe(version, await officialNodeImageDigest(`node:${version}-bookworm-slim`));
+      await writeFile(join(sourceFolder, path), recipe);
+      prepared.allowed.add(path);
+      staticRecipes.set(path, recipe);
+    }
     const changes = await changedSources(sourceFolder, before, prepared.allowed);
     const finalScan = await nodeScan([...new Set([...names, ...prepared.allowed])], true);
     await recordOsv("candidate", "Contrôle final frais avant publication", finalScan);
@@ -518,7 +558,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const warnings = "services" in prepared ? prepared.services.find(service => service.root === targets[index].root)?.warnings || [] : prepared.warnings;
       result.warnings = [...new Set([...result.warnings, ...warnings])];
     }
-    for (const [index, target] of targets.entries()) if (!caddyCandidates.has(target.id) && !imageBaselines.has(target.root) && !vercelStaticTarget(target)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
+    for (const [index, target] of targets.entries()) if (!caddyCandidates.has(target.id) && !imageBaselines.has(target.root) && !vercelStaticTarget(target) && !minimalStaticTargets.has(target.id)) results[index].warnings.push("Image finale gérée par l’hébergeur : son système n’est pas analysé par Trivy dans ce parcours.");
     if (run.purpose === "assessment") {
       if (changes.length) await assertSourceImpact(targets, changes.map(file => file.path));
       await refreshProjectHosting(run.projectId);
@@ -549,6 +589,18 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
           await progress("verifying", check.message);
           throw error;
         }
+        return;
+      }
+      if (minimalStaticTargets.has(targets[index].id)) {
+        const target = targets[index], commit = result.commit || expected;
+        const image = await activeMinimalStaticImage(target, deploymentId, commit);
+        const scan = await scanMinimalStaticImage(target, deploymentId);
+        const check = securityCheck("Trivy", "after", "Image statique minimale sur Railway", scan.findings);
+        await checkPublicMinimalStatic(target);
+        const current = await activeMinimalStaticImage(target, deploymentId, commit);
+        if (current.imageDigest !== image.imageDigest) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
+        await saveMinimalStaticScan(image, check);
+        await record(check, [result]);
         return;
       }
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
@@ -623,7 +675,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     await progress("publishing", "Publication de la nouvelle version.");
     if (representative.mode === "git") {
       for (const result of results) result.previousCommit = expected;
-      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes, fetch, alpineRepairs, caddyChanges);
+      const commit = await publishGitVersions(representative.repository!, representative.branch!, expected, changes, fetch, alpineRepairs, caddyChanges, staticRecipes);
       for (const result of results) result.commit = commit;
     } else {
       const packed = join(temporary, "updated.zip"), clean = join(temporary, "deploy");
@@ -770,7 +822,20 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
           }
           if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
           else if (targets[0].mode === "image") await executeImage(run, targets[0], results[0], progress);
-          else await executeGroup(run, targets, results, progress);
+          else {
+            await executeGroup(run, targets, results, progress);
+            if (!run.purpose) {
+              for (const [index, target] of targets.entries()) {
+                const witnessId = minimalStaticWitnessId(target);
+                const witness = witnessId && current.find(item => item.remoteId === witnessId && item.environmentId === target.environmentId);
+                if (!witness) continue;
+                await migrateMinimalStatic(target, witness, results[index], async (repository, commit, archive, folder) => {
+                  await downloadGitArchive(repository, commit, archive);
+                  return extractArchive(archive, folder, true);
+                }, progress);
+              }
+            }
+          }
           if (run.purpose === "assessment") {
             if (results.some(result => !assessmentResultIsSafe(result))) throw new ApiError("Le bilan préalable n’a pas produit de proposition vérifiable sans installation.", 422);
             if (targets[0].mode === "image") for (const result of results) {

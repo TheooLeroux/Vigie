@@ -16,6 +16,7 @@ export type ServiceCoverage = {
   reason: string; action: string; limitations: string[]; checkedAt?: string; packages?: number;
   repository?: string | null; commit?: string | null;
   railpackImageCheckedAt?: string;
+  minimalStaticImage?: boolean;
   evidence?: import("./automatic-control-state").SecurityCoverageDetails;
 };
 export type ProjectVulnerability = {
@@ -24,6 +25,7 @@ export type ProjectVulnerability = {
   kind: NonNullable<SecurityFinding["kind"]>; checkedAt: string; explanation?: string;
   title?: string; fixedVersions?: string[]; url?: string;
   railpackImage?: boolean;
+  minimalStaticImage?: boolean;
   scanners?: { tool: ProjectHealth["securityEvidence"][number]["tool"]; checkedAt: string }[];
 };
 const securityTools = new Set(["OSV", "WPScan", "WPVulnerability", "Trivy"]);
@@ -67,6 +69,7 @@ export function normalizedVulnerabilities(evidence: ProjectHealth["securityEvide
       url: finding.url || entries.find(item => item.finding.url)?.finding.url,
       scanners,
       ...(entries.some(item => item.railpackImage) ? { railpackImage: true } : {}),
+      ...(entries.some(item => item.minimalStaticImage) ? { minimalStaticImage: true } : {}),
     };
   }).sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity) || a.key.localeCompare(b.key));
 }
@@ -93,8 +96,8 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   const imageLimitation = railpackReport?.error || (imageCheckedAt && Date.now() - Date.parse(imageCheckedAt) >= controlInterval
     ? "Le rapport image correspond toujours au déploiement actif. Un nouveau scan est nécessaire pour prendre en compte les avis publiés depuis."
     : undefined);
-  const scope = railpackReport ? "Dépendances verrouillées et paquets de l’image Railpack" : control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
-  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage, railpackImageCheckedAt: imageCheckedAt };
+  const scope = railpackReport ? (railpackReport.caddy === "minimal-static" ? "Dépendances verrouillées et image statique déployée" : "Dépendances verrouillées et paquets de l’image Railpack") : control?.securityCoverage?.scope === "sources" ? "Sources récupérées, dépendances et bibliothèques identifiables" : target.mode === "wordpress" ? "Cœur, extensions et thèmes WordPress identifiables" : image ? "Paquets de l’image déployée" : "Dépendances verrouillées du commit déployé";
+  const base = { id: target.id, name: target.name, provider: target.provider, scope, limitations: [] as string[], repository: target.repository, commit: controlSource(target, detail)?.commit, evidence: control?.securityCoverage, railpackImageCheckedAt: imageCheckedAt, minimalStaticImage: railpackReport?.caddy === "minimal-static" };
   const outcome = (status: CoverageStatus, reason: string, action: string, extra: Partial<ServiceCoverage> = {}): ServiceCoverage => ({ ...base, status, reason, action, ...extra });
   if (!state) return outcome("error", "Les rapports de sécurité sont indisponibles.", "Recharger les contrôles du projet.");
   const last = control?.checkedAt ? { checkedAt: control.checkedAt } : {};
@@ -113,7 +116,7 @@ function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: Up
   if (!control.checks.some(check => securityTools.has(check.tool))) return outcome("pending", "Le contrôle n’a pas fourni de rapport de vulnérabilités exploitable.", "Relancer le contrôle automatique.", last);
   const limitations = [...(control.securityCoverage?.limitations || [])];
   const imageScan = control.securityCoverage?.scope === "image" && control.checks.some(check => check.tool === "Trivy" && check.status !== "blocked");
-  if (railpack && !railpackReport && !imageScan) limitations.push("Le verrou applicatif est couvert. Le système et les bibliothèques de l’image Railpack attendent un scan lié à ce déploiement.");
+  if (railpack && railpack.caddy !== "minimal-static" && !railpackReport && !imageScan) limitations.push("Le verrou applicatif est couvert. Le système et les bibliothèques de l’image Railpack attendent un scan lié à ce déploiement.");
   else if (target.mode === "git" && !railpackReport && !imageScan && (service?.builder === "DOCKERFILE" || service?.builder === "RAILPACK")) {
     limitations.push("Le contrôle des sources couvre les dépendances identifiées. Les paquets de l’image déployée restent à analyser.");
   }

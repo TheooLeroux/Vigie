@@ -115,6 +115,7 @@ export function managerCommands(manifest: Record<string, any>, names: string[]) 
 export type NodeUpdateChecks = {
   baseline?: readonly SecurityFinding[];
   railpackCaddyPins?: ReadonlySet<string>;
+  minimalStaticRoots?: ReadonlySet<string>;
   resolved: (names: string[]) => Promise<void>;
   retain?: (findings: SecurityFinding[]) => Promise<boolean>;
   alpineRepaired?: (root: string, repair: AlpineRepair) => void;
@@ -267,7 +268,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
         if (!directory || directory === root || root.startsWith(directory + "/")) requireStrictYarnConfiguration(await readFile(join(folder, name), "utf8"));
       }
     }
-    const dockerName = prefix + "Dockerfile", docker = names.includes(dockerName), dockerSource = docker ? await readFile(join(folder, dockerName), "utf8") : "";
+    const dockerName = prefix + "Dockerfile", docker = names.includes(dockerName) && !security?.minimalStaticRoots?.has(root), dockerSource = docker ? await readFile(join(folder, dockerName), "utf8") : "";
     const extra = docker ? dockerPackages(dockerSource) : {};
     const limits: Record<string, string | string[]> = Object.assign(Object.create(null), retry.limits.get(root));
     for (const [name, range] of Object.entries(remediation.constraints.get(root) || {})) limits[name] = Object.hasOwn(limits, name) ? [limits[name], range].flat() : range;

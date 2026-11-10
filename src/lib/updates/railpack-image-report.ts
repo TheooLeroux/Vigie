@@ -20,16 +20,17 @@ export function railpackImageIdentity(target: UpdateTarget, railway: ProjectDeta
   const service = project.services.find(item => item.id === target.remoteId && item.environmentId === target.environmentId)!;
   const active = railwayRuntimeDeployments(service);
   const deployment = active[0], evidence = deployment?.evidence;
-  if (service.builder !== "RAILPACK" || active.length !== 1 || deployment.status !== "SUCCESS" || !evidence?.staticSite ||
+  if (active.length !== 1 || deployment.status !== "SUCCESS" || !evidence ||
     evidence.repository !== target.repository || evidence.branch !== target.branch ||
     (evidence.rootDirectory || "").replace(/^\/+|\/+$/g, "") !== target.root) return null;
   const imageDigest = normalizeImageDigest(evidence.imageDigest);
-  const caddy = evidence.packages.find(pkg => pkg.name === "caddy" && pkg.usage === "runtime")?.version;
+  const caddy = evidence.railpackVersion ? (service.builder === "RAILPACK" && evidence.staticSite ? evidence.packages.find(pkg => pkg.name === "caddy" && pkg.usage === "runtime")?.version : undefined) : "minimal-static";
   if (!imageDigest || !evidence.commit || !caddy) return null;
   return { targetId: target.id, projectId: target.projectId, deploymentId: deployment.id, imageDigest, commit: evidence.commit, caddy };
 }
 
 export function railpackImageReport(run: UpdateRun, identity: RailpackImageIdentity): RailpackImageReport | null {
+  if (identity.caddy === "minimal-static") return null;
   if (run.projectId !== identity.projectId || run.purpose || !["completed", "failed", "attention"].includes(run.stage)) return null;
   const result = run.results.find(item => item.targetId === identity.targetId && item.stage === "completed" && item.commit === identity.commit && item.deploymentId === identity.deploymentId);
   const proof = result?.checks?.findLast(check => check.tool === "Caddy" && check.phase === "after" && check.status === "passed");

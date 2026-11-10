@@ -17,6 +17,7 @@ import { scanHostingSources } from "./updates/hosting-source-monitor";
 import { scanRailwaySources } from "./updates/railway-source-monitor";
 import { GitHubAccessError } from "./updates/github";
 import { railpackImageIdentity } from "./updates/railpack-image-report";
+import { minimalStaticWitnessId } from "./updates/minimal-static-migration";
 import { railpackScanDue, readRailpackScan, refreshRailpackImage } from "./updates/railpack-image-control";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
@@ -26,7 +27,7 @@ export async function automaticControlsNeeded(provider: UpdateTarget["provider"]
     for (const target of (await updateTargets(project.id)).filter(target => target.provider === provider)) {
       if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force, forceRevision)) return true;
       const image = railpackImageIdentity(target, detail.railway);
-      if (image && railpackScanDue(image, await readRailpackScan(target.id), Date.now(), force, forceRevision)) return true;
+      if (image && (image.caddy !== "minimal-static" || minimalStaticWitnessId(target)) && railpackScanDue(image, await readRailpackScan(target.id), Date.now(), force, forceRevision)) return true;
     }
   }
   return false;
@@ -67,7 +68,7 @@ export async function reconcileAutomaticControls(options: { force?: boolean; for
         if (!release) { result.deferred++; continue; }
         try {
           const railpack = dependencies.scanRailpack && railpackImageIdentity(target, detail.railway);
-          if (railpack) {
+          if (railpack && (railpack.caddy !== "minimal-static" || minimalStaticWitnessId(target))) {
             const image = await dependencies.scanRailpack!(target, railpack, options.force, attemptRevision).catch(() => "failed" as const);
             if (image) result[image]++;
           }

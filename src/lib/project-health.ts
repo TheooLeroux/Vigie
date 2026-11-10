@@ -10,7 +10,7 @@ import { currentAssessmentResults } from "./updates/assessment";
 import { activeRailpackImageReport } from "./updates/railpack-image-report";
 
 export type ProjectHealth = {
-  securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding; railpackImage?: boolean }[];
+  securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding; railpackImage?: boolean; minimalStaticImage?: boolean }[];
   securityOtherAlerts: string[];
   security: string[];
   updates: string[];
@@ -189,12 +189,13 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
   if (state?.automaticControls && state.targets.some(target => !automaticIds.has(target.id))) incomplete = true;
   const railpackImages = (state?.targets || []).flatMap(target => {
     const image = activeRailpackImageReport(target, detail, state);
-    return image ? [{ target, automatic: true, railpackImage: true, result: { targetId: target.id, name: target.name, checks: [image.check], stage: "completed" as const, message: image.check.message, warnings: [] } }] : [];
+    return image ? [{ target, automatic: true, railpackImage: image.caddy !== "minimal-static", minimalStaticImage: image.caddy === "minimal-static", result: { targetId: target.id, name: target.name, checks: [image.check], stage: "completed" as const, message: image.check.message, warnings: [] } }] : [];
   });
   const reports = [...automatic, ...railpackImages, ...observations.filter(item => !automaticIds.has(item.target.id)).map(item => ({ ...item, automatic: false })), ...history.flatMap(run => run.results.filter(result => !automaticIds.has(result.targetId)).map(result => ({ target: run.targets.find(target => target.id === result.targetId), result, automatic: false })))];
   for (const entry of reports) {
     const { target, result, automatic } = entry;
     const railpackImage = "railpackImage" in entry && entry.railpackImage;
+    const minimalStaticImage = "minimalStaticImage" in entry && entry.minimalStaticImage;
     if (!target) continue;
     let checks: UpdateCheck[] = [];
     if (automatic) checks = result.checks || [];
@@ -227,9 +228,9 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       scanned.add(scanKey);
       securityKnown = true;
       for (const raw of check.findings) {
-        const finding: SecurityFinding = railpackImage ? { ...raw, usage: "runtime" } : raw;
+        const finding: SecurityFinding = railpackImage || minimalStaticImage ? { ...raw, usage: "runtime" } : raw;
         if (finding.scope !== undefined && finding.scope !== target.root) continue;
-        securityEvidence.push({ targetId: target.id, name: result.name, tool: check.tool, checkedAt: check.checkedAt, finding, ...(railpackImage ? { railpackImage: true } : {}) });
+        securityEvidence.push({ targetId: target.id, name: result.name, tool: check.tool, checkedAt: check.checkedAt, finding, ...(railpackImage ? { railpackImage: true } : {}), ...(minimalStaticImage ? { minimalStaticImage: true } : {}) });
         const id = [...finding.aliases, finding.id].sort()[0];
         const severity = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
         const inventory = detail.hosting?.find(site => site.id === target.remoteId && site.connectionId === target.connectionId)?.inventory;
@@ -237,7 +238,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         const description = finding.explanation || (finding.kind === "supply-chain" || finding.id.startsWith("WPV-SUPPLY-") ? "Signal de distribution suspect à vérifier ; aucune compromission du site confirmée." : `Vulnérabilité connue (sévérité ${severity}).`);
         security.set(`${target.id}:${finding.package}:${finding.version}:${id}`, `${target.mode === "wordpress" ? "" : result.name + " · "}${component} ${finding.version} : ${id}. ${description}`);
         securityFromScan = true;
-        if (finding.fixedVersions?.length && !railpackImage) {
+        if (finding.fixedVersions?.length && !railpackImage && !minimalStaticImage) {
           const key = `${target.id}:${finding.package}:${finding.version}`;
           const privatePlugin = target.mode === "wordpress" && result.warnings.some(warning => warning.startsWith(finding.package.replace(/^plugins\//, "") + " :") && warning.includes("catalogue privé, non identifié ou fermé"));
           const observation = state?.currentSecurity?.find(item => item.targetId === target.id && inventory && item.versions === wordpressSecurityVersions(inventory));

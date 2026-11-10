@@ -36,7 +36,7 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
           {item.explanation && item.explanation !== reason?.detail && <p>{item.explanation}</p>}
           <p><strong>Correction :</strong> {item.fixedVersions?.length ? <>version(s) correctrice(s) indiquée(s) dans le rapport : {item.fixedVersions.join(", ")}.</> : "aucune version correctrice indiquée dans ce rapport."}</p>
           <small>{usageLabels[item.usage]} · Signalement relevé le {date(item.checkedAt)}</small>
-          {!!item.scanners?.length && <small>{item.scanners.map(scan => `${scan.tool}${scan.tool === "Trivy" && item.railpackImage ? " · image Railpack" : ""} · ${date(scan.checkedAt)}`).join(" / ")}</small>}
+          {!!item.scanners?.length && <small>{item.scanners.map(scan => `${scan.tool}${scan.tool === "Trivy" ? item.railpackImage ? " · image Railpack" : item.minimalStaticImage ? " · image statique" : "" : ""} · ${date(scan.checkedAt)}`).join(" / ")}</small>}
           <small>Références : {item.aliases.join(" · ") || item.id}</small>
           {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
         </div>
@@ -110,7 +110,7 @@ export function ProjectSecurityPanel({ detail, updates, health, unavailable = fa
         {service.action && <p><strong>À faire :</strong> {service.action}</p>}
         {service.repository && <small>Source : {service.repository}{service.commit ? ` · commit ${service.commit.slice(0, 12)}` : ""}</small>}
         {service.checkedAt && <small>Dernier rapport enregistré : {date(service.checkedAt)}. {!["covered", "partial"].includes(service.status) ? "Ce rapport ne valide pas l’état actuel." : ""}</small>}
-        {service.railpackImageCheckedAt && <small>Trivy · Paquets de l’image Railpack contrôlés le {date(service.railpackImageCheckedAt)}.</small>}
+        {service.railpackImageCheckedAt && <small>Trivy · {service.minimalStaticImage ? "Image statique déployée" : "Paquets de l’image Railpack"} contrôlés le {date(service.railpackImageCheckedAt)}.</small>}
       </section>)}</div>
       <p>Le périmètre couvert concerne les composants identifiés ci-dessus. Le code métier, les secrets, la configuration et les couches d’hébergement non inventoriées demandent des contrôles complémentaires.</p>
       <p>Le compteur compte chaque vulnérabilité une seule fois par projet, même si plusieurs blocs sont concernés. Ses références CVE et GHSA sont regroupées. Une dépendance vulnérable ne prouve pas que le site a été compromis.</p>
