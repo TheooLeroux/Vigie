@@ -14,7 +14,7 @@ import { caddyCatalog } from "../connectors/software-releases";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { changedSources, latestNode, nodeValidationRuntime, snapshotSources, type NodeUpdateChecks } from "./node";
 import { NodePreparationError, prepareNodeServices } from "./node-services";
-import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, readRailwayInstance, waitForDeployment } from "./providers";
+import { checkPublicSite, deployRailwayArchive, deployVercelArchive, providerPreflight, readRailwayInstance, vercelUpdateRequest, waitForDeployment } from "./providers";
 import { activeNodeImage, confirmDeployedNode, preflightNodeRuntime, verifyNodeServices } from "./node-deployment";
 import { runCommand } from "./process";
 import { nodeRunsWithReceipts, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
@@ -109,8 +109,8 @@ export async function checkNodeEndpoint(target: UpdateTarget, check = checkPubli
 }
 export function nodeCompletionMessage(target: UpdateTarget, result: UpdateResult, unchanged = false) {
   if (remainingNpmFindings(result).length) return unchanged
-    ? "Déploiement actuel vérifié. Des failles npm déjà présentes restent à corriger."
-    : "Mise à jour déployée et vérifiée. Des failles npm déjà présentes restent à corriger.";
+    ? "Déploiement actuel vérifié. Des failles npm restent à corriger."
+    : "Mise à jour déployée et vérifiée. Des failles npm restent à corriger.";
   if (workerTarget(target)) return `${unchanged ? "Dépendances à jour et" : "Nouveau"} déploiement du traitement Node vérifié ; les résultats métier restent à contrôler.`;
   if (result.managedNode?.updatePending) return unchanged ? "Dépendances validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur." : "Dépendances déployées et validées avec le runtime Vercel mesuré ; correctif Node en attente chez l’hébergeur.";
   if (target.capability?.adapter === "node-static") return "Construction Node et publication du site statique vérifiées ; contrôle HTTPS réussi, sans runtime Node serveur revendiqué.";
@@ -338,10 +338,21 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const baselineScan = await nodeScan(names);
     const baseline = baselineScan.findings;
     const scopedBaseline = await Promise.all(targets.map(async (target, index) => {
-      if (target.provider !== "railway" || target.mode !== "git" || !expected || !results[index].previousDeploymentId || !baseline.some(finding => finding.scope === target.root)) return false;
+      const deploymentId = results[index].previousDeploymentId;
+      if (target.mode !== "git" || !expected || !deploymentId || !baseline.some(finding => finding.scope === target.root)) return false;
       try {
+        if (target.provider === "vercel") {
+          const deployment = await vercelUpdateRequest(target, `/v13/deployments/${deploymentId}`);
+          return deployment.id === deploymentId && deployment.projectId === target.remoteId && deployment.target === "production" &&
+            deployment.readyState === "READY" && deployment.meta?.githubCommitSha === expected;
+        }
+        if (target.provider !== "railway") return false;
+        if (minimalStaticTargets.has(target.id)) {
+          await activeMinimalStaticImage(target, deploymentId, expected);
+          return true;
+        }
         const instance = (await readRailwayInstance(target)).serviceInstance;
-        activeNodeImage(target, { deploymentId: results[index].previousDeploymentId!, commit: expected }, version, instance.activeDeployments || []);
+        activeNodeImage(target, { deploymentId, commit: expected }, version, instance.activeDeployments || []);
         return true;
       } catch { return false; }
     }));
@@ -438,7 +449,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       baseline,
       railpackCaddyPins,
       minimalStaticRoots,
-      retain: findings => npmPolicy.retain(workingFolder, findings),
+      retain: (findings, scanned) => npmPolicy.retain(workingFolder, findings, scanned),
       alpineRepaired: (root, repair) => { alpineRepairs.set(root ? `${root}/Dockerfile` : "Dockerfile", repair); },
       resolved: async resolvedNames => {
         await recordOsv("candidate", "Dépendances verrouillées", await scanSources(resolvedNames), selectedRoots, workingFolder);
@@ -931,7 +942,7 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
       const imageFindings = run.results.reduce((count, result) => count + (result.imageUpdate?.remainingFindings || 0), 0);
       if (imageFindings) run.message += ` ${imageFindings} signalement(s) non classé(s) déjà présents dans les images restent à qualifier ; ils restent visibles dans le compteur de sécurité.`;
-      if (run.results.some(result => remainingNpmFindings(result).length)) run.message += " Des failles npm déjà présentes restent à corriger. Le motif est indiqué pour chaque service concerné.";
+      if (run.results.some(result => remainingNpmFindings(result).length)) run.message += " Des failles npm restent à corriger. Le motif est indiqué pour chaque service concerné.";
       if (run.excludedTargets?.length) run.message += ` ${run.excludedTargets.length} service(s) non sélectionné(s) restent à traiter séparément ; seuls les services sélectionnés sont couverts par ce résultat.`;
       await log("live", "updates.completed", run.message, run.projectId);
     });

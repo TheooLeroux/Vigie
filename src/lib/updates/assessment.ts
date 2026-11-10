@@ -8,7 +8,7 @@ export function finishAssessment(result: UpdateResult, changes: string[], limita
   result.assessment = { changes: [...new Set(changes)], ...(limitation ? { limitation } : {}) };
   result.stage = "completed";
   result.message = changes.length ? "Une proposition stable a passé les contrôles avant installation." : "Aucune meilleure combinaison stable retenue par le parcours de maintenance.";
-  if (remainingNpmFindings(result).length) result.message += " Des failles npm déjà présentes restent à corriger.";
+  if (remainingNpmFindings(result).length) result.message += " Des failles npm restent à corriger. Le détail des alertes et du gain est disponible dans les contrôles.";
 }
 
 export function currentAssessmentEvidence(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {

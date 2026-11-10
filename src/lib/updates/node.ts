@@ -117,7 +117,7 @@ export type NodeUpdateChecks = {
   railpackCaddyPins?: ReadonlySet<string>;
   minimalStaticRoots?: ReadonlySet<string>;
   resolved: (names: string[]) => Promise<void>;
-  retain?: (findings: SecurityFinding[]) => Promise<boolean>;
+  retain?: (findings: SecurityFinding[], scanned: SecurityFinding[]) => Promise<boolean>;
   alpineRepaired?: (root: string, repair: AlpineRepair) => void;
   image: (root: string, image: string, bases: DockerNodeBase[] | null) => Promise<void>;
   validated: (root: string, scripts: string[]) => Promise<void>;
@@ -412,7 +412,7 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       try {
         decision = await remediation.repair(folder, roots, scanNames, blockers, nodeVersion, originalVersions, remediation.tried, proposalContext);
       } catch (failure) {
-        if (!(failure instanceof RemediationUnavailableError) || !failure.remaining.length || !await security?.retain?.(failure.remaining)) throw failure;
+        if (!(failure instanceof RemediationUnavailableError) || !failure.remaining.length || !await security?.retain?.(failure.remaining, error.check.findings)) throw failure;
         warnings.push(failure.message);
         continue;
       }

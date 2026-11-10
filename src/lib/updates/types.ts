@@ -46,6 +46,7 @@ export type UpdateCheck = {
   caddyEvidence?: { version: string; deploymentId: string; imageDigest: string; instances: string[]; packagesHash: string; binaryHash: string };
   blockers?: SecurityFinding[];
   npmRetained?: SecurityFinding[];
+  npmTradeoff?: { introduced: SecurityFinding[]; removed: number };
   caddyRetained?: SecurityFinding[];
   debianUpgrades?: { package: string; from: string; to: string }[];
   wordpressRetained?: { package: string; version: string }[];
@@ -71,7 +72,8 @@ export type UpdateResult = {
 };
 
 export function remainingNpmFindings(result: UpdateResult) {
-  return result.checks?.findLast(check => check.tool === "OSV" && check.phase !== "before")?.npmRetained || [];
+  const check = result.checks?.findLast(check => check.tool === "OSV" && check.phase !== "before");
+  return [...check?.npmRetained || [], ...check?.npmTradeoff?.introduced || []];
 }
 export type UpdateRun = {
   purpose?: "assessment";

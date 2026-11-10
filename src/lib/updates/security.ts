@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import type { SecurityFinding, UpdateCheck, UpdateResult } from "./types";
 import { wordpressBlockingMessage } from "./wordpress-blocking";
 import { verifiedImageResiduals } from "./image-policy";
+import { npmRiskReduction } from "./npm-risk";
 
 const identifier = z.string().min(1).max(200).regex(/^[a-z0-9@/_.:+~-]+$/i);
 const findingSchema = z.object({ id: identifier, aliases: z.array(identifier).max(100).default([]), package: identifier, version: z.string().max(200), severity: z.enum(["critical", "high", "moderate", "low", "unknown"]), scope: z.string().max(4000).optional(), fixedVersions: z.array(z.string().min(1).max(200)).max(200).optional() });
@@ -105,6 +106,10 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
       const baseline = result.checks?.findLast(item => item.tool === "OSV" && item.phase === "before")?.findings || [];
       const caddyBaseline = result.checks?.findLast(item => item.tool === "Trivy" && item.phase === "before")?.findings || [];
       const caddyProof = result.checks?.findLast(item => item.tool === "Caddy" && item.phase === "before" && item.status === "passed")?.caddyEvidence;
+      const tradeoff = check.tool === "OSV" && check.status === "warning" ? check.npmTradeoff : undefined;
+      const approvedTradeoff = tradeoff && tradeoff.introduced.every(item => check.findings.some(finding =>
+        finding.usage === "build" && sameScopedFinding(item, finding))) &&
+        npmRiskReduction(baseline, check.findings, tradeoff.introduced) === tradeoff.removed;
       const findings = check.findings.filter(finding => {
         if (check.phase === "before") return true;
         if (check.tool === "WPVulnerability") return !check.wordpressRetained?.some(item => item.package === finding.package && item.version === finding.version);
@@ -113,6 +118,7 @@ export function requireZeroFinalFindings(results: UpdateResult[]) {
             !check.caddyRetained.some(item => item.explanation && item.version === finding.version && sameCaddyAdvisory(item, finding));
         }
         if (check.tool !== "OSV" || check.status !== "warning") return true;
+        if (approvedTradeoff && finding.usage === "build" && tradeoff.introduced.some(item => item.explanation && sameScopedFinding(item, finding))) return false;
         return !baseline.some(item => sameScopedFinding(item, finding)) || !check.npmRetained?.some(item => item.explanation && sameScopedFinding(item, finding));
       });
       if (!findings.length && check.status !== "blocked") continue;

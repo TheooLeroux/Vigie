@@ -71,6 +71,51 @@ test("npm : une alerte préexistante expliquée reste visible, sans accepter une
     assert.equal((await check([old])).status, "blocked");
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+test("npm : 45 alertes remplacées par une alerte modérée de développement, avec preuve sur le verrou final", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "vigie-npm-gain-"));
+  try {
+    const lock = join(folder, "package-lock.json");
+    const baseline = Array.from({ length: 45 }, (_, i) => ({ ...finding("moderate", "GHSA-old-" + i), aliases: [], scope: "" }));
+    const added: SecurityFinding = { ...finding("moderate", "GHSA-new"), aliases: [], scope: "", package: "minimatch", version: "10.2.6" };
+    const parent = { version: "10.14.0", dev: true, dependencies: { minimatch: "^10.2.6" } };
+    const packages = { "": { devDependencies: { eslint: "10.14.0" } }, "node_modules/eslint": parent, "node_modules/minimatch": { version: "10.2.6", dev: true } };
+    const save = (entries: object) => writeFile(lock, JSON.stringify({ lockfileVersion: 3, packages: entries }));
+    await save({ "": { dependencies: { library: "1.0.0" } }, "node_modules/library": { version: "1.0.0" } });
+    const policy = await npmResidualPolicy(folder, ["package-lock.json"], baseline);
+    await save(packages);
+    const unavailable = (item: SecurityFinding) => ({ ...item, explanation: "Les versions du parent testées exigent minimatch 10." });
+    assert.equal((await policy.check(folder, "racine", [added])).status, "blocked");
+    assert.equal(await policy.retain(folder, [unavailable(added)], [added]), true);
+    const final = await policy.check(folder, "racine", [added]);
+    assert.equal(final.status, "warning");
+    assert.equal(final.npmTradeoff?.removed, 45);
+    assert.equal(final.npmTradeoff?.introduced[0].usage, "build");
+    const result = { targetId: "fixture", name: "App", stage: "completed" as const, message: "done", warnings: [], checks: [securityCheck("OSV", "before", "racine", baseline), final] };
+    assert.doesNotThrow(() => requireZeroFinalFindings([result]));
+    assert.throws(() => requireZeroFinalFindings([{ ...result, checks: [result.checks[0], { ...final, npmTradeoff: { ...final.npmTradeoff!, removed: 46 } }] }]), /non résolue/);
+    assert.equal((await policy.check(folder, "racine", [added, ...baseline.slice(1)])).status, "blocked");
+    assert.equal((await policy.check(folder, "racine", [{ ...added, aliases: ["MAL-2026-1"] }])).status, "blocked");
+
+    await save({ ...packages, "": { dependencies: { eslint: "10.14.0" } } });
+    assert.equal((await policy.check(folder, "racine", [added])).status, "blocked");
+    assert.equal(await policy.retain(folder, [unavailable(added)], [added]), false);
+    await save(packages);
+    for (const blocker of [
+      { ...added, severity: "high" as const },
+      { ...added, severity: "unknown" as const },
+      { ...added, id: "MAL-2026-1" },
+      { ...added, scope: "autre" },
+    ]) {
+      assert.equal(await policy.retain(folder, [unavailable(blocker)], [blocker]), false);
+      assert.equal((await policy.check(folder, "racine", [blocker])).status, "blocked");
+    }
+
+    const lowOnly = await npmResidualPolicy(folder, ["package-lock.json"], baseline.map(item => ({ ...item, severity: "low" })));
+    assert.equal(await lowOnly.retain(folder, [unavailable(added)], [added]), false);
+    const unverified = await npmResidualPolicy(folder, ["package-lock.json"], []);
+    assert.equal(await unverified.retain(folder, [unavailable(added)], [added]), false);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
 test("Sécurité : distinction des alertes préexistantes, nouvelles, aggravées, inconnues et malveillantes", () => {
   const old = finding();
   assert.equal(securityCheck("OSV", "before", "lock", [old]).status, "warning");
