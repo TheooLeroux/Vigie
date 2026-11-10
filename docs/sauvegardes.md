@@ -27,6 +27,6 @@ Le worker relit le ZIP dans R2 et vérifie son empreinte avant de le publier. L�
 
 ## NES App sur Railway
 
-Le workflow dédié archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il s’arrête si le périmètre change, si un volume apparaît ou si un déploiement change pendant la collecte. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
+Le workflow dédié passe le lundi à 03 h 13, heure de Paris. Il archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il vérifie que le backend utilise la base sauvegardée. Un changement de périmètre, l’apparition d’un volume ou un déploiement qui change pendant la collecte bloque la publication. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
 
 Le dump PostgreSQL de Supabase contient les schémas `public`, `auth`, `storage` et `supabase_migrations`, avec les données. Il est lu intégralement pour vérification sans connexion à une cible. Les objets binaires Supabase Storage et les buckets R2 de NES App sont distincts de ce dump. Les variables secrètes Railway restent dans Railway.
