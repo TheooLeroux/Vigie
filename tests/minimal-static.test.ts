@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { minimalStaticWitnessId } from "../src/lib/updates/minimal-static-migration";
-import { minimalStaticBuildNode, minimalStaticDockerfile, minimalStaticRecipe } from "../src/lib/updates/minimal-static";
+import { minimalStaticBuildNode, minimalStaticCaddyCandidate, minimalStaticDockerfile, minimalStaticPins, minimalStaticRecipe } from "../src/lib/updates/minimal-static";
 import type { UpdateTarget } from "../src/lib/updates/types";
 
 test("Migration statique : autorisation limitée au projet, au service et à son environnement Railway", () => {
@@ -22,4 +22,19 @@ test("Recette minimale : une autre version Node épinglée est admise, toute aut
   const updated = minimalStaticRecipe("26.14.0", "sha256:" + "c".repeat(64));
   assert.equal(minimalStaticBuildNode(updated), "26.14.0");
   assert.equal(minimalStaticBuildNode(updated + "COPY secret /secret\n"), undefined);
+});
+
+test("Caddy minimal : archive officielle épinglée, aucun recul ni changement silencieux du binaire", () => {
+  const digest = "sha256:" + "a".repeat(64);
+  const candidate = minimalStaticCaddyCandidate(minimalStaticDockerfile, { version: "2.11.9", linuxAmd64Digest: digest });
+  assert.ok(candidate);
+  const pins = minimalStaticPins(candidate.recipe)!;
+  assert.deepEqual(pins.caddy, { version: "2.11.9", digest });
+  assert.equal(pins.node, "26.13.0");
+  assert.equal(minimalStaticCaddyCandidate(candidate.recipe, { version: "2.11.9", linuxAmd64Digest: "sha256:" + "b".repeat(64) }), undefined);
+  assert.equal(minimalStaticCaddyCandidate(candidate.recipe, { version: "2.11.8", linuxAmd64Digest: digest }), undefined);
+  assert.equal(minimalStaticCaddyCandidate(candidate.recipe, { version: "2.12.0-beta.1", linuxAmd64Digest: digest }), undefined);
+  assert.equal(minimalStaticCaddyCandidate(candidate.recipe, { version: "2.12.0" }), undefined);
+  assert.equal(minimalStaticPins(candidate.recipe.replace("github.com/caddyserver", "example.org/caddyserver")), undefined);
+  assert.deepEqual(minimalStaticPins(minimalStaticRecipe("26.14.0", pins.digest, pins.caddy))?.caddy, pins.caddy);
 });

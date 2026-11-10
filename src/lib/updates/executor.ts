@@ -47,7 +47,7 @@ import { planDebianFixes, verifyDebianFixes } from "./railpack-debian";
 import { cachedRailpackInventory } from "./railpack-image-control";
 import { scanRailpackImage } from "./railpack-image-scan";
 import { activeMinimalStaticImage, minimalStaticWitnessId, migrateMinimalStatic } from "./minimal-static-migration";
-import { checkPublicMinimalStatic, minimalStaticBuildNode, minimalStaticRecipe, scanMinimalStaticImage } from "./minimal-static";
+import { checkPublicMinimalStatic, minimalStaticBuildNode, minimalStaticPins, minimalStaticRecipe, scanMinimalStaticImage } from "./minimal-static";
 import { officialNodeImageDigest } from "./node-catalog-state";
 import { saveMinimalStaticScan } from "./railpack-image-control";
 import { deploymentEvidence } from "../connectors/railway-evidence";
@@ -544,8 +544,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const staticRecipes = new Map<string, string>();
     for (const root of minimalStaticRoots) {
       const path = root + "/Dockerfile";
-      if (minimalStaticBuildNode(await readFile(join(sourceFolder, path), "utf8")) === version) continue;
-      const recipe = minimalStaticRecipe(version, await officialNodeImageDigest(`node:${version}-bookworm-slim`));
+      const pins = minimalStaticPins(await readFile(join(sourceFolder, path), "utf8"));
+      if (!pins) throw new ApiError("Recette minimale inconnue après les tests.", 422);
+      if (pins.node === version) continue;
+      const recipe = minimalStaticRecipe(version, await officialNodeImageDigest(`node:${version}-bookworm-slim`), pins.caddy);
       await writeFile(join(sourceFolder, path), recipe);
       prepared.allowed.add(path);
       staticRecipes.set(path, recipe);

@@ -18,7 +18,7 @@ type NodeCatalog = {
   schedule: Record<string, { start: string; end: string; lts?: string }>;
   checkedAt: string;
 };
-type CaddyCatalog = { version: string; checkedAt: string };
+type CaddyCatalog = { version: string; checkedAt: string; linuxAmd64Digest?: string };
 const unknown: SoftwareRelease = {
   state: "unknown",
   latestVersion: null,
@@ -153,7 +153,7 @@ async function nodeCatalog(
 export async function caddyCatalog(
   transport: typeof fetch = fetch,
 ): Promise<CaddyCatalog | null> {
-  return cached("caddy:official", async () => {
+  return cached("caddy:official:assets", async () => {
     const raw = await json(CADDY_RELEASE, 1_000_000, transport),
       v = version(raw?.tag_name);
     if (
@@ -165,7 +165,12 @@ export async function caddyCatalog(
       Date.parse(raw.published_at) > Date.now()
     )
       throw new Error("Publication Caddy invalide");
-    return { version: v, checkedAt: new Date().toISOString() };
+    const name = `caddy_${v}_linux_amd64.tar.gz`;
+    const assets = Array.isArray(raw.assets) ? raw.assets.filter((asset: { name?: string }) => asset?.name === name) : [];
+    const asset = assets.length === 1 ? assets[0] : null;
+    const linuxAmd64Digest = asset?.browser_download_url === `https://github.com/caddyserver/caddy/releases/download/v${v}/${name}` &&
+      typeof asset.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(asset.digest) ? asset.digest : undefined;
+    return { version: v, checkedAt: new Date().toISOString(), linuxAmd64Digest };
   });
 }
 export function nodeRelease(

@@ -15,6 +15,10 @@ on:
       backend:
         required: true
         type: string
+      caddy:
+        description: Qualifier la dernière version stable de Caddy sans publication
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -44,6 +48,8 @@ jobs:
           VIGIE_STATIC_COMMIT: ${{ inputs.commit }}
           VIGIE_STATIC_FRONTEND: ${{ inputs.frontend }}
           VIGIE_STATIC_BACKEND: ${{ inputs.backend }}
+          VIGIE_STATIC_CADDY: ${{ inputs.caddy }}
+          VIGIE_MINIMAL_STATIC_SERVICES: ${{ vars.VIGIE_MINIMAL_STATIC_SERVICES }}
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
           VIGIE_UPDATES_GITHUB_TOKENS: ${{ secrets.VIGIE_MAINTENANCE_GITHUB_TOKENS }}

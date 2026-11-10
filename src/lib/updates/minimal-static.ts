@@ -3,6 +3,7 @@ import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { gt, gte, valid } from "semver";
 import { ApiError } from "../http";
 import { deploymentEvidence } from "../connectors/railway-evidence";
 import { normalizeImageDigest } from "../image-reference";
@@ -40,13 +41,34 @@ ENV HOME=/tmp PORT=8080
 ENTRYPOINT ["/caddy","run","--config","/Caddyfile","--adapter","caddyfile"]
 `;
 const nodeStage = /^FROM node:(\d+\.\d+\.\d+)-bookworm-slim@(sha256:[0-9a-f]{64}) AS frontend$/m;
-export function minimalStaticRecipe(node: string, digest: string) {
-  return minimalStaticDockerfile.replace(nodeStage, `FROM node:${node}-bookworm-slim@${digest} AS frontend`);
+const caddyAssetLine = /^ADD --checksum=(sha256:[0-9a-f]{64}) https:\/\/github\.com\/caddyserver\/caddy\/releases\/download\/v(\d+\.\d+\.\d+)\/caddy_\2_linux_amd64\.tar\.gz \/caddy\.tgz$/m;
+type CaddyAsset = { version: string; digest: string };
+
+export function minimalStaticRecipe(node: string, digest: string, caddy?: CaddyAsset) {
+  const recipe = minimalStaticDockerfile.replace(nodeStage, `FROM node:${node}-bookworm-slim@${digest} AS frontend`);
+  if (!caddy) return recipe;
+  return recipe.replace(/^ADD --checksum=[\s\S]*?(?=^FROM node:)/m,
+    `ADD --checksum=${caddy.digest} https://github.com/caddyserver/caddy/releases/download/v${caddy.version}/caddy_${caddy.version}_linux_amd64.tar.gz /caddy.tgz\nRUN tar -xzf /caddy.tgz -C / caddy && chmod 0755 /caddy\n`);
+}
+
+export function minimalStaticPins(source: string) {
+  const node = source.match(nodeStage), asset = source.match(caddyAssetLine);
+  const caddy = asset ? { version: asset[2], digest: asset[1] } : undefined;
+  if (node && source === minimalStaticRecipe(node[1], node[2], caddy)) return { node: node[1], digest: node[2], caddy };
 }
 
 export function minimalStaticBuildNode(source: string) {
-  const pin = source.match(nodeStage);
-  return pin && source === minimalStaticRecipe(pin[1], pin[2]) ? pin[1] : undefined;
+  return minimalStaticPins(source)?.node;
+}
+
+export function minimalStaticCaddyCandidate(source: string, release: { version: string; linuxAmd64Digest?: string } | null) {
+  const pins = minimalStaticPins(source);
+  if (!pins || !release || !/^\d+\.\d+\.\d+$/.test(release.version) || !valid(release.version) ||
+    !release.linuxAmd64Digest || !/^sha256:[a-f0-9]{64}$/.test(release.linuxAmd64Digest)) return;
+  // The original build came from Caddy development. Never test a release older than the stable version at migration.
+  const newer = pins.caddy ? gt(release.version, pins.caddy.version) : gte(release.version, "2.11.9");
+  if (!newer || release.version.split(".")[0] !== "2") return;
+  return { version: release.version, recipe: minimalStaticRecipe(pins.node, pins.digest, { version: release.version, digest: release.linuxAmd64Digest }) };
 }
 
 const bundleDockerfile = `FROM scratch
@@ -70,6 +92,12 @@ function assertMinimalListing(listing: string) {
   }
 }
 
+export class MinimalStaticCandidateVulnerable extends ApiError {
+  constructor(readonly findings: SecurityFinding[]) {
+    super(`L’image minimale contient encore ${findings.length} signalement(s) Go. Candidate refusée.`, 422);
+  }
+}
+
 async function scanBinary(directory: string, cache: string, requireClean = true) {
   const report = join(directory, "trivy.json");
   await runCommand("trivy", ["rootfs", "--scanners", "vuln", "--pkg-types", "library", "--list-all-pkgs", "--cache-dir", cache, "--quiet", "--format", "json", "--output", report, directory], {
@@ -80,7 +108,7 @@ async function scanBinary(directory: string, cache: string, requireClean = true)
   const parsed = JSON.parse(raw);
   if (!parsed.Results?.some((result: { Type?: string; Packages?: unknown[] }) => result.Type === "gobinary" && result.Packages?.length)) throw new ApiError("Inventaire Go du binaire Caddy absent du scan.", 422);
   const findings = parseTrivy(raw, false, "gobinary");
-  if (requireClean && findings.length) throw new ApiError(`L’image minimale contient encore ${findings.length} signalement(s) Go. Candidate refusée.`, 422);
+  if (requireClean && findings.length) throw new MinimalStaticCandidateVulnerable(findings);
   return findings;
 }
 
@@ -160,7 +188,7 @@ export async function checkPublicMinimalStatic(target: UpdateTarget) {
   return z.object({ nonce: z.literal(nonce), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output));
 }
 
-export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log: (message: string) => void | Promise<void> = console.log) {
+export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log: (message: string) => void | Promise<void> = console.log, change?: { previousRecipe: string; recipe: string }) {
   sha.parse(commit);
   if (target.provider !== "railway" || target.mode !== "git" || !target.repository || !repositoryAllowed(target.repository) || !target.branch || !target.url ||
     !target.root || target.projectId !== witness.projectId || target.connectionId !== witness.connectionId || target.environmentId !== witness.environmentId ||
@@ -171,8 +199,8 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
   const current = original.serviceInstance.activeDeployments, backend = witnessService.serviceInstance.activeDeployments;
   const live = deploymentEvidence(current?.[0]?.meta);
   if (original.service.projectId !== witnessService.service.projectId || current?.length !== 1 || current[0].status !== "SUCCESS" ||
-    !railpackCaddyVersion(live) || live?.commit !== commit || live.branch !== target.branch || live.repository !== target.repository ||
-    backend?.length !== 1 || backend[0].status !== "SUCCESS") throw new ApiError("Le déploiement Railpack ou le témoin Railway a changé.", 409);
+    (change ? !!live?.railpackVersion : !railpackCaddyVersion(live)) || live?.commit !== commit || live.branch !== target.branch || live.repository !== target.repository ||
+    backend?.length !== 1 || backend[0].status !== "SUCCESS") throw new ApiError("Le déploiement actif ou le témoin Railway a changé.", 409);
   const projectId = uuid.parse(original.service.projectId);
   const environmentId = uuid.parse(target.environmentId);
   const token = githubUpdateToken(target.repository);
@@ -190,17 +218,39 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     const sources = join(dir, "sources"), context = join(dir, "build"), bundle = join(dir, "deploy");
     const names = await getSources(target.repository, commit, join(dir, "source.zip"), sources);
     const prefix = target.root + "/";
-    if (!["package.json", "package-lock.json", "Caddyfile"].every(file => names.includes(prefix + file)) || names.includes(prefix + "Dockerfile")) throw new ApiError("Sources statiques non qualifiées pour la migration minimale.", 422);
+    const path = prefix + "Dockerfile";
+    if (!["package.json", "package-lock.json", "Caddyfile"].every(file => names.includes(prefix + file)) || names.includes(path) !== !!change) throw new ApiError("Sources non qualifiées pour le parcours statique.", 422);
+    const pins = change && minimalStaticPins(change.recipe);
+    if (change && (!pins || await readFile(join(sources, path), "utf8") !== change.previousRecipe)) throw new ApiError("La recette statique attendue a changé.", 409);
     const manifest = JSON.parse(await readFile(join(sources, target.root, "package.json"), "utf8"));
-    if (manifest.engines?.node !== "26.13.0" || !manifest.devDependencies?.vite || !manifest.scripts?.test || !manifest.scripts?.build || manifest.workspaces) throw new ApiError("Le profil de construction du frontend ne correspond pas au parcours validé.", 422);
+    if (manifest.engines?.node !== (pins ? pins.node : "26.13.0") || !manifest.devDependencies?.vite || !manifest.scripts?.test || !manifest.scripts?.build || manifest.workspaces) throw new ApiError("Le profil de construction du frontend ne correspond pas au parcours validé.", 422);
     for (const file of names.filter(file => file.startsWith(prefix))) {
       const output = join(context, file.slice(prefix.length));
       await mkdir(dirname(output), { recursive: true });
       await cp(join(sources, file), output);
     }
-    await writeFile(join(context, "Dockerfile"), minimalStaticDockerfile);
+    await writeFile(join(context, "Dockerfile"), change?.recipe || minimalStaticDockerfile);
     const env = { NODE_ENV: "production" as const, PATH: process.env.PATH, HOME: dir, DOCKER_CONFIG: join(dir, ".docker"), ...buildVars };
     await mkdir(env.DOCKER_CONFIG);
+    const candidate = join(dir, "candidate"), cache = join(dir, "trivy-cache");
+    await mkdir(candidate);
+    if (change && pins && pins.caddy) {
+      await log(`Caddy ${pins.caddy.version} : contrôle Trivy du binaire officiel avant la construction du frontend.`);
+      const stage = image + "-caddy";
+      let stageContainer = "";
+      try {
+        await runCommand("docker", ["build", "--platform=linux/amd64", "--target", "caddy", "--tag", stage, context], { env, timeout: 240_000 });
+        const actual = await runCommand("docker", ["run", "--rm", "--network", "none", "--entrypoint", "/caddy", stage, "version"], { env, timeout: 20_000 });
+        if (actual.trim().split(/\s+/)[0] !== "v" + pins.caddy.version) throw new ApiError("La version du binaire Caddy ne correspond pas à la publication officielle.", 422);
+        stageContainer = (await runCommand("docker", ["create", stage], { env })).trim();
+        if (!/^[a-f0-9]{64}$/.test(stageContainer)) throw new ApiError("Conteneur Caddy candidat non identifiable.", 422);
+        await runCommand("docker", ["cp", `${stageContainer}:/caddy`, join(candidate, "caddy")], { env });
+        await scanBinary(candidate, cache);
+      } finally {
+        if (stageContainer) await runCommand("docker", ["rm", "--force", stageContainer], { env }).catch(() => {});
+        await runCommand("docker", ["image", "rm", "--force", stage], { env }).catch(() => {});
+      }
+    }
     await log("Construction isolée de la candidate et exécution des tests frontend.");
     await runCommand("docker", ["build", "--platform=linux/amd64", "--tag", image, ...Object.keys(buildVars).flatMap(key => ["--build-arg", key]), context], { env, timeout: 900_000 });
     container = (await runCommand("docker", ["create", image], { env })).trim();
@@ -209,10 +259,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     for (const file of ["caddy", "dist", "Caddyfile"]) await runCommand("docker", ["cp", `${container}:/${file}`, join(bundle, file)], { env });
     const binaryHash = await hashFile(join(bundle, "caddy"));
     await hashFile(join(bundle, "dist", "index.html"), "index.html");
-    const candidate = join(dir, "candidate");
-    await mkdir(candidate);
     await cp(join(bundle, "caddy"), join(candidate, "caddy"));
-    const cache = join(dir, "trivy-cache");
     await scanBinary(candidate, cache);
     await writeFile(join(bundle, "Dockerfile"), bundleDockerfile);
     const create = await railwayUpdateRequest(target, "mutation StaticPreview($input:ServiceCreateInput!){serviceCreate(input:$input){id name projectId}}", { input: { projectId, environmentId, name, variables: { PORT: "8080", ...(upstream ? { BACKEND_INTERNAL_URL: upstream } : {}) } } });
