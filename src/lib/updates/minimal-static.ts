@@ -52,9 +52,10 @@ const uuid = z.string().uuid();
 const available = new Set(["caddy", "Caddyfile", "dist", "dev", "etc", "proc", "sys", "tmp", ".dockerenv", ".railway"]);
 
 function assertMinimalListing(listing: string) {
-  const entries = listing.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith("sftp>")).map(line => line.replace(/^\/+|\/+$/g, ""));
+  const entries = listing.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^(?:sftp>|Connected to )/.test(line)).map(line => line.replace(/^\/+|\/+$/g, ""));
   if (!["caddy", "Caddyfile", "dist"].every(name => entries.includes(name)) || entries.some(name => !available.has(name) && name !== "." && name !== "..")) {
-    throw new ApiError("Le système de fichiers déployé ne correspond pas à l’image minimale attendue.", 422);
+    const names = entries.slice(0, 30).map(entry => /^[a-zA-Z0-9_.-]{1,64}$/.test(entry) ? entry : "[entrée non reconnue]");
+    throw new ApiError(`Le système de fichiers déployé ne correspond pas à l’image minimale attendue (${names.join(", ")}).`, 422);
   }
 }
 

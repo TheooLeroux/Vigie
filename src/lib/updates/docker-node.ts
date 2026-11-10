@@ -74,9 +74,9 @@ export async function readRailwayProbe<T extends object>(target: UpdateTarget, d
 export async function readRailwayStaticImage(target: UpdateTarget, deploymentId: string, inspect: (binary: string, listing: string) => Promise<void>) {
   return withRailwayInstances(target, deploymentId, 8, async (id, args, options) => {
     const binary = join(options.cwd, id + "-caddy");
-    const listing = await runCommand("sftp", ["-b", "-", ...args, `${id}@ssh.railway.com`], {
-      ...options, timeout: 60_000, input: `ls -1a /\nget /caddy ${id}-caddy\n`,
-    });
+    const sftp = (input: string) => runCommand("sftp", ["-b", "-", ...args, `${id}@ssh.railway.com`], { ...options, timeout: 60_000, input });
+    const listing = await sftp("@ls -1a /\n");
+    await sftp(`@get /caddy ${id}-caddy\n`);
     await inspect(binary, listing);
     return {};
   });
