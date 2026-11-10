@@ -29,7 +29,7 @@ permissions:
 jobs:
   agents:
     concurrency:
-      group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
+      group: ${{ inputs.installation_id && format('wordpress-agent-{0}', inputs.installation_id) || 'wordpress-agent-fleet' }}
       cancel-in-progress: false
     if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
