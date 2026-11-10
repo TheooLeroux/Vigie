@@ -5,7 +5,7 @@ import { currentAssessmentEvidence } from "./updates/assessment";
 import { remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 
-export type RemediationReason = { label: string; detail?: string };
+export type RemediationReason = { label: string; detail?: string; manual?: true };
 
 function blockedCandidateChecks(result: UpdateResult) {
   const checks = new Map(result.checks?.filter(check => check.phase === "candidate").map(check => [check.tool, check]));
@@ -58,7 +58,7 @@ export function projectRemediation(detail: ProjectDetail, state?: UpdateState | 
         controlSource(target, detail, now) && observation.versions === wordpressSecurityVersions(inventory);
       const manual = (fresh ? observation.manualUpdates : undefined)?.find(entry => entry.package === item.package && entry.version === item.version)
         || (result?.stage === "completed" ? result.manualUpdates : undefined)?.find(entry => entry.package === item.package && entry.version === item.version);
-      if (manual) return { label: "Intervention manuelle", detail: [manual.reason, manual.action].filter(Boolean).join(" ") };
+      if (manual) return { label: "Intervention manuelle", detail: [manual.reason, manual.action].filter(Boolean).join(" "), manual: true };
     }
 
     if (result?.stage === "completed" && result.assessment) {

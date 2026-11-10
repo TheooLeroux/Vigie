@@ -22,12 +22,17 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
           <span className="security-finding-content">
             <strong>
               {item.title || `${item.kind === "vulnerability" ? "Vulnérabilité signalée" : "Signalement à confirmer"} dans ${item.package}`}
-              {reason && <span className="security-finding-reason" title="Voir pourquoi la faille persiste">
+              {reason && !reason.manual && <span className="security-finding-reason" title="Voir pourquoi la faille persiste">
                 <CircleAlert size={13} aria-hidden="true" />
                 <span className="sr-only"> · Motif disponible</span>
               </span>}
             </strong>
-            <span>{item.package} <span className="security-version">{item.version}</span></span>
+            <span>
+              {item.package} <span className="security-version">{item.version}</span>
+              {reason?.manual && <span className="security-finding-reason">
+                <CircleAlert size={13} aria-hidden="true" /> {reason.label}
+              </span>}
+            </span>
           </span>
           <span className="security-finding-reference">{item.id}</span>
         </summary>

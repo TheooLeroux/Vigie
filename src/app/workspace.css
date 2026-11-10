@@ -157,7 +157,7 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .security-finding-content { display: grid; flex: 1; gap: 4px; min-width: 0; }
 .security-finding-content > strong { color: var(--ink); font-size: 12px; line-height: 1.5; }
 .security-finding-content > span, .security-finding-reference { color: var(--muted); font-size: 11px; }
-.security-finding-reason { display: inline-flex; vertical-align: -2px; margin-inline-start: 6px; color: var(--warning, var(--amber)); }
+.security-finding-reason { display: inline-flex; align-items: center; gap: 4px; vertical-align: -2px; margin-inline-start: 6px; color: var(--warning, var(--amber)); }
 .security-version { font-variant-numeric: tabular-nums; }
 .security-finding-reference { flex-shrink: 0; }
 .security-severity, .security-severities > .security-severity { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 68px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--text); font-size: 10px; font-weight: 600; }

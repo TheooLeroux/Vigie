@@ -82,12 +82,20 @@ test("WordPress : un ancien inventaire ne réannonce pas une extension déjà co
 test("WordPress : contrôle actuel remplace le faux positif historique, y compris sans exécution préalable", () => {
   const { detail, inventory, state } = wordpressFixture();
   state.targets = state.runs[0].targets;
+  state.targets[0].root = detail.hosting![0].documentRoot;
   state.runs[0].results[0].checks = [healthCheck({ tool: "WPVulnerability", phase: "after", findings: [{ ...healthCheck().findings[0], package: "plugins/private-pro", version: "3.0.103", scope: undefined }] })];
   state.currentSecurity = [{ targetId: "target", versions: wordpressSecurityVersions(inventory), warnings: [], check: healthCheck({ tool: "WPVulnerability", phase: "before", findings: [] }) }];
   assert.equal(projectHealth(detail, state).security.length, 0);
   state.runs = [];
   state.currentSecurity[0].check!.findings = [{ ...healthCheck().findings[0], package: "plugins/private-pro", version: "3.0.103", scope: undefined }];
   assert.equal(projectHealth(detail, state).security.length, 1, "la détection ne nécessite aucune mise à jour");
+  const observedAt = new Date().toISOString();
+  inventory.observedAt = observedAt;
+  state.currentSecurity[0].check!.checkedAt = observedAt;
+  state.currentSecurity[0].manualUpdates = [{ package: "plugins/private-pro", version: "3.0.103", reason: "Catalogue privé.", action: "Consulter l’éditeur." }];
+  const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const rowSummary = html.split('<details class="security-finding"><summary>')[1]?.split("</summary>")[0] || "";
+  assert.match(rowSummary, /Intervention manuelle/);
   inventory.plugins[0].version = "3.0.124";
   assert.equal(projectHealth(detail, state).security.length, 0, "un contrôle portant sur d’autres versions n’est pas réutilisé");
   assert.doesNotMatch(renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state })), /Aucune alerte connue/);
