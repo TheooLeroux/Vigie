@@ -20,7 +20,6 @@ import { runCommand } from "./process";
 import { nodeRunsWithReceipts, readUpdateRun, readUpdateSource, saveUpdateSnapshot, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { createUpdateProgressTracker } from "./progress";
 import { updateScope, updateTargets } from "./targets";
-import { withWordPressUpdater, wordpressBackupScript, wordpressUpdateScript } from "./wordpress";
 import { executeLocalWordPress } from "./wordpress-agent-execution";
 import { remainingNpmFindings, type UpdateRun, type UpdateTarget, type UpdateResult, type UpdateStage, type UpdateCheck, type SecurityFinding } from "./types";
 import { npmResidualPolicy } from "./node-security";
@@ -28,9 +27,6 @@ import { dockerRuntimeBase, validateDockerfileCandidate, validatedDockerfileChan
 import { caddyImageSecurity, requireSecurityPass, requireZeroFinalFindings, scanDockerImage, scanNodeSources, createNodeScanCache, securityCheck, SecurityPolicyError } from "./security";
 import { nodeCatalogState } from "./node-catalog-state";
 import { checkCurrentNodeConfiguration, nodeImageReceipt, nodePolicyHash, nodeReceiptDraft, nodeReceiptGroupCompleted, nodeReceiptValidations, nodeSecurityHash, nodeSourceHash, nodeTargetsHash, reusableNodeReceipt, sameNodeReceiptProof, unchangedNodeImages, unchangedNodeInputs } from "./node-current";
-import { checkWordPressRequirements, parseWordPressPlan, wordpressPlanScript } from "./wordpress-security";
-import { freeWordPressScanner } from "./wordpress-free-security";
-import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { nodeValidationPlan, managedNodeMessage } from "./managed-node";
 import { refreshProjectHosting } from "./refresh-hosting";
@@ -39,7 +35,7 @@ import { executionGroup, sourceFamily, workerTarget } from "./capabilities";
 import { assertSourceImpact } from "./source-impact";
 import { executeRailwayImage } from "./railway-image";
 import { recordCompletedImageControls } from "./image-control";
-import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges, wordpressAssessmentChanges } from "./assessment";
+import { assessmentResultIsSafe, finishAssessment, nodeAssessmentChanges } from "./assessment";
 import { recordAssessmentAfterUpdate } from "./assessment-after-update";
 import { imageSecurityCheck } from "./image-policy";
 import { caddyConfig, caddyPinVersion, caddyVersionChange, railpackCaddyVersion, validateRailpackCaddy, validatedRailpackChange, verifyRailwayCaddy, type CaddyChange, type CaddyFingerprint } from "./railpack-caddy";
@@ -759,52 +755,7 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
   if (!fresh || fresh.source !== "wordpress-observer" || fresh.collectionMode === "early" || !fresh.php || fresh.error || !fresh.observedAt || Date.now() - Date.parse(fresh.observedAt) > 5 * 60_000) throw new ApiError("Un relevé WordPress récent avec la version PHP web est nécessaire avant la mise à jour.");
   if (fresh.site?.multisite || fresh.configuration?.fileModsDisabled) throw new ApiError("La configuration WordPress actuelle ne permet pas cette mise à jour automatique.");
   if (fresh.plugins.some(plugin => plugin.mustUse)) result.warnings.push("Extensions MU présentes : elles ne sont ni mises à jour ni qualifiées automatiquement ; une recette spécifique reste nécessaire.");
-  if ((await readUpdateSource(target.id))?.settings.localAgent) return executeLocalWordPress(run, target, result, fresh, progress);
-  await withWordPressUpdater(target, async (execute, username) => {
-    const scan = freeWordPressScanner();
-    const plan = await scan.prepare(parseWordPressPlan(await execute(wordpressPlanScript(target.root))));
-    checkWordPressRequirements(plan);
-    const baseline = await scan(plan, false);
-    result.checks = [securityCheck("WPVulnerability", "before", "WordPress, extensions et thèmes publics identifiables", baseline)];
-    await progress("checking", "Vérification de sécurité des versions WordPress candidates.");
-    const candidateFindings = await scan(plan, true);
-    recordWordPressManualUpdates(result, plan, fresh, candidateFindings);
-    const candidate = wordpressMaintenanceCheck(plan, "candidate", "Versions proposées et composants conservés de WordPress", candidateFindings);
-    result.checks.push(candidate);
-    await progress("checking", "Contrôle des versions à installer terminé ; composants manuels conservés.");
-    requireSecurityPass(candidate);
-    result.warnings.push(...scan.warnings);
-    if (run.purpose === "assessment") {
-      finishAssessment(result, wordpressAssessmentChanges(plan), "Prérequis et vulnérabilités des versions candidates vérifiés ; la compatibilité métier exige une recette sur une copie du site.");
-      return;
-    }
-    if (plan.wordpress.current === plan.wordpress.target && plan.plugins.every(item => item.current === item.target)) { result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return; }
-    await progress("checking", "Vérification de WordPress et sauvegarde des fichiers et de la base.");
-    const backupOutput = await execute(wordpressBackupScript(target.root, username, run.id, target.url!, fresh.php!.version));
-    const backup = backupOutput.match(/^VIGIE_BACKUP=(\/home\/[\w-]+\/\.vigie-backups\/[a-f0-9-]{36}\/[a-f0-9]{12})$/m)?.[1];
-    if (!backup) throw new ApiError("La sauvegarde WordPress n’a pas pu être confirmée. Mise à jour annulée.");
-    result.backup = backup;
-    result.stage = "publishing";
-    await progress("publishing", "Sauvegarde vérifiée. Mise à jour de WordPress et des extensions ; PHP et thèmes conservés.");
-    const output = await execute(wordpressUpdateScript(target.root, backup, plan));
-    const plugins = output.match(/^VIGIE_PLUGINS=(\d+)$/m), themes = output.match(/^VIGIE_THEMES=(\d+)$/m);
-    if (!plugins || !themes) throw new ApiError("Les composants WordPress n’ont pas pu être vérifiés. La sauvegarde est conservée.");
-    result.stage = "verifying";
-    await progress("verifying", "Contrôle du site après mise à jour WordPress.");
-    await checkPublicSite(target.url!);
-    const installed = parseWordPressPlan(await execute(wordpressPlanScript(target.root)));
-    if (installed.wordpress.current !== plan.wordpress.target || ["plugins", "themes"].some(kind => {
-      const key = kind as "plugins" | "themes";
-      return installed[key].length !== plan[key].length || plan[key].some(item => installed[key].find(next => next.slug === item.slug)?.current !== item.target);
-    })) throw new ApiError("Les versions WordPress installées ne correspondent pas au plan vérifié. Sauvegarde conservée.");
-    const finalCheck = wordpressMaintenanceCheck(plan, "after", "Versions réellement installées après mise à jour", await scan(installed, false));
-    result.checks.push(finalCheck);
-    await progress("verifying", "Contrôle de sécurité WordPress après installation.");
-    requireSecurityPass(finalCheck);
-    result.stage = "completed";
-    result.message = wordpressCompletionMessage(result, true);
-    result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
-  });
+  return executeLocalWordPress(run, target, result, fresh, progress);
 }
 export async function executeUpdate(id: string, executeGroup = nodeGroup, executeWordPress = wordpressTarget, afterComplete = refreshUpdateInventories, executeImage = executeRailwayImage, executeStatic = migrateMinimalStatic) {
   z.string().uuid().parse(id);

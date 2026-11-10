@@ -29,8 +29,8 @@ test("WordPress : succès avec extension privée et deux thèmes restants expliq
   assert.equal(health.manualUpdates.length, 3);
   const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
   assert.match(html, /Interventions manuelles requises/);
-  assert.match(html, /Vigie ne peut pas télécharger cette extension/);
-  assert.match(html, /Vigie ne met pas les thèmes à jour actuellement/);
+  assert.match(html, /Paquet officiel à confirmer par l’agent WordPress ou auprès de l’éditeur/);
+  assert.match(html, /Paquet officiel à confirmer par l’agent WordPress/);
   assert.match(html, /Apparence → Thèmes/);
   assert.match(html, /hello-elementor/);
   assert.match(html, /twentytwentyfive/);

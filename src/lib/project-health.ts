@@ -136,7 +136,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
         const currentWarnings = state?.currentSecurity?.find(item => item.targetId === `wordpress:${installation.id}` && item.versions === wordpressSecurityVersions(inventory))?.warnings || [];
         const retained = manualItems.find(item => item.package === `${component.id.startsWith("theme:") ? "themes" : "plugins"}/${slug}` && item.version === component.version);
         const retainedPlugin = component.id.startsWith("plugin:") && slug && (retained || ("updateOrigin" in component && component.updateOrigin === "external") || [...(result?.warnings || []), ...currentWarnings].some(warning => warning.startsWith(slug + " :") && /catalogue privé, non identifié ou fermé|intervention manuelle requise/.test(warning)));
-        const reason = retained ? `${retained.reason} ${retained.action}` : component.id.startsWith("theme:") ? "Vigie ne met pas les thèmes à jour actuellement. À mettre à jour depuis WordPress → Apparence → Thèmes." : retainedPlugin ? "Vigie ne peut pas télécharger cette extension privée ou non reconnue. À mettre à jour depuis WordPress ou le compte de l’éditeur." : null;
+        const reason = retained ? `${retained.reason} ${retained.action}` : component.id.startsWith("theme:") ? "Paquet officiel à confirmer par l’agent WordPress. Voir aussi WordPress → Apparence → Thèmes." : retainedPlugin ? "Paquet officiel à confirmer par l’agent WordPress ou auprès de l’éditeur." : null;
         if (reason) manualUpdates.set(key, { label, reason });
       } else if (component.updateState === "current") versionsKnown = true;
       else incomplete = true;

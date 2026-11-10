@@ -31,7 +31,7 @@ export function recordWordPressManualUpdates(result: UpdateResult, plan: WordPre
     const signals = findings.filter(finding => finding.package === `${kind}/${item.slug}` && finding.version === item.current);
     const vulnerable = signals.length > 0;
     if (kind === "themes" && observed?.updateState === "current" && !vulnerable && !item.template && item.updateOrigin !== "external") continue;
-    const reason = item.manualReason || (kind === "themes" ? "Thème conservé : sa mise à jour et ses personnalisations demandent une recette dédiée." : vulnerable ? signals.some(finding => !finding.kind || finding.kind === "vulnerability") ? "Aucun correctif automatique validé pour cette version vulnérable." : "Signal de sécurité à vérifier ; aucun traitement automatique validé." : "");
+    const reason = item.manualReason || (kind === "themes" ? "Aucune mise à jour officielle confirmée pour ce thème." : vulnerable ? signals.some(finding => !finding.kind || finding.kind === "vulnerability") ? "Aucun correctif automatique validé pour cette version vulnérable." : "Signal de sécurité à vérifier ; aucun traitement automatique validé." : "");
     if (!reason) continue;
     add({ package: `${kind}/${item.slug}`, version: item.current, ...(observed?.latestVersion && observed.latestVersion !== item.current ? { target: observed.latestVersion } : {}), reason, action: kind === "themes" ? manualThemeAction : manualPluginAction });
   }

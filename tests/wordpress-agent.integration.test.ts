@@ -80,7 +80,8 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     assert.notEqual(plan.plugins.find(item => item.slug === "classic-editor")?.target, "1.5");
     assert.equal(plan.plugins.find(item => item.slug === "vigie-private")?.updateOrigin, "external");
     assert.equal(JSON.stringify(plan).includes("never-return"), false);
-    const themesBefore = await shell(`wp --path=${root} theme list --fields=name,version --format=json`);
+    const theme = plan.themes.find(item => item.slug === "twentytwentyfour")!;
+    assert.notEqual(theme.target, theme.current);
     assert.equal(plan.themes.find(theme => theme.slug === "custom-child")?.current, "");
     assert.equal(plan.themes.find(theme => theme.slug === "integer-theme")?.current, "27");
     if (process.env.VIGIE_TEST_WORDPRESS_FREE_API === "1") {
@@ -110,7 +111,9 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     const saved = await op(run, "backup", { webPhp: php }); assert.equal(saved.backup, `${directory}/backups/${run}`); check("files and SQL backup verified");
     assert.ok(Number((await shell(`tar -tzf '${directory}/backups/${run}/files.tar.gz' | wc -c`)).trim()) > 524288);
     check("archive verification streams a file list larger than the output cap");
-    const updated = agentPlan((await op(run, "update", { plan, webPhp: php })).plan); report.after = updated;
+    const updateRun = randomUUID();
+    const updated = agentPlan((await op(updateRun, "update", { plan, webPhp: php })).plan); report.after = updated;
+    await shell(`test ! -e '${directory}/backups/${updateRun}'`);
     assert.equal(updated.wordpress.current, plan.wordpress.target); assert.notEqual(updated.wordpress.current, "6.8.3");
     assert.equal(updated.plugins.find(p=>p.slug==='akismet')?.current, plan.plugins.find(p=>p.slug==='akismet')?.target); check("core and extensions updated to exact plan");
     assert.equal(await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]), customBefore);
@@ -118,8 +121,10 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     assert.notEqual(updated.plugins.find(item => item.slug === "classic-editor")?.current, "1.5");
     check("customized public plugin preserved byte for byte while another plugin updates");
     assert.equal(updated.php, php);
-    assert.equal(await shell(`wp --path=${root} theme list --fields=name,version --format=json`), themesBefore);
-    check("PHP and all themes, including versionless and integer-version themes, unchanged");
+    assert.equal(updated.themes.find(item => item.slug === theme.slug)?.current, theme.target);
+    assert.equal(updated.themes.find(item => item.slug === "custom-child")?.current, "");
+    assert.equal(updated.themes.find(item => item.slug === "integer-theme")?.current, "27");
+    check("official theme updated without a maintenance backup; custom themes and PHP preserved");
     const beforeReplay = await exec(["stat", "-c", "%Y", `${directory}/backups/${run}/manifest.json`]);
     await op(run, "backup", { webPhp: php }); await tick();
     assert.equal(await exec(["stat", "-c", "%Y", `${directory}/backups/${run}/manifest.json`]), beforeReplay); check("duplicate backup was not executed twice");
@@ -152,7 +157,6 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     assert.equal(customCore.wordpress.integrity, "unverified");
     const coreHash = await exec(["sha256sum", `${root}/wp-includes/version.php`]);
     const secondRun = randomUUID();
-    await op(secondRun, "backup", { webPhp: php });
     const withCustomCore = agentPlan((await op(secondRun, "update", { plan: customCore, webPhp: php })).plan);
     assert.equal(withCustomCore.wordpress.current, "6.8.3");
     assert.equal(await exec(["sha256sum", `${root}/wp-includes/version.php`]), coreHash);

@@ -75,7 +75,7 @@ export function selectCompatibleWordPressUpdates(raw: WordPressUpdatePlan) {
       plan.wordpress.manualReason = "La version cible du cœur exige un PHP plus récent.";
     }
   }
-  for (const item of plan.plugins) {
+  for (const item of [...plan.plugins, ...plan.themes]) {
     if (item.current === item.target) continue;
     try {
       if ((item.requiresPhp && compareWordPressVersions(plan.php, item.requiresPhp) < 0) || (item.requiresWordPress && compareWordPressVersions(plan.wordpress.target, item.requiresWordPress) < 0) || item.requiresPlugins.some(slug => !plan.plugins.some(plugin => plugin.slug === slug))) throw new Error();
@@ -118,9 +118,10 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
   const prepare = async (raw: WordPressUpdatePlan) => {
     const plan = selectCompatibleWordPressUpdates(raw);
     for (const item of plan.plugins) {
-      if (item.updateOrigin === "external") { item.target = item.current; item.manualReason ||= "Distribution privée ou personnalisée : origine publique non établie."; warn(`${item.slug} : ${item.manualReason} Extension conservée ; intervention manuelle requise, couverture de sécurité limitée.`); continue; }
+      if (item.updateOrigin === "external" && item.officialOffer?.source !== "vendor") { item.target = item.current; item.manualReason ||= "Distribution privée ou personnalisée : origine publique non établie."; warn(`${item.slug} : ${item.manualReason} Extension conservée ; intervention manuelle requise, couverture de sécurité limitée.`); continue; }
       if (item.manualReason) { item.target = item.current; warn(`${item.slug} : ${item.manualReason} Extension conservée ; intervention manuelle requise.`); continue; }
       if (!numeric.test(item.current)) { item.target = item.current; item.manualReason ||= "Version absente ou non standard."; warn(`${item.slug} : version non standard, extension conservée et hors du contrôle de vulnérabilités.`); continue; }
+      if (item.officialOffer) continue;
       const report = await load("plugin", item.slug);
       let publicPackage = false;
       try { const url = new URL(report.data.link || ""); publicPackage = ["wordpress.org", "www.wordpress.org"].includes(url.hostname) && url.pathname.replace(/\/+$/, "") === `/plugins/${item.slug}`; } catch {}
@@ -137,7 +138,8 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
     const core = candidate ? plan.wordpress.target : plan.wordpress.current;
     const findings = freeWordPressFindings(await load("core", core), "core", core, core);
     for (const kind of ["plugin", "theme"] as const) for (const item of plan[`${kind}s`]) {
-      if (item.updateOrigin === "external" || (kind === "theme" && item.template) || !numeric.test(item.current)) { warn(`${item.slug} : composant privé, personnalisé ou version non standard ; conservé, contrôle de sécurité manuel nécessaire.`); continue; }
+      const vendor = item.officialOffer?.source === "vendor" || (kind === "plugin" && item.slug === "wp-rocket") || (kind === "theme" && item.slug === "Divi");
+      if ((item.updateOrigin === "external" && !vendor) || (kind === "theme" && item.template && !item.officialOffer) || !numeric.test(item.current)) { warn(`${item.slug} : composant privé, personnalisé ou version non standard ; conservé, contrôle de sécurité manuel nécessaire.`); continue; }
       const retained = item.current === item.target && (item.manualReason || kind === "theme");
       const key = `${kind}:${item.slug}:${item.current}`;
       if (retained && retainedScanFailures.has(key)) continue;

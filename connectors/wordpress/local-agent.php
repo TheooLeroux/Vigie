@@ -72,7 +72,6 @@ function va_validate_plan(array $plan): void {
         $seen = [];
         foreach ($plan[$kind] as $item) {
             if (!is_array($item) || !is_string($item['slug'] ?? null) || !preg_match('/^[a-z0-9_-]{1,150}$/iD', $item['slug']) || isset($seen[$item['slug']]) || !is_string($item['current'] ?? null) || !is_string($item['target'] ?? null) || strlen($item['current']) > 80 || strlen($item['target']) > 80 || preg_match('/[\x00-\x1f]/', $item['current'].$item['target'])) { throw new RuntimeException('invalid_component'); }
-            if ($kind === 'themes' && $item['target'] !== $item['current']) { throw new RuntimeException('theme_update_refused'); }
             if ($item['target'] !== $item['current'] && (!va_version($item['current']) || !va_version($item['target']) || version_compare($item['target'], $item['current'], '<'))) { throw new RuntimeException('invalid_component'); }
             $seen[$item['slug']] = true;
         }
@@ -87,7 +86,10 @@ function va_same_versions(array $actual, array $expected, bool $updated): void {
         foreach ($expected[$kind] as $item) {
             $match = array_values(array_filter($actual[$kind], static fn($v) => $v['slug'] === $item['slug']));
             if (count($match) !== 1 || $match[0]['current'] !== $item[$field]) { throw new RuntimeException('versions_changed'); }
-            if (!$updated && $item['current'] !== $item['target'] && !empty($match[0]['manualReason'])) { throw new RuntimeException('component_integrity_changed'); }
+            if (!$updated && $item['current'] !== $item['target'] &&
+                (!empty($match[0]['manualReason']) || $match[0]['target'] !== $item['target'] || !isset($match[0]['officialOffer']) || $match[0]['officialOffer'] !== ($item['officialOffer'] ?? null))) {
+                throw new RuntimeException('official_offer_changed');
+            }
         }
     }
 }
@@ -132,20 +134,16 @@ function va_update(array $config, array $job): array {
     va_validate_plan($plan);
     if ($plan['php'] !== PHP_VERSION || ($job['webPhp'] ?? null) !== PHP_VERSION) { throw new RuntimeException('php_mismatch'); }
     va_same_versions(va_plan($config), $plan, false);
-    va_verify_backup($config, $job['runId']);
-    // Recheck immediately before mutations, including edits made after inspection.
-    foreach ($plan['plugins'] as $item) {
-        if ($item['current'] !== $item['target']) {
-            $verified = va_wp($config, ['plugin', 'verify-checksums', $item['slug'], '--version='.$item['current'], '--strict', '--format=json']);
-            if (trim($verified) !== 'Success: Verified 1 of 1 plugins.') { throw new RuntimeException('component_integrity_changed'); }
-        }
-    }
     va_wp($config, ['maintenance-mode', 'activate']);
     try {
         if ($plan['wordpress']['current'] !== $plan['wordpress']['target']) { va_wp($config, ['core','update','--version='.$plan['wordpress']['target']], 300); }
         va_wp($config, ['core','update-db']);
-        foreach ($plan['plugins'] as $item) {
-            if ($item['current'] !== $item['target']) { va_wp($config, ['plugin','update',$item['slug'],'--version='.$item['target']], 300); }
+        foreach (['plugin' => 'plugins', 'theme' => 'themes'] as $kind => $group) {
+            foreach ($plan[$group] as $item) {
+                if ($item['current'] !== $item['target']) {
+                    va_wp($config, ['eval-file', __DIR__.'/plan.php', 'apply-offer', $kind, $item['slug'], $item['target'], $item['officialOffer']['fingerprint']], 300);
+                }
+            }
         }
         if (($plan['wordpress']['integrity'] ?? null) !== 'unverified') { va_wp($config, ['core','verify-checksums']); }
         va_wp($config, ['cache','flush']);
@@ -154,7 +152,7 @@ function va_update(array $config, array $job): array {
         if (is_file($config['root'].'/.maintenance') && !is_link($config['root'].'/.maintenance')) { unlink($config['root'].'/.maintenance'); }
     }
     $installed = va_plan($config); va_same_versions($installed, $plan, true);
-    return ['plan' => $installed, 'backup' => __DIR__.'/backups/'.$job['runId']];
+    return ['plan' => $installed];
 }
 function va_restore(array $config, array $job): array {
     // Full data restoration is explicitly requested, never an automatic failure handler.
