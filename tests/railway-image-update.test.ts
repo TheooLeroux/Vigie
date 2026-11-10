@@ -243,3 +243,47 @@ test("Intégration : image sans Git/URL/ZIP sélectionnée et verrouillée indé
   await executeUpdate(failed.id, undefined, undefined, async targets => { refreshes++; assert.equal(targets[0].id, image.id); }, (run, selected, result, progress) => executeRailwayImage(run, selected, result, progress, recovery.dependencies));
   assert.equal((await readUpdateRun(failed.id))?.stage, "attention"); assert.equal(refreshes, 1, "rafraîchir aussi l’inventaire après une récupération, sans faux succès");
 });
+
+test("Railway : Caddy reste qualifié après un échec npm du dépôt, sauf publication incertaine", async () => {
+  const repository = "qa/static-" + randomUUID();
+  process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
+  process.env.VIGIE_UPDATES_ENABLED = "1";
+  process.env.VIGIE_UPDATES_RUNNER_REPOSITORY = "qa/runner";
+  process.env.VIGIE_UPDATES_REPOSITORIES = repository;
+  process.env.VIGIE_UPDATES_GITHUB_TOKENS = JSON.stringify({ qa: "fake-test-token" });
+  const project = await transaction(() => createProject("live", createProjectSchema.parse({ name: "Caddy QA" })));
+  const connection = await saveRailwayConnection({ name: "Caddy QA", workspaceId: randomUUID(), secret: "fake-railway-test-token" });
+  const environmentId = randomUUID(), frontendId = randomUUID(), backendId = randomUUID();
+  const deployment = healthFixture().railway![0].services[0].activeDeployments[0];
+  const services = [frontendId, backendId].map((id, index) => ({
+    id, name: index ? "Backend" : "Frontend", environmentId, environmentName: "production", domains: [index ? "backend.example.test" : "frontend.example.test"],
+    repository, image: null, builder: "DOCKERFILE", region: null, replicas: 1, rootDirectory: index ? "backend" : "frontend", healthcheckPath: null, cronSchedule: null,
+    latestDeployment: null, activeDeployments: [{ ...deployment, evidence: { ...deployment.evidence!, branch: "main", repository, framework: "vite" } }],
+  }));
+  const remote = { id: randomUUID(), name: project.name, workspaceId: connection.workspaceId, workspaceName: "QA", environments: [{ id: environmentId, name: "production", ephemeral: false }], services };
+  await applyRailwaySnapshot(connection.id, [remote]);
+  await linkRailwayProject(connection.id, remote.id, project.id);
+  const grant = process.env.VIGIE_MINIMAL_STATIC_SERVICES;
+  process.env.VIGIE_MINIMAL_STATIC_SERVICES = [project.id, environmentId, frontendId, backendId].join(":");
+  try {
+    let attempts = 0;
+    for (const published of [false, true]) {
+      const run = await startProjectUpdate({ projectId: project.id }, async () => {});
+      assert.equal(run.targets.length, 2);
+      await executeUpdate(run.id, async (_run, _targets, results) => {
+        if (published) results[0].commit = "a".repeat(40);
+        throw new ApiError("Résolution npm interrompue.", 422);
+      }, undefined, async () => {}, undefined, async (front, back) => {
+        attempts++;
+        assert.equal(front.remoteId, frontendId);
+        assert.equal(back.remoteId, backendId);
+        return false;
+      });
+      assert.equal((await readUpdateRun(run.id))?.stage, published ? "attention" : "failed");
+      assert.equal(attempts, 1);
+    }
+  } finally {
+    if (grant === undefined) delete process.env.VIGIE_MINIMAL_STATIC_SERVICES;
+    else process.env.VIGIE_MINIMAL_STATIC_SERVICES = grant;
+  }
+});

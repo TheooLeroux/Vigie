@@ -16,7 +16,7 @@ const receiptSchema = z.object({
   catalogs: z.array(z.object({ url: z.string().max(500), accept: z.string().max(100), etag: z.string().max(210).optional(), modified: z.string().max(100).optional(), hash: hex.optional() })).max(2500),
   images: z.array(z.object({ image: z.string().max(100), digest })).min(1).max(120),
   validationImage: digest,
-  deployments: z.array(z.object({ targetId: z.string().max(300), deploymentId: z.string().max(300), imageDigest: digest, source: z.enum(["container", "railpack"]), usage: z.enum(["runtime", "build"]) })).min(1).max(30),
+  deployments: z.array(z.object({ targetId: z.string().max(300), deploymentId: z.string().max(300), imageDigest: digest, source: z.enum(["container", "railpack", "railway-static"]), usage: z.enum(["runtime", "build"]) })).min(1).max(30),
   securityHash: hex,
   npmRetained: z.array(z.object({
     id: z.string().max(200), aliases: z.array(z.string().max(200)).max(100),

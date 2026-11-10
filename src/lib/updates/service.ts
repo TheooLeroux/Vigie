@@ -23,6 +23,12 @@ import { railwayState } from "../railway";
 import { railpackImageIdentity, railpackImageReport, sameRailpackImage } from "./railpack-image-report";
 import { readRailpackScan } from "./railpack-image-control";
 
+function attentionScopes(run: UpdateRun) {
+  const targets = run.targets || [];
+  const uncertain = targets.filter(target => run.results?.some(result => result.targetId === target.id && result.stage === "attention"));
+  return (uncertain.length ? uncertain : targets).map(updateScope);
+}
+
 export function updatesEnabled() {
   return process.env.VIGIE_UPDATES_ENABLED === "1" && !!updateRunner();
 }
@@ -41,6 +47,9 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
     delete run.nodeReceipts;
     return run;
   });
+  const pendingRows = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND stage='attention' ORDER BY json_extract(data,'$.createdAt') DESC").all(projectId) as { data: string }[];
+  const pending = pendingRows.map(row => JSON.parse(row.data) as UpdateRun);
+  const blockedScopes = new Set(pending.flatMap(attentionScopes));
   const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null);
   const [imageScans, automaticControls, currentSecurity] = await Promise.all([
     Promise.all(identities.map(async identity => {
@@ -62,7 +71,10 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
     }
     return [];
   });
-  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs };
+  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs,
+    blockedTargetIds: targets.filter(target => blockedScopes.has(updateScope(target))).map(target => target.id),
+    pendingRuns: pending.map(({ id, stage, updatedAt, message }) => ({ id, stage, updatedAt, message })),
+  };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
 export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate, options: { assessment?: boolean } = {}) {
@@ -105,9 +117,11 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
       const today = recorded.find(run => run.purpose === "assessment" && run.assessmentOrigin !== "maintenance" && run.createdAt.slice(0, 10) === now.slice(0, 10));
       if (today) return { run: today, created: false };
     }
-    if (rows.some(row => (JSON.parse(row.data) as UpdateRun).stage === "attention")) throw new ApiError("Une publication précédente doit être vérifiée avant de lancer une nouvelle mise à jour.", 409);
+    const scopes = [...new Set(targets.map(updateScope))].sort();
+    const pending = recorded.some(previous => previous.stage === "attention" && attentionScopes(previous).some(scope => scopes.includes(scope)));
+    if (pending) throw new ApiError("Une publication précédente utilise ces sources et doit être vérifiée avant de relancer.", 409);
     await db.prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(candidate.id, candidate.projectId, candidate.stage, JSON.stringify(candidate));
-    for (const scope of [...new Set(targets.map(updateScope))].sort()) {
+    for (const scope of scopes) {
       const lock = await db.prepare("INSERT INTO update_locks(scope,run_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING").run(scope, candidate.id);
       if (!lock.changes) throw new ApiError("Une mise à jour utilise déjà ces sources. Son suivi reste disponible sur le projet concerné.", 409);
     }

@@ -4,7 +4,7 @@ import type { SoftwareRelease } from "./railway-types";
 import type { ProjectDetail, SiteInventory } from "./types";
 import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
-import { controlMatches, automaticControlFresh, controlSource } from "./automatic-control-state";
+import { controlMatches, automaticControlFresh } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
 import { currentAssessmentResults } from "./updates/assessment";
 import { activeRailpackImageReport } from "./updates/railpack-image-report";

@@ -41,7 +41,7 @@ export type UpdateCheck = {
   status: "passed" | "warning" | "blocked";
   message: string;
   findings: SecurityFinding[];
-  nodeEvidence?: { version: string; deploymentId: string; imageDigest?: string; source: "container" | "railpack" | "vercel-function"; usage: "runtime" | "build"; instances?: string[]; projectId?: string; commit?: string | null; region?: string };
+  nodeEvidence?: { version: string; deploymentId: string; imageDigest?: string; source: "container" | "railpack" | "railway-static" | "vercel-function"; usage: "runtime" | "build"; instances?: string[]; projectId?: string; commit?: string | null; region?: string };
   staticEvidence?: { projectId: string; deploymentId: string; commit: string | null; artifactHash: string; fileCount: number; buildNodeVersion: string };
   caddyEvidence?: { version: string; deploymentId: string; imageDigest: string; instances: string[]; packagesHash: string; binaryHash: string };
   blockers?: SecurityFinding[];
@@ -93,6 +93,8 @@ export type UpdateRun = {
   excludedTargets?: { targetId: string; name: string; reason: string }[];
 };
 export type UpdateState = {
+  blockedTargetIds?: string[];
+  pendingRuns?: Pick<UpdateRun, "id" | "stage" | "updatedAt" | "message">[];
   railpackImageReports?: import("./railpack-image-report").RailpackImageReport[];
   assessment?: UpdateRun | null;
   automaticControls?: import("../automatic-control-state").AutomaticControl[];

@@ -172,28 +172,30 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
   }, [refresh, subscribe, projectId]);
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const assessmentActive = !!state?.assessment && activeUpdateStages.includes(state.assessment.stage);
-  const available = state?.targets.filter(allowsAutomaticMaintenance) || [];
-  const unresolved = latest?.stage === "attention";
+  const blocked = new Set(state?.blockedTargetIds);
+  const eligible = state?.targets.filter(allowsAutomaticMaintenance) || [];
+  const available = eligible.filter(target => !blocked.has(target.id));
   async function startUpdate(targetIds?: string[]) {
     setBusy(true); setError("");
     try { await request("updates", "POST", { projectId, ...(targetIds ? { targetIds } : {}) }); await refresh(); }
     catch (error) { setError(error instanceof Error ? error.message : "La mise à jour n’a pas démarré."); }
     finally { setBusy(false); }
   }
-  const updateButton = <button className="button primary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled || !available.length} onClick={() => void startUpdate()}>
+  const updateButton = <button className="button primary" disabled={busy || refreshingHosting || !!active || assessmentActive || !state?.enabled || !available.length} onClick={() => void startUpdate(available.length < eligible.length ? available.map(target => target.id) : undefined)}>
     {busy || active ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
     {busy || active ? "Mise à jour en cours" : "Mettre à jour"}
   </button>;
   const errorNotice = error && <p role="alert" className="updates-error">{error} <button className="text-button" onClick={() => void refresh().catch(() => {})}>Réessayer le chargement</button></p>;
-  const closeButton = latest && !["completed", "failed"].includes(latest.stage) && Date.now() - Date.parse(latest.updatedAt) > 30 * 60_000 && <button className="button secondary updates-close-button" onClick={async () => {
+  const closeButton = (run: Pick<UpdateRun, "id" | "stage" | "updatedAt">) => !["completed", "failed"].includes(run.stage) && Date.now() - Date.parse(run.updatedAt) > 30 * 60_000 && <button className="button secondary updates-close-button" onClick={async () => {
           if (!window.confirm("Confirmez avoir vérifié les déploiements et le site chez l’hébergeur. Clôturer ne restaure ni le code ni les données ; cela autorise une prochaine mise à jour.")) return;
-          try { await request(`updates/${latest.id}/close`, "POST", { confirmed: true }); await refresh(); }
+          try { await request(`updates/${run.id}/close`, "POST", { confirmed: true }); await refresh(); }
           catch (error) { setError(error instanceof Error ? error.message : "Clôture non confirmée."); }
         }}>Clôturer après vérification manuelle</button>;
   const maintenanceStatus = !state ? !error && "Chargement de la maintenance…"
     : assessmentActive ? "Vérification des versions en cours."
     : !state.enabled ? "Maintenance non activée."
     : available.length ? null
+    : blocked.size ? "Les sources en attente de vérification restent protégées."
     : state.targets.length ? "Aucun service éligible à la maintenance automatique." : "Aucun service rattaché à la maintenance.";
   return <section id="project-updates" className={`project-updates ${embedded ? "updates-embedded" : "panel"}`} aria-label="Mises à jour du projet">
     {overviewActionTarget && createPortal(<>{updateButton}{errorNotice}</>, overviewActionTarget)}
@@ -202,7 +204,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
     </div>
     {errorNotice}
     {maintenanceStatus && <p className="updates-note" role="status">{maintenanceStatus}</p>}
-    {active && <><UpdateProgress run={latest} />{closeButton}</>}
+    {active && <><UpdateProgress run={latest} />{closeButton(latest)}</>}
     <div className="maintenance-sections">
       {children}
       {latest && !active && <MaintenanceDetails label="Dernière tentative"
@@ -215,8 +217,11 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
             {result.checks?.map((check, index) => <details key={index}><summary>{check.tool === "Static" ? "Fichiers statiques" : check.tool} · {check.phase === "before" ? "Avant mise à jour" : check.phase === "candidate" ? "Version candidate" : "Après installation"} · {check.status === "blocked" ? "Bloqué" : check.status === "warning" ? "Avec réserves" : "Vérifié"}</summary><p>{check.scope} · {formatDate(check.checkedAt)}</p><p>{check.message}</p>{check.staticEvidence && <p>{check.staticEvidence.fileCount} fichier(s) · Node du build de validation : {check.staticEvidence.buildNodeVersion} · Déploiement : <code>{check.staticEvidence.deploymentId}</code> · Empreinte SHA-256 : <code>{check.staticEvidence.artifactHash}</code></p>}{check.findings.slice(0, 20).map((finding, findingIndex) => <p key={findingIndex}><code>{finding.package}@{finding.version}</code> · {finding.id} · {finding.severity}</p>)}{check.findings.length > 20 && <p>{check.findings.length - 20} autre(s) alerte(s) conservée(s) dans le rapport.</p>}</details>)}
           </div>)}
         </details>}
-        {closeButton}
+        {closeButton(latest)}
       </MaintenanceDetails>}
+      {state?.pendingRuns?.filter(run => run.id !== latest?.id).map(run => <MaintenanceDetails key={run.id} label="Publication à vérifier" status={formatDate(run.updatedAt)} warning>
+        <p>{run.message}</p>{closeButton(run)}
+      </MaintenanceDetails>)}
       {state && <MaintenanceDetails label="Services et configuration"
         status={state.enabled && available.length > 0 && available.length < state.targets.length ? `${available.length}/${state.targets.length} services éligibles` : undefined}>
         <UpdateReadiness state={state} />
@@ -228,7 +233,7 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
         {state?.targets.some(target => target.mode === "image" && target.capability?.adapter === "railway-image") && <p className="updates-note">Images Tailscale Railway : le proxy SOCKS sortant standard dispose d’un parcours dédié. L’image stable est analysée puis la reconnexion et l’accès réseau sont contrôlés. Les alertes non classées déjà présentes restent visibles comme réserves ; les configurations persistantes ou personnalisées demandent une qualification séparée.</p>}
         {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
         </details>}
-        {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !!unresolved || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button></p>)}
+        {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button></p>)}
         {state.targets.some(target => target.provider !== "o2switch") && <details className="updates-details"><summary>Relevés d’hébergement</summary>
           <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>
           {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}

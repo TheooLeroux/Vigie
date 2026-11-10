@@ -6,7 +6,7 @@ import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
 import { checkPublicMinimalStatic, minimalStaticCaddyCandidate, minimalStaticDockerfile, MinimalStaticCandidateVulnerable, scanMinimalStaticImage, testMinimalStaticRailway } from "./minimal-static";
 import { readRailwayInstance, waitForDeployment } from "./providers";
 import { railpackCaddyVersion } from "./railpack-caddy";
-import { cachedRailpackInventory, readRailpackScan, saveMinimalStaticScan } from "./railpack-image-control";
+import { cachedRailpackInventory, readRailpackScan, readRecentCaddyRefusal, saveCaddyRefusal, saveMinimalStaticScan } from "./railpack-image-control";
 import { sameRailpackImage } from "./railpack-image-report";
 import { scanRailpackImage } from "./railpack-image-scan";
 import { securityCheck } from "./security";
@@ -46,7 +46,7 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
   const commit = evidence.commit;
   if (qualificationCommit && (commit !== qualificationCommit || caddy)) throw new ApiError("L’image statique active a changé avant la qualification Caddy.", 409);
   const path = target.root + "/Dockerfile";
-  let change: { version: string; previousRecipe: string; recipe: string } | undefined;
+  let change: { version: string; digest: string; previousRecipe: string; recipe: string } | undefined;
   let removed = 0;
   if (caddy) {
     const identity = { targetId: target.id, projectId: target.projectId, deploymentId: deployment.id as string, imageDigest, commit, caddy };
@@ -65,6 +65,11 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     const previousRecipe = Buffer.from(original.content, "base64").toString("utf8");
     const proposal = minimalStaticCaddyCandidate(previousRecipe, await caddyCatalog());
     if (!proposal) return false;
+    const refusal = qualificationCommit ? undefined : await readRecentCaddyRefusal(target.id, proposal.digest);
+    if (refusal) {
+      result.warnings.push(`Refus Trivy réutilisé pour le même binaire Caddy. ${refusal.reason}`);
+      return false;
+    }
     await activeMinimalStaticImage(target, deployment.id, commit);
     change = { ...proposal, previousRecipe };
     await progress("updating", `${target.name} : qualification de Caddy ${change.version} pour l’image minimale.`);
@@ -83,6 +88,7 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     const summary = error.findings.slice(0, 6).map(finding => `${finding.package} ${finding.version} (${finding.id})`).join(", ");
     const reason = `Caddy ${change.version} écarté par Trivy : ${error.findings.length} signalement(s) sur le binaire candidat (${summary}).`;
     result.warnings.push(reason);
+    await saveCaddyRefusal(target.id, change.digest, reason);
     await progress("verifying", reason);
     const active = await activeMinimalStaticImage(target, deployment.id, commit);
     const scan = await scanMinimalStaticImage(target, deployment.id);

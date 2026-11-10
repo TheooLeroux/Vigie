@@ -11,18 +11,28 @@ type Scan = RailpackImageIdentity & {
   error?: string;
 };
 type Inventory = RailpackImageIdentity & { inventory: RailpackInventory };
+type CaddyRefusal = { digest: string; reason: string; checkedAt: string };
 
 async function read<T>(key: string): Promise<T | undefined> {
   const row = await (await hostingStorage()).prepare("SELECT data FROM wordpress_catalog WHERE cache_key=?").get(key) as { data: string } | undefined;
   return row ? JSON.parse(row.data) as T : undefined;
 }
 
-async function write(key: string, value: Scan | Inventory) {
+async function write(key: string, value: Scan | Inventory | CaddyRefusal) {
   await (await hostingStorage()).prepare("INSERT INTO wordpress_catalog(cache_key,data,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at")
     .run(key, JSON.stringify(value), "9999-12-31T00:00:00.000Z");
 }
 
 const scanKey = (id: string) => `railpack:scan:1:${id}`;
+const caddyRefusalKey = (id: string) => `static:caddy-refusal:1:${id}`;
+export async function readRecentCaddyRefusal(id: string, digest: string, now = Date.now()) {
+  const previous = await read<CaddyRefusal>(caddyRefusalKey(id));
+  const age = previous ? now - Date.parse(previous.checkedAt) : NaN;
+  return previous && previous.digest === digest && age >= 0 && age < controlRenewalInterval ? previous : undefined;
+}
+export async function saveCaddyRefusal(id: string, digest: string, reason: string) {
+  await write(caddyRefusalKey(id), { digest, reason, checkedAt: new Date().toISOString() });
+}
 export async function saveMinimalStaticScan(identity: RailpackImageIdentity, check: UpdateCheck) {
   await write(scanKey(identity.targetId), { ...identity, attemptedAt: check.checkedAt, report: { ...identity, check } });
 }

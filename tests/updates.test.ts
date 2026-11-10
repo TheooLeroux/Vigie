@@ -233,6 +233,62 @@ test("Mises à jour : une installation des scanners en échec est enregistrée e
     else process.env.VIGIE_UPDATES_RUNNER_SETUP_OK = previous;
   }
 });
+test("Mises à jour : une écriture de progression refusée laisse la clôture persister et libérer le verrou", async () => {
+  const { project } = await fixture();
+  const run = await startProjectUpdate({ projectId: project.id }, async () => {});
+  const db = await updateStorage();
+  await executeUpdate(run.id, async (_run, _targets, _results, progress) => {
+    await db.exec("CREATE TEMP TRIGGER fail_progress BEFORE UPDATE ON update_runs WHEN json_extract(NEW.data,'$.message') = 'audit transient' BEGIN SELECT RAISE(ABORT,'transient test error'); END;");
+    try { await progress("updating", "audit transient"); }
+    finally { await db.exec("DROP TRIGGER fail_progress;"); }
+  }, undefined, noRefresh);
+  assert.equal((await readUpdateRun(run.id))?.stage, "failed");
+  assert.equal((await db.prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
+  assert.notEqual((await startProjectUpdate({ projectId: project.id }, async () => {})).id, run.id);
+});
+
+test("Mises à jour : un refus historique ne révoque pas le contrôle final réussi d’un autre service du dépôt", async () => {
+  const first = await fixture(), second = await fixture("git", first.target.repository!);
+  await linkVercelProject(second.connection.id, second.remote.id, first.project.id);
+  const run = await startProjectUpdate({ projectId: first.project.id }, async () => {});
+  const refreshed: string[] = [];
+  await executeUpdate(run.id, async (_run, _targets, [confirmed, failed]) => {
+    confirmed.stage = "completed";
+    confirmed.deploymentId = "verified";
+    const check = { tool: "OSV" as const, checkedAt: new Date().toISOString(), scope: "fixture", message: "", findings: [] };
+    confirmed.checks = [
+      { ...check, phase: "candidate", status: "blocked" },
+      { ...check, phase: "after", status: "passed" },
+    ];
+    failed.stage = "attention";
+    failed.deploymentId = "unverified";
+    throw new ApiError("Second service unverified", 502);
+  }, undefined, async targets => { refreshed.push(...targets.map(target => target.id)); });
+  const results = (await readUpdateRun(run.id))!.results;
+  assert.deepEqual(results.map(result => result.stage), ["completed", "attention"]);
+  assert.deepEqual(refreshed, [results[0].targetId]);
+});
+
+test("Mises à jour : une publication incertaine protège son dépôt et laisse un autre dépôt disponible", async () => {
+  const first = await fixture(), second = await fixture();
+  await linkVercelProject(second.connection.id, second.remote.id, first.project.id);
+  const run = await startProjectUpdate({ projectId: first.project.id }, async () => {});
+  await executeUpdate(run.id, async (_run, [target], [result]) => {
+    if (target.repository === first.target.repository) {
+      result.commit = "a".repeat(40);
+      throw new ApiError("First service unverified", 502);
+    }
+    result.stage = "completed";
+  }, undefined, noRefresh);
+  await assert.rejects(startProjectUpdate({ projectId: first.project.id, targetIds: [first.target.id] }, async () => {}), /publication précédente/);
+  const next = await startProjectUpdate({ projectId: first.project.id, targetIds: [second.target.id] }, async () => {});
+  assert.notEqual(next.id, run.id);
+  assert.equal(next.targets[0].id, second.target.id);
+  const state = await projectUpdates(first.project.id);
+  assert.deepEqual(state.blockedTargetIds, [first.target.id]);
+  assert.equal(state.pendingRuns?.[0].id, run.id);
+});
+
 test("Mises à jour : échec après publication conserve les références et interdit une relance aveugle", async () => {
   const { project } = await fixture();
   const run = await startProjectUpdate({ projectId: project.id }, async () => {});

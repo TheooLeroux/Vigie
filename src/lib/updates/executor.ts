@@ -116,7 +116,9 @@ export function nodeCompletionMessage(target: UpdateTarget, result: UpdateResult
   return unchanged ? "Node exact et dépendances déjà à jour ; déploiement et contrôle HTTPS vérifiés." : "Mise à jour déployée et contrôle HTTPS réussi.";
 }
 function failureStage(results: UpdateResult[], error: unknown): "attention" | "failed" {
-  return results.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && results.some(result => ["publishing", "verifying", "attention"].includes(result.stage))) ? "attention" : "failed";
+  const unconfirmed = results.filter(result => result.stage !== "completed");
+  const affected = unconfirmed.length ? unconfirmed : results;
+  return affected.some(result => result.commit || result.deploymentId || result.backup) || (!(error instanceof ApiError && error.status === 409) && affected.some(result => ["publishing", "verifying", "attention"].includes(result.stage))) ? "attention" : "failed";
 }
 async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: UpdateResult[], progress: Progress) {
   const representative = targets[0];
@@ -273,7 +275,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     const policyHash = await nodePolicyHash();
     const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
     await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
-    const previous = run.purpose === "assessment" || caddyCandidates.size || minimalStaticRoots.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
+    const previous = run.purpose === "assessment" || caddyCandidates.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
     let receipt = previous.flatMap(prior => (prior.nodeReceipts || []).flatMap(raw => {
       const saved = reusableNodeReceipt(raw, key);
       return saved && nodeReceiptGroupCompleted(saved, prior.results || []) ? [saved] : [];
@@ -283,8 +285,10 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         for (const [index, target] of targets.entries()) {
           const proof = receipt.deployments.find(item => item.targetId === target.id);
           if (target.provider !== "railway" || !proof || proof.deploymentId !== results[index].previousDeploymentId) { receipt = null; break; }
-          const instance = (await readRailwayInstance(target)).serviceInstance;
-          const image = activeNodeImage(target, { deploymentId: proof.deploymentId, commit: expected || undefined }, version, instance.activeDeployments || []);
+          const minimal = minimalStaticTargets.has(target.id);
+          if (minimal !== (proof.source === "railway-static")) { receipt = null; break; }
+          const image = minimal ? await activeMinimalStaticImage(target, proof.deploymentId, expected)
+            : activeNodeImage(target, { deploymentId: proof.deploymentId, commit: expected || undefined }, version, (await readRailwayInstance(target)).serviceInstance.activeDeployments || []);
           if (image.imageDigest !== proof.imageDigest) { receipt = null; break; }
         }
         if (receipt && !await unchangedNodeInputs(receipt)) receipt = null;
@@ -373,7 +377,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
           requireSecurityPass(await receiptPolicy.check(sourceFolder, "Configuration déjà validée", baseline));
           for (const root of [...new Set(roots)]) {
             const file = (root ? root + "/" : "") + "Dockerfile";
-            if (!names.includes(file)) continue;
+            if (!names.includes(file) || minimalStaticRoots.has(root)) continue;
             await validateDockerfileCandidate(sourceFolder, root, names, version, async (image, bases) => {
               if (!bases?.every(base => reference.images.some(item => item.image === base.image && item.digest === base.digest))) throw new ApiError("Les images de base du Dockerfile ont changé.");
               currentImages.set(root, (await scanImage(image)).map(entry => ({ ...entry, scope: root })));
@@ -402,7 +406,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         }
         await verifyNodeServices(results, async index => {
           const target = targets[index], result = results[index];
-          await confirmDeployedNode(target, result, { deploymentId: result.previousDeploymentId!, commit: expected || undefined }, version, progress);
+          await verifyNode(index, result.previousDeploymentId!);
           const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after")?.nodeEvidence;
           if (!sameNodeReceiptProof(reference, target.id, proof)) throw new ApiError("L’image active ou le type de preuve Node a changé pendant la vérification. Validation non réutilisable.", 422);
           await checkNodeEndpoint(target);
@@ -488,7 +492,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         ? ` Durées du service : préparation ${Math.round(timing.prepareMs / 1000)} s ; validation assemblée ${Math.round(timing.validateMs / 1000)} s. Préparation et validation de tous les services : ${Math.round(preparationMs / 1000)} s écoulées (tâches parallèles).`
         : ` Préparation et validation : ${Math.round(preparationMs / 1000)} s.`;
     }
-    for (const [index, target] of targets.entries()) {
+    for (const target of targets) {
       const candidate = caddyCandidates.get(target.id);
       if (!candidate) continue;
       const path = (target.root ? target.root + "/" : "") + "railpack.json";
@@ -595,6 +599,8 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       }
       if (minimalStaticTargets.has(targets[index].id)) {
         const target = targets[index], commit = result.commit || expected;
+        const buildNode = minimalStaticBuildNode(await readFile(join(sourceFolder, target.root, "Dockerfile"), "utf8"));
+        if (buildNode !== version) throw new ApiError("La version Node du Dockerfile statique diffère de celle des tests.", 422);
         const image = await activeMinimalStaticImage(target, deploymentId, commit);
         const scan = await scanMinimalStaticImage(target, deploymentId);
         const check = securityCheck("Trivy", "after", "Image statique minimale sur Railway", scan.findings);
@@ -603,6 +609,11 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         if (current.imageDigest !== image.imageDigest) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
         await saveMinimalStaticScan(image, check);
         await record(check, [result]);
+        await record({
+          tool: "Node", phase: "after", scope: target.root, status: "passed", findings: [], checkedAt: check.checkedAt,
+          message: `Node ${buildNode} épinglé dans la recette du déploiement actif pour la construction du site.`,
+          nodeEvidence: { version: buildNode, deploymentId, imageDigest: image.imageDigest, commit, source: "railway-static", usage: "build" },
+        }, [result]);
         return;
       }
       await confirmDeployedNode(targets[index], result, { deploymentId, commit: result.commit || expected || undefined }, version, progress);
@@ -783,7 +794,7 @@ async function wordpressTarget(run: UpdateRun, target: UpdateTarget, result: Upd
     result.warnings.push("Les extensions sans accès à leur catalogue (licence expirée ou distribution privée) peuvent ne pas signaler de mise à jour. Une sauvegarde ne remplace pas un test métier.");
   });
 }
-export async function executeUpdate(id: string, executeGroup = nodeGroup, executeWordPress = wordpressTarget, afterComplete = refreshUpdateInventories, executeImage = executeRailwayImage) {
+export async function executeUpdate(id: string, executeGroup = nodeGroup, executeWordPress = wordpressTarget, afterComplete = refreshUpdateInventories, executeImage = executeRailwayImage, executeStatic = migrateMinimalStatic) {
   z.string().uuid().parse(id);
   const db = await updateStorage();
   const claim = await db.prepare("UPDATE update_runs SET stage='checking' WHERE id=? AND stage='queued'").run(id);
@@ -796,8 +807,10 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
   let writes = Promise.resolve();
   const trackProgress = createUpdateProgressTracker(run);
   const persist = () => {
-    writes = writes.then(() => writeUpdateRun(run));
-    return writes;
+    const write = writes.then(() => writeUpdateRun(run));
+    // The caller still sees the error, but the heartbeat and final transaction can retry persistence.
+    writes = write.catch(() => {});
+    return write;
   };
   const progress: Progress = (stage, message) => { trackProgress(stage, message); return persist(); };
   const heartbeat = setInterval(() => { void persist().catch(() => {}); }, 30_000);
@@ -830,15 +843,36 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
               const witnessId = minimalStaticWitnessId(target);
               const witness = witnessId && current.find(item => item.remoteId === witnessId && item.environmentId === target.environmentId);
               if (!witness) return false;
-              return migrateMinimalStatic(target, witness, results[index], async (repository, commit, archive, folder) => {
-                await downloadGitArchive(repository, commit, archive);
-                return extractArchive(archive, folder, true);
-              }, progress);
+              const result = results[index];
+              const previousCommit = result.commit;
+              try {
+                return await executeStatic(target, witness, result, async (repository, commit, archive, folder) => {
+                  await downloadGitArchive(repository, commit, archive);
+                  return extractArchive(archive, folder, true);
+                }, progress);
+              } catch (error) {
+                if (result.commit !== previousCommit || result.stage === "attention" || result.stage === "publishing") throw error;
+                const reason = error instanceof ApiError ? error.message : "La qualification de l’image statique a échoué.";
+                result.warnings.push(`Parcours Caddy : ${reason}`);
+                await progress("checking", `Parcours Caddy : ${reason}`);
+                return false;
+              }
             }
             // A single-service migration qualifies the exact deployed code. A
             // multi-service update first finishes its shared Git publication.
             if (targets.length !== 1 || !await migrate(targets[0], 0)) {
-              await executeGroup(run, targets, results, progress);
+              try {
+                await executeGroup(run, targets, results, progress);
+              } catch (error) {
+                // After a failed preparation, Caddy can still qualify the active commit.
+                // A publication in an uncertain state must be resolved before another Git write.
+                if (targets.length > 1 && failureStage(results, error) === "failed") {
+                  for (const [index, target] of targets.entries()) if (await migrate(target, index)) {
+                    results[index].warnings.push("La maintenance npm du groupe n’a pas abouti. L’image statique a été vérifiée séparément.");
+                  }
+                }
+                throw error;
+              }
               if (targets.length > 1) for (const [index, target] of targets.entries()) await migrate(target, index);
             }
           }
@@ -857,7 +891,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
           const reason = error instanceof ApiError ? error.message : "Le traitement de ce groupe a échoué. Les informations de récupération sont conservées.";
           const blocked = error instanceof SecurityPolicyError && stage === "failed" ? results.filter(result => result.checks?.findLast(check => check.tool === error.check.tool)?.status === "blocked") : [];
           for (const [index, result] of results.entries()) {
-            if (result.stage === "completed" && !result.checks?.some(check => check.status === "blocked")) continue;
+            // Final security checks already mark the failing result. Earlier candidate refusals are history.
+            if (result.stage === "completed") continue;
             result.stage = stage;
             if (error instanceof NodePreparationError) {
               const root = targets[index].root;

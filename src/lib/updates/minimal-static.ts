@@ -68,7 +68,8 @@ export function minimalStaticCaddyCandidate(source: string, release: { version: 
   // The original build came from Caddy development. Never test a release older than the stable version at migration.
   const newer = pins.caddy ? gt(release.version, pins.caddy.version) : gte(release.version, "2.11.9");
   if (!newer || release.version.split(".")[0] !== "2") return;
-  return { version: release.version, recipe: minimalStaticRecipe(pins.node, pins.digest, { version: release.version, digest: release.linuxAmd64Digest }) };
+  const caddy = { version: release.version, digest: release.linuxAmd64Digest };
+  return { ...caddy, recipe: minimalStaticRecipe(pins.node, pins.digest, caddy) };
 }
 
 const bundleDockerfile = `FROM scratch

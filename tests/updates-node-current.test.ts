@@ -22,6 +22,16 @@ function receipt(): NodeValidationReceipt {
 const catalog = (etag = entry.etag, date = modified) => new Response(null, { status: 200, headers: { etag, "last-modified": date } });
 const changed: SecurityFinding = { id: "NEW-ADVISORY", aliases: [], package: "is-number", version: "7.0.0", severity: "high", scope: "backend" };
 
+test("Image statique Railway : preuve de construction réutilisable uniquement pour le digest exact", () => {
+  const original = receipt();
+  const proof = { ...original.deployments[0], version: key.nodeVersion, source: "railway-static" as const, usage: "build" as const };
+  const saved = reusableNodeReceipt({ ...original, deployments: [proof] }, key, startedAt + 1000);
+  assert.ok(saved);
+  assert.equal(sameNodeReceiptProof(saved, target.id, proof), true);
+  assert.equal(sameNodeReceiptProof(saved, target.id, { ...proof, imageDigest: "sha256:" + sha }), false);
+  assert.equal(sameNodeReceiptProof(saved, target.id, { ...proof, source: "railpack" }), false);
+});
+
 test("Configuration actuelle : preuve récente exacte, source entière, cible et politique ; expiration non prolongée", () => {
   const saved = receipt();
   assert.deepEqual(reusableNodeReceipt(saved, key, startedAt + 60_000), saved);

@@ -6,8 +6,6 @@ import { agentPlan, withLocalWordPressAgent } from "./wordpress-agent";
 import { checkWordPressRequirements } from "./wordpress-security";
 import { freeWordPressScanner } from "./wordpress-free-security";
 import { requireSecurityPass, securityCheck } from "./security";
-import { checkPublicSite } from "./providers";
-import { collectHostingInventories } from "../hosting-inventory";
 import { hostingInstallation } from "../hosting-discovery";
 import { refreshWordPressWeb } from "./wordpress-web-check";
 import { wordpressMaintenanceCheck, recordWordPressManualUpdates, wordpressCompletionMessage } from "./wordpress-maintenance";
