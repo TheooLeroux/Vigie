@@ -52,6 +52,6 @@ if __name__ == "__main__":
     parser.add_argument("folder", type=pathlib.Path)
     parser.add_argument("destination", type=pathlib.Path)
     parser.add_argument("sources", nargs="+")
-    parser.add_argument("--database", action="append")
+    parser.add_argument("--database", action="append", required=True)
     args = parser.parse_args()
-    pack(args.folder, args.destination, args.sources, args.database or ["database.dump"])
+    pack(args.folder, args.destination, args.sources, args.database)

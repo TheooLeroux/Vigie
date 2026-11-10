@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { database, get } from "./db";
 import { ApiError } from "./http";
 import { authDatabase, isPostgres } from "./storage";
-import { backupDirectory, backupLeaseMs, backupStores, type BackupStore } from "./backup-store";
+import { backupDirectory, backupLeaseMs, backupStores, hashBackupStream, type BackupStore } from "./backup-store";
 import type { Project } from "./types";
 
 type BackupRow = {
@@ -136,15 +136,19 @@ function archiveFilename(name: string, createdAt: string) {
   return `${slug}-${createdAt.slice(0, 10)}.zip`;
 }
 
+const readyBackups = `
+  SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name
+  FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
+  WHERE b.state='ready' AND (b.source_name IS NOT NULL OR p.id IS NOT NULL)
+`;
+type DownloadableBackup = BackupRow & { project_name: string };
+
 export async function listBackups(): Promise<BackupGroup[]> {
   const { byId } = backupStores();
   if (!byId.size) return [];
-  const rows = await backupDatabase().prepare(`
-    SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name
-    FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
-    WHERE b.state='ready' AND (b.source_name IS NOT NULL OR p.id IS NOT NULL)
+  const rows = await backupDatabase().prepare(`${readyBackups}
     ORDER BY project_name, b.created_at DESC, b.slot DESC
-  `).all() as (BackupRow & { project_name: string })[];
+  `).all() as DownloadableBackup[];
   const groups = new Map<string, BackupGroup>();
   for (const row of rows) {
     const store = byId.get(row.storage_id);
@@ -160,11 +164,7 @@ export async function downloadBackup(id: string) {
   const { byId } = backupStores();
   const missing = () => new ApiError("Sauvegarde introuvable.", 404);
   if (!byId.size) throw missing();
-  const row = await backupDatabase().prepare(`
-    SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name
-    FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
-    WHERE b.id=? AND b.state='ready' AND (b.source_name IS NOT NULL OR p.id IS NOT NULL)
-  `).get(id) as (BackupRow & { project_name: string }) | undefined;
+  const row = await backupDatabase().prepare(readyBackups + " AND b.id=?").get(id) as DownloadableBackup | undefined;
   if (!row) throw missing();
   const response = await byId.get(row.storage_id)?.download(row, archiveFilename(row.project_name, row.created_at));
   if (!response) throw missing();
@@ -232,19 +232,11 @@ export async function verifyBackupRoundtrip(collectVerifiedZip: (folder: string,
       if (!url) throw new Error("Lien de téléchargement R2 indisponible.");
       const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10 * 60_000) }).catch(() => null);
       if (!response?.ok || !response.body) throw new Error("Téléchargement R2 de vérification en échec.");
-      const digest = createHash("sha256");
-      let bytes = 0;
-      try {
-        for await (const chunk of response.body) {
-          bytes += chunk.byteLength;
-          if (bytes > info.size) throw new Error();
-          digest.update(chunk);
-        }
-      } catch {
+      const check = await hashBackupStream(response.body, info.size).catch(() => {
         throw new Error("Lecture du ZIP R2 de vérification interrompue.");
-      }
-      if (bytes !== info.size || digest.digest("hex") !== sha256) throw new Error("Empreinte du ZIP téléchargé incohérente.");
-      return bytes;
+      });
+      if (check.bytes !== info.size || check.digest !== sha256) throw new Error("Empreinte du ZIP téléchargé incohérente.");
+      return check.bytes;
     } finally {
       await remote.remove(owner);
       await db.prepare("DELETE FROM backup_pending_uploads WHERE owner=?").run(owner);

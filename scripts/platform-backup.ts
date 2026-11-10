@@ -11,6 +11,7 @@ type GitSource = {
   transport: "ssh" | "https" | "github-app";
   directory?: string;
   checkout?: boolean;
+  accessToken?: string;
 };
 export type BackupDatabase = {
   file: string;
@@ -39,16 +40,15 @@ export type BackupProfile<T extends BackupService> = {
 };
 
 export async function archiveSources(folder: string, services: BackupService[], source: GitSource, index = 0) {
-  const commits = new Set<string>();
+  const commits = new Map<string, BackupService[]>();
   for (const service of services) {
-    if (!service.commit) {
-      if (service.repository) throw new Error("Commit déployé manquant pour un service Git.");
-      continue;
-    }
+    if (!service.commit) throw new Error("Commit déployé manquant pour un service Git.");
     if (!/^[0-9a-f]{40}$/.test(service.commit) || service.repository !== source.repository || service.root === null) {
       throw new Error("Source Git différente du périmètre qualifié.");
     }
-    commits.add(service.commit);
+    const deployed = commits.get(service.commit);
+    if (deployed) deployed.push(service);
+    else commits.set(service.commit, [service]);
   }
   if (!commits.size) throw new Error("Aucune source Git de production vérifiable.");
 
@@ -59,14 +59,14 @@ export async function archiveSources(folder: string, services: BackupService[], 
   if (!source.checkout && !source.directory) await git(["init", "--bare"]);
   const remote = (source.transport === "ssh" ? "ssh://git@github.com/" : "https://github.com/") + source.repository + ".git";
   const archives: Record<string, string> = {};
-  for (const commit of commits) {
+  let fetchEnvironment: NodeJS.ProcessEnv | undefined;
+  for (const [commit, deployed] of commits) {
     const local = (await git(["rev-parse", "--verify", "--quiet", commit + "^{commit}"], [0, 1])).trim();
     if (local && local !== commit) throw new Error("La référence Git ne désigne pas un commit.");
     if (!local && !source.directory) {
-      let env: NodeJS.ProcessEnv | undefined;
-      if (source.transport === "github-app") {
-        const token = await githubBackupToken(source.repository);
-        env = {
+      if (source.transport === "github-app" && !fetchEnvironment) {
+        const token = source.accessToken ?? await githubBackupToken(source.repository);
+        fetchEnvironment = {
           NODE_ENV: "production", PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, WINDIR: process.env.WINDIR,
           GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
           GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "http.followRedirects", GIT_CONFIG_VALUE_0: "false",
@@ -74,12 +74,11 @@ export async function archiveSources(folder: string, services: BackupService[], 
           GIT_CONFIG_VALUE_1: "Authorization: Basic " + Buffer.from("x-access-token:" + token).toString("base64"),
         };
       }
-      await git(["fetch", "--quiet", "--no-tags", "--depth=1", remote, commit], undefined, env);
+      await git(["fetch", "--quiet", "--no-tags", "--depth=1", remote, commit], undefined, fetchEnvironment);
     }
     if ((await git(["rev-parse", "--verify", commit + "^{commit}"])).trim() !== commit) {
       throw new Error("Commit de production introuvable.");
     }
-    const deployed = services.filter(service => service.commit === commit);
     for (const service of deployed) {
       const root = (service.root ?? "").replace(/^\/+|\/+$/g, "");
       if (/[\\\x00-\x1f]/.test(root) || root.split("/").some(part => part === ".." || part === ".")) {

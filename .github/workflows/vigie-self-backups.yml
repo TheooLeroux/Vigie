@@ -38,18 +38,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Préparer le client PostgreSQL 18
         shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! -x /usr/lib/postgresql/18/bin/pg_dump ]]; then
-            if ! apt-cache show postgresql-client-18 >/dev/null 2>&1; then
-              sudo install -d /usr/share/postgresql-common/pgdg
-              curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
-              printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/vigie-pgdg.list >/dev/null
-              sudo apt-get update -qq
-            fi
-            sudo apt-get install -y --no-install-recommends postgresql-client-18
-          fi
-          printf '%s\n' /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+        run: bash scripts/prepare-backup-postgres.sh 18
       - name: Sauvegarder Vigie et sa base Neon
         env:
           DATABASE_URL: ${{ secrets.VIGIE_SELF_CATALOG_DATABASE_URL }}

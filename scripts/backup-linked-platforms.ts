@@ -1,34 +1,18 @@
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { z } from "zod";
 import { postgresPool, isPostgres } from "../src/lib/storage";
-import type { RailwayProject } from "../src/lib/railway-types";
 import { githubBackupToken } from "./backup-github-app";
 import { inspectLinkedRailway } from "./backup-railway-linked";
 import { inspectLinkedVercel } from "./backup-vercel-linked";
 import { assertPlatformBackupLink } from "./check-platform-backup-link";
 import { runPlatformBackup } from "./platform-backup";
-import { platformBackupTargets } from "./platform-backup-targets";
-
-type Target = {
-  provider: "railway" | "vercel";
-  remoteId: string;
-  connectionId: string;
-  projectId: string;
-  name: string;
-  remote: RailwayProject;
-};
+import { platformBackupInventory } from "./platform-backup-inventory";
 
 async function linkedTargets(projectId?: string) {
-  const { rows } = await postgresPool().query<Target>(`
-    SELECT provider, remote_id AS "remoteId", connection_id AS "connectionId",
-      project_id AS "projectId", project_name AS name, remote
-    FROM backup_platform_inventory
-    WHERE configured AND active AND NOT connection_error AND missing_since IS NULL
-      AND (provider = 'railway' OR COALESCE(remote->>'excluded', 'false') = 'false')
-      AND ($1::text IS NULL OR project_id = $1)
-    ORDER BY provider, remote_id, connection_id
-  `, [projectId ?? null]);
-  return rows.filter(row => !platformBackupTargets.some(pilot => pilot.provider === row.provider && pilot.remoteId === row.remoteId));
+  return (await platformBackupInventory()).flatMap(({ row, pilot, outOfScope, blocked }) =>
+    !pilot && !outOfScope && !blocked && row.projectId && (!projectId || row.projectId === projectId)
+      ? [{ ...row, projectId: row.projectId, name: row.projectName ?? row.remote.name }]
+      : []);
 }
 
 async function main(args: string[]) {
@@ -47,11 +31,13 @@ async function main(args: string[]) {
       : inspectLinkedVercel(target.connectionId, target.remoteId);
     let startingCapture = false;
     try {
-      await assertPlatformBackupLink(target);
+      if (mode !== "plan") await assertPlatformBackupLink(target);
       const first = await inspect();
       const repositories = [...new Set(first.services.flatMap(service => service.repository ? [service.repository] : []))];
-      for (const repository of repositories) await githubBackupToken(repository);
       if (!repositories.length) throw new Error("Aucune source Git de production couverte.");
+      const git = await Promise.all(repositories.map(async repository => ({
+        repository, transport: "github-app" as const, accessToken: await githubBackupToken(repository),
+      })));
       if (mode === "plan" && target.provider === "railway") {
         if (!process.env.VIGIE_BACKUP_RAILWAY_KNOWN_HOST) throw new Error("Clé d’hôte Railway SSH approuvée manquante.");
       } else if (!first.databases.length) {
@@ -72,7 +58,7 @@ async function main(args: string[]) {
           if (!isDeepStrictEqual(first.services, current.services)) throw new Error("Le périmètre de production a changé.");
           return first.services;
         },
-        git: repositories.map(repository => ({ repository, transport: "github-app" })),
+        git,
         databases: first.databases,
         manifest: (services, sources, databases) => ({
           format: "vigie.linked-platform-backup", version: 1, provider: target.provider, remoteId: target.remoteId,

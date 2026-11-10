@@ -92,12 +92,13 @@ function localStore(directory: string): BackupStore {
   };
 }
 
-async function sha256(stream: AsyncIterable<Uint8Array>) {
+export async function hashBackupStream(stream: AsyncIterable<Uint8Array>, maxBytes: number) {
   const hash = createHash("sha256");
   let bytes = 0;
   for await (const chunk of stream) {
     hash.update(chunk);
     bytes += chunk.byteLength;
+    if (bytes > maxBytes) throw new Error("Le flux dépasse la taille attendue du ZIP.");
   }
   return { bytes, digest: hash.digest("hex") };
 }
@@ -144,7 +145,7 @@ function objectStore(): BackupStore | undefined {
       const timer = setTimeout(() => deadline.abort(), 90 * 60_000);
       let body: Readable | undefined;
       try {
-        const source = await sha256(createReadStream(path, { signal: deadline.signal }));
+        const source = await hashBackupStream(createReadStream(path, { signal: deadline.signal }), bytes);
         if (source.bytes !== bytes) throw new Error("Le ZIP local a changé.");
         body = createReadStream(path, { signal: deadline.signal });
         await new Upload({
@@ -161,7 +162,7 @@ function objectStore(): BackupStore | undefined {
           stored.Body.destroy();
           throw new Error("Métadonnées du ZIP incohérentes.");
         }
-        const check = await sha256(addAbortSignal(deadline.signal, stored.Body));
+        const check = await hashBackupStream(addAbortSignal(deadline.signal, stored.Body), bytes);
         if (check.bytes !== bytes || check.digest !== source.digest) throw new Error("Empreinte du ZIP stocké incohérente.");
         return source.digest;
       } catch {

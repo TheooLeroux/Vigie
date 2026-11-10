@@ -12,7 +12,7 @@
     "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts",
     "backups:tick": "tsx --env-file-if-exists=.env.local scripts/backup-worker.ts",
     "backups:plan": "tsx --env-file-if-exists=.env.local scripts/plan-platform-backups.ts",
-    "backups:discover": "tsx --env-file-if-exists=.env.local scripts/discover-platform-backups.ts"
+    "backups:discover": "tsx --env-file-if-exists=.env.local scripts/backup-linked-platforms.ts --mode plan"
   },
   "engines": {
     "node": "24.22.2"
