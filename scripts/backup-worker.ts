@@ -13,6 +13,7 @@ import { cleanupAbandonedBackupUploads, runBackup } from "../src/lib/backups";
 import { backupLeaseMs } from "../src/lib/backup-store";
 import { runCommand } from "../src/lib/updates/process";
 import { shellQuote } from "../src/lib/updates/wordpress";
+import { allowBackupSsh } from "./backup-o2switch-firewall";
 
 const maxCaptureBytes = 20 * 1024 ** 3;
 type Operation = "preflight" | "database" | "files";
@@ -189,60 +190,82 @@ async function main(args: string[]) {
       process.exitCode = 1;
     }
   }
-  for (const site of targets) {
-    const account = accounts.get(site.connectionId)!;
-    const domain = site.domains.find(name => z.hostname().safeParse(name).success)?.toLowerCase();
-    const label = domain || site.id;
-    let release: (() => Promise<unknown>) | null = null;
-    try {
-      const root = site.documentRoot;
-      const host = new URL(account.endpoint).hostname;
-      const base = "/home/" + account.username + "/";
-      if (!domain || !/^[a-z0-9.-]+\.o2switch\.net$/i.test(host) || !/^[\w-]+$/.test(account.username) ||
-          !root.startsWith(base) || root.length <= base.length || /[\x00-\x1f]/.test(root)) {
-        throw new Error("Domaine, compte ou racine o2switch non reconnu.");
+  const firewallLeases = new Map<string, Promise<() => Promise<void>>>();
+  try {
+    for (const site of targets) {
+      const account = accounts.get(site.connectionId)!;
+      const domain = site.domains.find(name => z.hostname().safeParse(name).success)?.toLowerCase();
+      const label = domain || site.id;
+      let release: (() => Promise<unknown>) | null = null;
+      try {
+        const root = site.documentRoot;
+        const host = new URL(account.endpoint).hostname;
+        const base = "/home/" + account.username + "/";
+        if (!domain || !/^[a-z0-9.-]+\.o2switch\.net$/i.test(host) || !/^[\w-]+$/.test(account.username) ||
+            !root.startsWith(base) || root.length <= base.length || /[\x00-\x1f]/.test(root)) {
+          throw new Error("Domaine, compte ou racine o2switch non reconnu.");
+        }
+        if (installations.some(other => other.connectionId === site.connectionId && !other.missingSince &&
+            other.documentRoot.startsWith(root + "/"))) {
+          throw new Error("La racine contient une autre installation de l’inventaire.");
+        }
+        const wordpress = site.kind === "wordpress";
+        if (!wordpress && site.kind !== "static" && site.kind !== "next-static") {
+          const message = "Collecte des fichiers et de la base à qualifier pour ce type de site (" + site.kind + ").";
+          if (requestedDomain) throw new Error(message);
+          console.warn("Sauvegarde non couverte pour " + label + ". " + message);
+          continue;
+        }
+        if (plan) {
+          console.log(JSON.stringify({ site: domain, type: site.kind, projectLinked: Boolean(site.projectId) }));
+          continue;
+        }
+        if (process.env.VIGIE_BACKUP_MANAGE_FIREWALL === "1") {
+          const lease = firewallLeases.get(account.id) ?? allowBackupSsh(account.id, host, account.username);
+          firewallLeases.set(account.id, lease);
+          await lease;
+        }
+        const ssh = { host, username: account.username };
+        const aliases = [...new Set([...site.domains, ...site.aliases].map(name => name.toLowerCase()))]
+          .filter(name => name !== domain && z.hostname().safeParse(name).success);
+        if (preflight) {
+          const report = await inspectSite(ssh, wordpress
+            ? wordpressCaptureScript(root, domain, "preflight", aliases)
+            : staticCaptureScript(root, "preflight"));
+          console.log(JSON.stringify({ site: domain, ...report }));
+          continue;
+        }
+        release = await claimHostingObservation("backup:o2switch:" + account.id, backupLeaseMs);
+        if (!release) continue;
+        const saved = await runBackup({ installationId: site.id, projectId: site.projectId, domain }, async (folder, zip) => {
+          const files = join(folder, "files.tar.gz");
+          const database = wordpress ? join(folder, "database.sql") : "-";
+          const download = (script: string, path: string, limit: number) => transferOverSsh(ssh, script,
+            () => createWriteStream(path, { mode: 0o600, flags: "wx" }), limit, 40 * 60_000);
+          const sqlBytes = wordpress ? await download(wordpressCaptureScript(root, domain, "database", aliases), database, maxCaptureBytes) : 0;
+          await download(wordpress ? wordpressCaptureScript(root, domain, "files", aliases) : staticCaptureScript(root, "files"),
+            files, maxCaptureBytes - sqlBytes);
+          await runCommand(process.env.VIGIE_BACKUP_PYTHON || (process.platform === "win32" ? "python" : "python3"),
+            ["scripts/pack-site-backup.py", files, database, zip, site.projectId || "-", domain], { timeout: 30 * 60_000 });
+        });
+        if (saved) console.log("ZIP vérifié pour " + domain + ".");
+      } catch (error) {
+        console.error("Sauvegarde " + label + " en échec.", error instanceof Error ? error.message : "");
+        process.exitCode = 1;
+      } finally {
+        await release?.();
       }
-      if (installations.some(other => other.connectionId === site.connectionId && !other.missingSince &&
-          other.documentRoot.startsWith(root + "/"))) {
-        throw new Error("La racine contient une autre installation de l’inventaire.");
-      }
-      const wordpress = site.kind === "wordpress";
-      if (!wordpress && site.kind !== "static" && site.kind !== "next-static") {
-        throw new Error("Collecte des fichiers et de la base à qualifier pour ce type de site (" + site.kind + ").");
-      }
-      if (plan) {
-        console.log(JSON.stringify({ site: domain, type: site.kind, projectLinked: Boolean(site.projectId) }));
-        continue;
-      }
-      const ssh = { host, username: account.username };
-      const aliases = [...new Set([...site.domains, ...site.aliases].map(name => name.toLowerCase()))]
-        .filter(name => name !== domain && z.hostname().safeParse(name).success);
-      if (preflight) {
-        const report = await inspectSite(ssh, wordpress
-          ? wordpressCaptureScript(root, domain, "preflight", aliases)
-          : staticCaptureScript(root, "preflight"));
-        console.log(JSON.stringify({ site: domain, ...report }));
-        continue;
-      }
-      release = await claimHostingObservation("backup:o2switch:" + account.id, backupLeaseMs);
+    }
+  } finally {
+    for (const lease of firewallLeases.values()) {
+      const release = await lease.catch(() => null);
       if (!release) continue;
-      const saved = await runBackup({ installationId: site.id, projectId: site.projectId, domain }, async (folder, zip) => {
-        const files = join(folder, "files.tar.gz");
-        const database = wordpress ? join(folder, "database.sql") : "-";
-        const download = (script: string, path: string, limit: number) => transferOverSsh(ssh, script,
-          () => createWriteStream(path, { mode: 0o600, flags: "wx" }), limit, 40 * 60_000);
-        const sqlBytes = wordpress ? await download(wordpressCaptureScript(root, domain, "database", aliases), database, maxCaptureBytes) : 0;
-        await download(wordpress ? wordpressCaptureScript(root, domain, "files", aliases) : staticCaptureScript(root, "files"),
-          files, maxCaptureBytes - sqlBytes);
-        await runCommand(process.env.VIGIE_BACKUP_PYTHON || (process.platform === "win32" ? "python" : "python3"),
-          ["scripts/pack-site-backup.py", files, database, zip, site.projectId || "-", domain], { timeout: 30 * 60_000 });
-      });
-      if (saved) console.log("ZIP vérifié pour " + domain + ".");
-    } catch (error) {
-      console.error("Sauvegarde " + label + " en échec.", error instanceof Error ? error.message : "");
-      process.exitCode = 1;
-    } finally {
-      await release?.();
+      try {
+        await release();
+      } catch {
+        console.error("Nettoyage du pare-feu o2switch en échec.");
+        process.exitCode = 1;
+      }
     }
   }
 }

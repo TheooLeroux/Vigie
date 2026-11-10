@@ -1,0 +1,75 @@
+name: Vigie backups
+
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Domaine à vérifier
+        type: string
+        default: nes-proworking.fr
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigie-backups
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: vigie-backups
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Configurer SSH et vérifier le site
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_BACKUP_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_BACKUP_CONNECTOR_KEY }}
+          VIGIE_BACKUP_S3_BUCKET: ${{ secrets.VIGIE_BACKUP_S3_BUCKET }}
+          VIGIE_BACKUP_S3_ENDPOINT: ${{ secrets.VIGIE_BACKUP_S3_ENDPOINT }}
+          VIGIE_BACKUP_S3_KEY_ID: ${{ secrets.VIGIE_BACKUP_S3_KEY_ID }}
+          VIGIE_BACKUP_S3_REGION: ${{ secrets.VIGIE_BACKUP_S3_REGION }}
+          VIGIE_BACKUP_S3_SECRET: ${{ secrets.VIGIE_BACKUP_S3_SECRET }}
+          VIGIE_BACKUP_MANAGE_FIREWALL: '1'
+          SSH_CANARY: ${{ secrets.VIGIE_BACKUP_SSH_CANARY }}
+          SSH_GAZ: ${{ secrets.VIGIE_BACKUP_SSH_GAZ }}
+          SSH_KNOWN_HOSTS: ${{ vars.VIGIE_BACKUP_KNOWN_HOSTS }}
+          SITE: ${{ inputs.site }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private=$(mktemp -d)
+          trap 'if mountpoint -q "$private"; then sudo umount "$private"; fi; rmdir "$private"' EXIT
+          sudo mount -t tmpfs -o "noswap,nodev,nosuid,noexec,mode=0700,uid=$(id -u),gid=$(id -g),size=10G" tmpfs "$private"
+          ssh_dir="$private/ssh"
+          scratch="$private/scratch"
+          mkdir "$ssh_dir" "$scratch"
+          printf '%s\n' "$SSH_CANARY" > "$ssh_dir/canary"
+          printf '%s\n' "$SSH_GAZ" > "$ssh_dir/gaz"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          cat > "$ssh_dir/config" <<EOF
+          Host canary.o2switch.net
+            IdentityFile "$ssh_dir/canary"
+          Host gaz.o2switch.net
+            IdentityFile "$ssh_dir/gaz"
+          Host *
+            IdentitiesOnly yes
+            AddressFamily inet
+            HostKeyAlgorithms ssh-ed25519
+            UserKnownHostsFile "$ssh_dir/known_hosts"
+            GlobalKnownHostsFile /dev/null
+          EOF
+          unset SSH_CANARY SSH_GAZ SSH_KNOWN_HOSTS
+          export VIGIE_BACKUP_SSH_CONFIG="$ssh_dir/config"
+          export VIGIE_BACKUP_SCRATCH_DIRECTORY="$scratch"
+          node --import tsx scripts/backup-worker.ts --preflight --site "$SITE"
