@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ApiError } from "../http";
 import { hostingStorage } from "../hosting-storage";
 import { severity } from "./security";
-import { compareWordPressVersions, wordpressPlanSchema, type WordPressUpdatePlan } from "./wordpress-security";
+import { compareWordPressVersions, wordpressPlanSchema, wordpressPluginSlug, type WordPressUpdatePlan } from "./wordpress-security";
 import type { SecurityFinding } from "./types";
 
 const numeric = /^\d+(?:\.\d+){0,7}$/;
@@ -88,6 +88,18 @@ export function selectCompatibleWordPressUpdates(raw: WordPressUpdatePlan) {
   return plan;
 }
 
+export async function closedWordPressPlugin(slug: string, transport: typeof fetch = fetch) {
+  if (!wordpressPluginSlug.safeParse(slug).success) return false;
+  const url = new URL("https://api.wordpress.org/plugins/info/1.2/");
+  url.search = new URLSearchParams({ action: "plugin_information", "request[slug]": slug }).toString();
+  try {
+    const response = await transport(url, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(8000) });
+    if (response.status !== 404) return false;
+    const data = z.object({ slug: z.literal(slug), error: z.literal("closed"), closed: z.literal(true) }).safeParse(await response.json());
+    return data.success;
+  } catch { return false; }
+}
+
 /** Public CC0 data, no account/key; cache across sites for one hour to limit service load. */
 export function freeWordPressScanner(transport: typeof fetch = fetch, options: { persistentCache?: boolean } = {}) {
   const cache = new Map<string, Advisory>(), warnings: string[] = [];
@@ -124,10 +136,11 @@ export function freeWordPressScanner(transport: typeof fetch = fetch, options: {
       if (item.officialOffer) continue;
       const report = await load("plugin", item.slug);
       let publicPackage = false;
-      try { const url = new URL(report.data.link || ""); publicPackage = ["wordpress.org", "www.wordpress.org"].includes(url.hostname) && url.pathname.replace(/\/+$/, "") === `/plugins/${item.slug}`; } catch {}
+      try { const url = new URL(report.data.link || ""); publicPackage = url.protocol === "https:" && ["wordpress.org", "www.wordpress.org"].includes(url.hostname) && url.pathname.replace(/\/+$/, "") === `/plugins/${item.slug}`; } catch {}
+      if (publicPackage && report.data.plugin === item.slug && report.data.closed === 1) item.closed = true;
       if (!report.data.name || report.data.closed === 1 || !publicPackage) {
         item.target = item.current;
-        item.manualReason ||= "Catalogue privé, non identifié ou fermé ; téléchargement automatique non qualifié.";
+        item.manualReason ||= item.closed ? "Cette extension est fermée sur WordPress.org. Aucun téléchargement officiel disponible." : "Catalogue privé ou non identifié ; téléchargement automatique non qualifié.";
         warn(`${item.slug} : catalogue privé, non identifié ou fermé ; extension conservée, couverture de sécurité limitée.`);
       }
     }

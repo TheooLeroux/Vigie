@@ -888,7 +888,8 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       requireZeroFinalFindings(run.results);
       run.stage = "completed";
       const manualCount = run.results.reduce((count, result) => count + (result.manualUpdates?.length || 0), 0);
-      run.message = manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
+      const wordpressNoChanges = run.results.length > 0 && run.results.every(result => result.wordpressNoChanges);
+      run.message = wordpressNoChanges ? `Aucune mise à jour automatique applicable.${manualCount ? ` ${manualCount} composant(s) restent à traiter manuellement.` : ""}` : manualCount ? `Mises à jour automatiques terminées. ${manualCount} composant(s) restent à traiter manuellement ; consultez les interventions restantes.` : run.results.some(result => result.warnings.length || result.checks?.some(check => check.status === "warning")) ? "Mise à jour terminée avec réserves. Consultez les contrôles dans les détails." : "Mise à jour terminée et déploiement vérifié.";
       const pendingNodes = run.results.filter(result => result.managedNode?.updatePending).length;
       if (pendingNodes) run.message = `Maintenance des dépendances terminée avec réserves. ${pendingNodes} runtime(s) Node restent à actualiser chez Vercel.${manualCount ? ` ${manualCount} autre(s) composant(s) restent à traiter manuellement.` : ""} Le site n’est pas déclaré entièrement corrigé.`;
       const imageFindings = run.results.reduce((count, result) => count + (result.imageUpdate?.remainingFindings || 0), 0);

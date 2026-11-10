@@ -51,7 +51,13 @@ export type UpdateCheck = {
   debianUpgrades?: { package: string; from: string; to: string }[];
   wordpressRetained?: { package: string; version: string }[];
 };
-export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string };
+export type WordPressLicense = { component: "wp-rocket" | "Divi"; status: "active" | "expired" | "disconnected" | "unknown" };
+export type WordPressMaintenanceSettings = {
+  targetId: string;
+  licenses?: { checkedAt: string; items: WordPressLicense[] };
+  removablePlugins: { slug: string; allowed: boolean; listedAsClosed: boolean }[];
+};
+export type WordPressManualUpdate = { package: string; version: string; target?: string; reason: string; action: string; closed?: true };
 export type ManagedNode = { provider: "vercel"; version: string; latestLts: string; branchLatest?: string; migrationAvailable?: boolean; updatePending: boolean; securityUpdate: boolean | null; checkedAt: string };
 export type UpdateResult = {
   assessment?: { changes: string[]; limitation?: string; sourceCommit?: string };
@@ -67,6 +73,9 @@ export type UpdateResult = {
   warnings: string[];
   checks?: UpdateCheck[];
   manualUpdates?: WordPressManualUpdate[];
+  wordpressLicenses?: WordPressMaintenanceSettings["licenses"];
+  removedWordPressPlugins?: string[];
+  wordpressNoChanges?: true;
   managedNode?: ManagedNode;
   imageUpdate?: { channel: string; previous: string; candidate: string; digest: string; remainingFindings: number; state: "ephemeral-socks"; previousDevice?: string; verified?: { deploymentId: string; digest: string; version: string; device: string }; networkChecks?: import("./socks-health").SocksHealthProof[]; rollbackDeploymentId?: string };
 };
@@ -100,13 +109,15 @@ export type UpdateState = {
   railpackImageReports?: import("./railpack-image-report").RailpackImageReport[];
   assessment?: UpdateRun | null;
   automaticControls?: import("../automatic-control-state").AutomaticControl[];
-  currentSecurity?: { targetId: string; versions: string; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string; securityCoverage?: import("../automatic-control-state").SecurityCoverageDetails }[];
+  wordpressSettings?: WordPressMaintenanceSettings[];
+  currentSecurity?: { targetId: string; versions: string; closedPlugins?: string[]; check?: UpdateCheck; warnings: string[]; manualUpdates?: WordPressManualUpdate[]; error?: string; securityCoverage?: import("../automatic-control-state").SecurityCoverageDetails }[];
   enabled: boolean;
   disabledReason?: string;
   targets: UpdateTarget[];
   runs: UpdateRun[];
 };
 export type SourceSettings = {
+  wordpressAutoRemoval?: { projectId: string; root: string; slugs: string[] };
   agentInstallation?: {
     requestId: string;
     root: string;

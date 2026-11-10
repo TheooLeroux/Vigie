@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { ApiError } from "../http";
 import { z } from "zod";
 
-export const wordpressAgentPackageVersion = "wordpress-official-v7";
+export const wordpressAgentPackageVersion = "wordpress-official-v8";
+const previousV7: Record<string, string> = {
+  "agent.php": "5d5600f44a896784e1b433ad4ab380ce040dcd09091f3f5f6a20b39288b30f88",
+  "plan.php": "2f92d58a9365aa127b64349cae5431b5a7fa4c5351ae435f2b9d6e75c09f3f5f",
+};
 const previousV6: Record<string, string> = {
   "agent.php": "5d5600f44a896784e1b433ad4ab380ce040dcd09091f3f5f6a20b39288b30f88",
   "plan.php": "bb87648c0396cb5c522f4ed76e8368a050a3109487f0b0a20518aa3a7b2c754d",
@@ -28,14 +32,14 @@ const configSchema = z.object({ protocol: z.literal("vigie-local-v1"), root: z.s
 
 export function assertManagedAgentFile(name: string, current: string | null, expected: string, config: string, previous: Record<string, string> = {}, previousPhpBinary?: string) {
   if (current === null || current === expected) return;
-  const allowed = (file: string) => [legacyAgentHashes[file], legacyAgentV2[file], previousV5[file], previousV6[file], previous[file], file === name ? agentFileHash(expected) : undefined].filter(Boolean);
+  const allowed = (file: string) => [legacyAgentHashes[file], legacyAgentV2[file], previousV5[file], previousV6[file], previousV7[file], previous[file], file === name ? agentFileHash(expected) : undefined].filter(Boolean);
   if (name === "config.json") {
     try {
       const old = configSchema.parse(JSON.parse(current)), next = configSchema.parse(JSON.parse(config));
       const knownWorker = [legacyAgentHashes["agent.php"], previous["agent.php"], next.workerSha256].includes(old.workerSha256);
       const knownPlan = [legacyAgentHashes["plan.php"], previous["plan.php"], next.planSha256].includes(old.planSha256);
       const knownV2 = old.workerSha256 === legacyAgentV2["agent.php"] && old.planSha256 === legacyAgentV2["plan.php"];
-      const knownPrevious = [previousV5, previousV6].some(bundle => old.workerSha256 === bundle["agent.php"] && old.planSha256 === bundle["plan.php"]);
+      const knownPrevious = [previousV5, previousV6, previousV7].some(bundle => old.workerSha256 === bundle["agent.php"] && old.planSha256 === bundle["plan.php"]);
       if (old.protocol === next.protocol && old.root === next.root && old.secret === next.secret && [next.phpBinary, previousPhpBinary].includes(old.phpBinary) && old.wpBinary === next.wpBinary && old.environment === next.environment && (knownV2 || knownPrevious || knownWorker && knownPlan)) return;
     } catch { /* Fail closed without exposing remote contents or keys. */ }
   } else if (current.replace(/\r\n/g, "\n") === expected || allowed(name).includes(agentFileHash(current))) return;

@@ -8,6 +8,7 @@ import { hostingInstallation } from "../hosting-discovery";
 import type { HostingConnection } from "../types";
 import type { UpdateTarget } from "./types";
 import { readUpdateSource } from "./storage";
+import { allowedWordPressRemovals } from "./wordpress-maintenance";
 import { wordpressPlanPhp, wordpressPlanSchema, type WordPressUpdatePlan } from "./wordpress-security";
 import { wordpressAgentPackageVersion, agentFileHash, assertManagedAgentFile } from "./wordpress-agent-package";
 import { database, transaction } from "../db";
@@ -234,7 +235,7 @@ export async function localAgentOperation(files: AgentFiles, settings: LocalAgen
   }
   throw new ApiError("L’agent local ne confirme pas la fin de l’opération. Ne relancez pas : vérifiez son suivi et les sauvegardes.", 504);
 }
-export async function withLocalWordPressAgent<T>(target: UpdateTarget, callback: (operation: (runId: string, name: AgentOperation, extra?: { plan?: WordPressUpdatePlan; webPhp?: string; confirmDataLoss?: boolean }) => Promise<Record<string, unknown>>, settings: LocalAgentSettings) => Promise<T>) {
+export async function withLocalWordPressAgent<T>(target: UpdateTarget, callback: (operation: (runId: string, name: AgentOperation, extra?: { plan?: WordPressUpdatePlan; webPhp?: string; confirmDataLoss?: boolean }) => Promise<Record<string, unknown>>, settings: LocalAgentSettings, allowedRemovals?: string[]) => Promise<T>) {
   const source = await readUpdateSource(target.id);
   const settings = source?.settings.localAgent;
   if (!settings?.ready) throw new ApiError("L’agent local WordPress n’est pas configuré.");
@@ -245,7 +246,7 @@ export async function withLocalWordPressAgent<T>(target: UpdateTarget, callback:
   return withHostingCredentials(target.connectionId, async connection => {
     if (settings.directory !== agentDirectory(target.root, connection.username)) throw new ApiError("Dossier d’agent inattendu.");
     const files = cpanelAgentFiles(connection, settings.directory);
-    return callback((runId, name, extra) => localAgentOperation(files, settings, target.root, runId, name, extra), settings);
+    return callback((runId, name, extra) => localAgentOperation(files, settings, target.root, runId, name, extra), settings, allowedWordPressRemovals(target, source?.settings));
   });
 }
 export function agentPlan(raw: unknown): WordPressUpdatePlan { return wordpressPlanSchema.parse(raw); }

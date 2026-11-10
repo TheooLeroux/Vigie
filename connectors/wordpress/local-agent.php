@@ -76,14 +76,31 @@ function va_validate_plan(array $plan): void {
             $seen[$item['slug']] = true;
         }
     }
+    $removals = $plan['removePlugins'] ?? [];
+    if (!is_array($removals) || !array_is_list($removals) || count($removals) > count($plan['plugins'])) { throw new RuntimeException('invalid_removal'); }
+    $eligible = array_column(array_filter($plan['plugins'], static fn($item) => ($item['closed'] ?? false) === true && $item['current'] === $item['target']), 'slug');
+    $seen = [];
+    foreach ($removals as $slug) {
+        if (!is_string($slug) || !preg_match('/^[a-z0-9_][a-z0-9_-]{0,149}$/iD', $slug) || isset($seen[$slug]) || !in_array($slug, $eligible, true)) { throw new RuntimeException('invalid_removal'); }
+        $seen[$slug] = true;
+    }
+}
+function va_require_removable(array $plan, array $removals): void {
+    $required = $plan['removalDependencies'] ?? [];
+    foreach ($plan['plugins'] as $item) { $required = array_merge($required, $item['requiresPlugins'] ?? []); }
+    if (array_intersect(array_map('strtolower', $required), array_map('strtolower', $removals))) { throw new RuntimeException('plugin_required'); }
 }
 function va_same_versions(array $actual, array $expected, bool $updated): void {
     $field = $updated ? 'target' : 'current';
     if ($actual['wordpress']['current'] !== $expected['wordpress'][$field] || $actual['php'] !== $expected['php']) { throw new RuntimeException('versions_changed'); }
     if (!$updated && $expected['wordpress']['current'] !== $expected['wordpress']['target'] && !empty($actual['wordpress']['manualReason'])) { throw new RuntimeException('component_integrity_changed'); }
     foreach (['plugins', 'themes'] as $kind) {
-        if (count($actual[$kind]) !== count($expected[$kind])) { throw new RuntimeException('components_changed'); }
-        foreach ($expected[$kind] as $item) {
+        $items = $expected[$kind];
+        if ($updated && $kind === 'plugins') {
+            $items = array_filter($items, static fn($item) => !in_array($item['slug'], $expected['removePlugins'] ?? [], true));
+        }
+        if (count($actual[$kind]) !== count($items)) { throw new RuntimeException('components_changed'); }
+        foreach ($items as $item) {
             $match = array_values(array_filter($actual[$kind], static fn($v) => $v['slug'] === $item['slug']));
             if (count($match) !== 1 || $match[0]['current'] !== $item[$field]) { throw new RuntimeException('versions_changed'); }
             if (!$updated && $item['current'] !== $item['target'] &&
@@ -133,7 +150,10 @@ function va_update(array $config, array $job): array {
     $plan = $job['plan'] ?? [];
     va_validate_plan($plan);
     if ($plan['php'] !== PHP_VERSION || ($job['webPhp'] ?? null) !== PHP_VERSION) { throw new RuntimeException('php_mismatch'); }
-    va_same_versions(va_plan($config), $plan, false);
+    $before = va_plan($config);
+    va_same_versions($before, $plan, false);
+    $removals = $plan['removePlugins'] ?? [];
+    va_require_removable($before, $removals);
     va_wp($config, ['maintenance-mode', 'activate']);
     try {
         if ($plan['wordpress']['current'] !== $plan['wordpress']['target']) { va_wp($config, ['core','update','--version='.$plan['wordpress']['target']], 300); }
@@ -143,6 +163,19 @@ function va_update(array $config, array $job): array {
                 if ($item['current'] !== $item['target']) {
                     va_wp($config, ['eval-file', __DIR__.'/plan.php', 'apply-offer', $kind, $item['slug'], $item['target'], $item['officialOffer']['fingerprint']], 300);
                 }
+            }
+        }
+        if ($removals) {
+            // An updated extension may declare a new dependency.
+            va_require_removable(va_plan($config), $removals);
+            $plugins = json_decode(va_wp($config, ['plugin', 'list', '--fields=name,status', '--format=json']), true, 16, JSON_THROW_ON_ERROR);
+            $statuses = array_column($plugins, 'status', 'name');
+            foreach ($removals as $slug) {
+                $status = $statuses[$slug] ?? null;
+                if ($status === 'active') { va_wp($config, ['plugin', 'deactivate', $slug]); }
+                elseif ($status !== 'inactive') { throw new RuntimeException('invalid_removal_status'); }
+                // Delete files without running the plugin's uninstall routine.
+                va_wp($config, ['plugin', 'delete', $slug]);
             }
         }
         if (($plan['wordpress']['integrity'] ?? null) !== 'unverified') { va_wp($config, ['core','verify-checksums']); }

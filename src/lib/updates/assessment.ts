@@ -55,9 +55,10 @@ export function assessmentResultIsSafe(result: UpdateResult) {
     && !result.checks.some(check => check.status === "blocked" && (check.phase !== "candidate" || (finalScans.get(check.tool) || check) === check));
 }
 
-export function wordpressAssessmentChanges(plan: { wordpress: { current: string; target: string }; plugins: { slug: string; current: string; target: string }[]; themes: { slug: string; current: string; target: string }[] }) {
+export function wordpressAssessmentChanges(plan: { removePlugins?: string[]; wordpress: { current: string; target: string }; plugins: { slug: string; current: string; target: string }[]; themes: { slug: string; current: string; target: string }[] }) {
   return [
     ...(plan.wordpress.current !== plan.wordpress.target ? [`WordPress : ${plan.wordpress.current} → ${plan.wordpress.target}`] : []),
     ...[...plan.plugins, ...plan.themes].filter(item => item.current !== item.target).map(item => `${item.slug} : ${item.current} → ${item.target}`),
+    ...(plan.removePlugins || []).map(slug => `Retrait autorisé de ${slug}`),
   ];
 }

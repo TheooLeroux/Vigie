@@ -4,9 +4,9 @@ import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { agentBundle, agentDirectory, localAgentOperation, signAgentPayload, agentPlan, type AgentFiles, type AgentOperation } from "../src/lib/updates/wordpress-agent";
-import { freeWordPressScanner } from "../src/lib/updates/wordpress-free-security";
+import { closedWordPressPlugin, freeWordPressScanner } from "../src/lib/updates/wordpress-free-security";
 import { requireSecurityPass } from "../src/lib/updates/security";
-import { wordpressMaintenanceCheck } from "../src/lib/updates/wordpress-maintenance";
+import { selectWordPressRemovals, wordpressMaintenanceCheck } from "../src/lib/updates/wordpress-maintenance";
 
 async function docker(args: string[], input?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -71,6 +71,20 @@ wp --path=${root} option update siteurl ${url}
     await shell(`mkdir -p ${root}/wp-content/plugins/vigie-private
 printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https://private.invalid/update?token=never-return\n*/\n' > ${root}/wp-content/plugins/vigie-private/main.php
 `);
+    for (const slug of ["vigie-retired", "vigie-retained", "vigie-required", "vigie-dependent"]) {
+      await shell(`mkdir -p ${root}/wp-content/plugins/${slug}`);
+      const dependency = slug === "vigie-dependent" ? "Requires Plugins: vigie-required\n" : "";
+      const plugin = `<?php
+/*
+Plugin Name: ${slug}
+Version: 1.0
+${dependency}*/
+`;
+      await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/plugins/${slug}/main.php`], plugin);
+    }
+    await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/plugins/vigie-retired/uninstall.php`], "<?php delete_option('vigie_retired_data');\n");
+    await shell(`wp --path=${root} plugin activate vigie-retired
+wp --path=${root} option update vigie_retired_data preserved`);
     // Preserve a locally edited public plugin while a different public plugin updates.
     await exec(["sh", "-c", 'printf "\\n// Vigie custom code must survive\\n" >> "$1"', "sh", `${root}/wp-content/plugins/akismet/akismet.php`]);
     const customBefore = await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]);
@@ -111,9 +125,25 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     const saved = await op(run, "backup", { webPhp: php }); assert.equal(saved.backup, `${directory}/backups/${run}`); check("files and SQL backup verified");
     assert.ok(Number((await shell(`tar -tzf '${directory}/backups/${run}/files.tar.gz' | wc -c`)).trim()) > 524288);
     check("archive verification streams a file list larger than the output cap");
+    const official: typeof fetch = async input => {
+      const slug = new URL(String(input)).searchParams.get("request[slug]");
+      return Response.json({ slug, error: "closed", closed: true }, { status: 404 });
+    };
+    for (const item of plan.plugins.filter(item => ["vigie-retired", "vigie-retained", "vigie-required"].includes(item.slug))) {
+      item.closed = await closedWordPressPlugin(item.slug, official) || undefined;
+    }
+    const allowed = ["vigie-retired", "vigie-required"];
+    plan.removePlugins = selectWordPressRemovals(plan, allowed);
+    assert.deepEqual(plan.removePlugins, ["vigie-retired"]);
+    await assert.rejects(op(randomUUID(), "update", { plan: { ...plan, removePlugins: ["vigie-required"] }, webPhp: php }), /plugin_required/);
     const updateRun = randomUUID();
     const updated = agentPlan((await op(updateRun, "update", { plan, webPhp: php })).plan); report.after = updated;
     await shell(`test ! -e '${directory}/backups/${updateRun}'`);
+    assert.ok(!updated.plugins.some(item => item.slug === "vigie-retired"));
+    assert.ok(updated.plugins.some(item => item.slug === "vigie-retained"));
+    assert.ok(updated.plugins.some(item => item.slug === "vigie-required"));
+    assert.equal((await shell(`wp --path=${root} option get vigie_retired_data`)).trim(), "preserved");
+    check("authorized closed extension removed without prompts; unapproved and required extensions kept, data preserved");
     assert.equal(updated.wordpress.current, plan.wordpress.target); assert.notEqual(updated.wordpress.current, "6.8.3");
     assert.equal(updated.plugins.find(p=>p.slug==='akismet')?.current, plan.plugins.find(p=>p.slug==='akismet')?.target); check("core and extensions updated to exact plan");
     assert.equal(await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]), customBefore);

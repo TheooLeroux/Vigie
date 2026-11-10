@@ -14,6 +14,9 @@ import { requestAgentInstallation } from "./wordpress-agent-setup";
 import { withHostingCredentials } from "../hosting-connections";
 import type { SourceSettings } from "./types";
 import { currentWordPressSecurity } from "./wordpress-current-security";
+import { closedWordPressPlugin } from "./wordpress-free-security";
+import { allowedWordPressRemovals } from "./wordpress-maintenance";
+import { wordpressPluginSlug } from "./wordpress-security";
 import { readAutomaticControl } from "../automatic-control-storage";
 import { allowsAutomaticMaintenance } from "./capabilities";
 import { refreshProjectHosting } from "./refresh-hosting";
@@ -51,13 +54,16 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
   const pending = pendingRows.map(row => JSON.parse(row.data) as UpdateRun);
   const blockedScopes = new Set(pending.flatMap(attentionScopes));
   const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null);
-  const [imageScans, automaticControls, currentSecurity] = await Promise.all([
+  const assessment = daily ? JSON.parse(daily.data) as UpdateRun : null;
+  const wordpressTargets = targets.filter(target => target.mode === "wordpress");
+  const [imageScans, automaticControls, currentSecurity, wordpressSources] = await Promise.all([
     Promise.all(identities.map(async identity => {
       const scan = await readRailpackScan(identity.targetId);
       return scan && sameRailpackImage(scan, identity) ? scan : undefined;
     })),
     Promise.all(targets.map(target => readAutomaticControl(target.id))),
-    Promise.all(targets.filter(target => target.mode === "wordpress").map(target => currentWordPressSecurity(target, { cacheOnly: true }))),
+    Promise.all(wordpressTargets.map(target => currentWordPressSecurity(target, { cacheOnly: true }))),
+    Promise.all(wordpressTargets.map(target => readUpdateSource(target.id))),
   ]);
   const missing = identities.filter((identity, index) => !imageScans[index]?.report && !runs.some(run => railpackImageReport(run, identity)));
   const archived = await readRailpackImageReports(projectId, missing);
@@ -71,7 +77,16 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
     }
     return [];
   });
-  return { assessment: daily ? JSON.parse(daily.data) : null, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs,
+  const wordpressSettings = wordpressTargets.map((target, index) => {
+    const allowed = allowedWordPressRemovals(target, wordpressSources[index]?.settings);
+    const history = [...runs, ...(assessment ? [assessment] : [])].flatMap(run => run.results.filter(result => result.targetId === target.id));
+    const licenses = history.flatMap(result => result.wordpressLicenses ? [result.wordpressLicenses] : [])
+      .sort((first, second) => second.checkedAt.localeCompare(first.checkedAt))[0];
+    const lastSignedPlan = licenses && history.find(result => result.wordpressLicenses === licenses && result.manualUpdates);
+    const closed = new Set(currentSecurity[index].closedPlugins ?? lastSignedPlan?.manualUpdates?.filter(item => item.closed).map(item => item.package.slice("plugins/".length)));
+    return { targetId: target.id, licenses, removablePlugins: [...new Set([...closed, ...allowed])].map(slug => ({ slug, allowed: allowed.includes(slug), listedAsClosed: closed.has(slug) })) };
+  });
+  return { assessment, wordpressSettings, enabled: updatesEnabled(), disabledReason: updatesDisabledReason(), targets, railpackImageReports, automaticControls: automaticControls.filter(item => item !== null), currentSecurity, runs,
     blockedTargetIds: targets.filter(target => blockedScopes.has(updateScope(target))).map(target => target.id),
     pendingRuns: pending.map(({ id, stage, updatedAt, message }) => ({ id, stage, updatedAt, message })),
   };
@@ -164,7 +179,7 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
   const scope = updateScope(target), db = await updateStorage();
   const previous = await readUpdateSource(target.id);
-  const settings: SourceSettings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
+  const settings: SourceSettings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { wordpressAutoRemoval: previous?.settings.wordpressAutoRemoval, sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
   if (previous?.settings.agentInstallation?.state === "installing") throw new ApiError("L’installation automatique de l’agent est en cours.", 409);
   if (target.mode === "wordpress" && !settings.localAgent && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
   await transaction(async () => {
@@ -178,6 +193,38 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
     await log("live", "updates.source_configured", `Accès de mise à jour configuré pour ${target.name}.`, projectId);
   });
   return { configured: true };
+}
+export async function configureWordPressRemoval(projectId: string, raw: unknown) {
+  const input = z.object({ targetId: z.string().min(1).max(300), slug: wordpressPluginSlug, allowed: z.boolean() }).parse(raw);
+  const target = (await updateTargets(projectId)).find(target => target.id === input.targetId && target.mode === "wordpress");
+  if (!target?.root) throw new ApiError("Site WordPress introuvable dans ce projet.", 404);
+  const root = target.root;
+  if (input.allowed) {
+    const observation = await currentWordPressSecurity(target);
+    const current = observation.closedPlugins === undefined && !observation.error ? await currentWordPressSecurity(target, { fresh: true }) : observation;
+    if (!current.closedPlugins?.includes(input.slug) || !await closedWordPressPlugin(input.slug)) {
+      throw new ApiError("Le contrôle actuel doit confirmer que cette extension installée est fermée sur WordPress.org.", 422);
+    }
+  }
+  const db = await updateStorage();
+  await transaction(async () => {
+    if (isPostgres()) {
+      await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(projectId);
+      await db.prepare("SELECT target_id FROM update_sources WHERE target_id=? FOR UPDATE").get(target.id);
+    }
+    if (await db.prepare("SELECT scope FROM update_locks WHERE scope=?").get(updateScope(target))) {
+      throw new ApiError("Attendez la fin de la maintenance pour modifier les autorisations de retrait.", 409);
+    }
+    const settings = (await readUpdateSource(target.id))?.settings || {};
+    const allowed = new Set(allowedWordPressRemovals(target, settings));
+    if (allowed.has(input.slug) === input.allowed) return;
+    if (input.allowed) allowed.add(input.slug);
+    else allowed.delete(input.slug);
+    await writeUpdateSource(target.id, projectId, { ...settings, wordpressAutoRemoval: { projectId, root, slugs: [...allowed] } });
+    await log("live", "updates.wordpress_removal_configured",
+      `${input.allowed ? "Retrait automatique autorisé" : "Autorisation de retrait automatique révoquée"} pour ${input.slug} sur ${target.name}.`, projectId);
+  });
+  return { allowed: input.allowed };
 }
 export async function closeInterruptedUpdate(id: string, raw: unknown) {
   z.object({ confirmed: z.literal(true) }).parse(raw);

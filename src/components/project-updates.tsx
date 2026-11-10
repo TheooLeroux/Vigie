@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, CircleAlert, Download, Loader2, RefreshCw } from "lucide-react";
-import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget } from "@/lib/updates/types";
+import { activeUpdateStages, remainingNpmFindings, type SecurityFinding, type UpdateResult, type UpdateRun, type UpdateStage, type UpdateState, type UpdateTarget, type WordPressMaintenanceSettings } from "@/lib/updates/types";
 import { formatDate } from "./ui";
 import { updateStopSummary } from "@/lib/updates/stop-summary";
 import { updateProgressStatus } from "@/lib/updates/progress";
@@ -91,6 +91,40 @@ export function UpdateProgress({ run }: { run: UpdateRun }) {
       <small>{run.lastProgressAt ? `Dernière progression : ${formatDate(run.lastProgressAt)} · Activité de l’exécuteur : ` : ""}{formatDate(run.updatedAt)}</small></div>
   </div>;
 }
+const wordpressLicenseLabels = { active: "Active", expired: "Expirée", disconnected: "À connecter dans WordPress", unknown: "À vérifier" };
+
+function WordPressSettings({ settings, projectId, request, refresh, disabled }: {
+  settings: WordPressMaintenanceSettings; projectId: string; request: Request; refresh: () => Promise<UpdateState>; disabled: boolean;
+}) {
+  const [saving, setSaving] = useState(false), [error, setError] = useState("");
+  async function save(slug: string, allowed: boolean) {
+    setSaving(true); setError("");
+    try {
+      await request(`updates/${projectId}/wordpress-removal`, "POST", { targetId: settings.targetId, slug, allowed });
+      await refresh();
+    } catch (error) { setError(error instanceof Error ? error.message : "Autorisation non enregistrée."); }
+    finally { setSaving(false); }
+  }
+  const licenses = settings.licenses;
+  return <div className="updates-details">
+    <strong>Licences WordPress</strong>
+    {licenses?.items.length ? <>
+      {licenses.items.map(item => <p key={item.component}>{item.component === "wp-rocket" ? "WP Rocket" : "Divi"} · <strong>{wordpressLicenseLabels[item.status]}</strong></p>)}
+      <small>Vérifiées le {formatDate(licenses.checkedAt)}. Les licences se gèrent dans WordPress.</small>
+    </> : <p>{licenses ? "Aucune licence WP Rocket ou Divi détectée." : "États WP Rocket et Divi disponibles après le prochain contrôle de maintenance."}</p>}
+    <p><strong>Retrait automatique des extensions</strong></p>
+    {settings.removablePlugins.length ? <>
+      <p>Vérifiez que le site n’utilise plus l’extension avant d’autoriser son retrait. Vigie la désactivera et supprimera ses fichiers pendant une prochaine maintenance si elle est toujours fermée sur WordPress.org.</p>
+      {settings.removablePlugins.map(plugin => <p key={plugin.slug}><label>
+        <input type="checkbox" checked={plugin.allowed} disabled={saving || disabled || !plugin.allowed && !plugin.listedAsClosed}
+          onChange={event => void save(plugin.slug, event.currentTarget.checked)} /> Autoriser le retrait de <code>{plugin.slug}</code>
+        {!plugin.listedAsClosed && " · Fermeture ou présence à reconfirmer"}
+      </label></p>)}
+    </> : <p>Aucune extension fermée détectée dans le dernier relevé disponible.</p>}
+    {error && <p role="alert" className="updates-error">{error}</p>}
+  </div>;
+}
+
 function SourceSetup({ target, projectId, request, onSaved }: { target: UpdateTarget; projectId: string; request: Request; onSaved: () => Promise<void> }) {
   const [file, setFile] = useState<File | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   return <form className="updates-setup" onSubmit={async event => {
@@ -239,7 +273,10 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
           {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
         </details>}
         <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "L’agent installe les mises à jour officielles compatibles de WordPress, des extensions et des thèmes. Les sauvegardes sont gérées dans Backup. PHP reste géré par l’hébergeur."}</p>
-        {state?.targets.map(target => <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : target.mode === "image" ? "Image officielle Railway" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{target.mode !== "git" && target.mode !== "image" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>)}
+        {state?.targets.map(target => {
+          const wordpressSettings = state.wordpressSettings?.find(item => item.targetId === target.id);
+          return <div className="updates-target" key={target.id}><strong>{target.name}</strong><p>{target.provider} · {target.mode === "git" ? "Sources GitHub" : target.mode === "archive" ? "Sources sans Git" : target.mode === "image" ? "Image officielle Railway" : "WordPress"}</p><p>{target.unavailable || "Prêt pour la mise à jour."}</p>{wordpressSettings && <WordPressSettings settings={wordpressSettings} projectId={projectId} request={request} refresh={refresh} disabled={!!active || assessmentActive || blocked.has(target.id)} />}{target.mode !== "git" && target.mode !== "image" && !(target.provider === "o2switch" && target.mode !== "wordpress") && !active && <details><summary>{target.mode === "wordpress" ? "Installation automatique de l’agent" : target.configured ? "Sources et accès" : "Configurer une première fois"}</summary><SourceSetup target={target} projectId={projectId} request={request} onSaved={async () => { await refresh(); }} /></details>}</div>;
+        })}
         <p className="updates-note">Les tests automatiques et le contrôle HTTPS ne garantissent pas tous les parcours métier. Une restauration de base de données n’est jamais lancée automatiquement.</p>
       </MaintenanceDetails>}
     </div>

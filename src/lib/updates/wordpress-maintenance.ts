@@ -1,7 +1,7 @@
 import type { SiteInventory } from "../types";
 import { manualPluginAction, manualThemeAction } from "../wordpress-component-policy";
 import { securityCheck } from "./security";
-import type { SecurityFinding, UpdateCheck, UpdateResult, WordPressManualUpdate } from "./types";
+import type { SecurityFinding, SourceSettings, UpdateCheck, UpdateResult, UpdateTarget, WordPressManualUpdate } from "./types";
 import type { WordPressUpdatePlan } from "./wordpress-security";
 
 // Retention applies only to the exact package/version left unchanged by this plan.
@@ -33,14 +33,25 @@ export function recordWordPressManualUpdates(result: UpdateResult, plan: WordPre
     if (kind === "themes" && observed?.updateState === "current" && !vulnerable && !item.template && item.updateOrigin !== "external") continue;
     const reason = item.manualReason || (kind === "themes" ? "Aucune mise à jour officielle confirmée pour ce thème." : vulnerable ? signals.some(finding => !finding.kind || finding.kind === "vulnerability") ? "Aucun correctif automatique validé pour cette version vulnérable." : "Signal de sécurité à vérifier ; aucun traitement automatique validé." : "");
     if (!reason) continue;
-    add({ package: `${kind}/${item.slug}`, version: item.current, ...(observed?.latestVersion && observed.latestVersion !== item.current ? { target: observed.latestVersion } : {}), reason, action: kind === "themes" ? manualThemeAction : manualPluginAction });
+    add({ package: `${kind}/${item.slug}`, version: item.current, ...(observed?.latestVersion && observed.latestVersion !== item.current ? { target: observed.latestVersion } : {}), reason, ...(kind === "plugins" && item.closed ? { closed: true } : {}), action: kind === "themes" ? manualThemeAction : manualPluginAction });
   }
   for (const item of inventory.plugins.filter(item => item.mustUse && item.slug !== "vigie-observer")) add({ package: `mu-plugins/${item.slug}`, version: item.version || "inconnue", reason: "Extension obligatoire ou code personnalisé, hors des mises à jour automatiques et du catalogue de sécurité.", action: "Faire vérifier et livrer ce code par son développeur ; conserver une copie des sources et tester les fonctions concernées." });
   if (plan.wordpress.current === plan.wordpress.target && (plan.wordpress.manualReason || plan.warnings.some(warning => warning.startsWith("WordPress ")) || findings.some(finding => finding.package === "wordpress/wordpress"))) add({ package: "wordpress/wordpress", version: plan.wordpress.current, reason: plan.wordpress.manualReason || "Aucune mise à jour automatique du cœur validée ; prérequis ou correctif à vérifier.", action: "Préparer une copie de test et vérifier la compatibilité PHP, WordPress et extensions avant intervention." });
   result.manualUpdates = items;
 }
 
+export function allowedWordPressRemovals(target: UpdateTarget, settings?: SourceSettings) {
+  const policy = settings?.wordpressAutoRemoval;
+  return policy && policy.projectId === target.projectId && policy.root === target.root ? policy.slugs : [];
+}
+
+export function selectWordPressRemovals(plan: WordPressUpdatePlan, allowed: readonly string[]) {
+  const required = new Set([...(plan.removalDependencies || []), ...plan.plugins.flatMap(item => item.requiresPlugins)].map(slug => slug.toLowerCase()));
+  return plan.plugins.filter(item => item.closed && item.current === item.target && allowed.includes(item.slug) && !required.has(item.slug.toLowerCase())).map(item => item.slug);
+}
+
 export function wordpressCompletionMessage(result: UpdateResult, changed: boolean) {
   const count = result.manualUpdates?.length || 0;
-  return `${changed ? "Mises à jour automatiques terminées et site vérifié." : "Aucune mise à jour automatique applicable."}${count ? ` ${count} composant(s) conservé(s) à traiter manuellement ; consultez la liste des interventions restantes.` : ""}`;
+  const removed = result.removedWordPressPlugins;
+  return `${changed ? "Maintenance automatique terminée et site vérifié." : "Aucune mise à jour automatique applicable."}${removed?.length ? ` Extensions retirées : ${removed.join(", ")}.` : ""}${count ? ` ${count} composant(s) conservé(s) à traiter manuellement ; consultez la liste des interventions restantes.` : ""}`;
 }

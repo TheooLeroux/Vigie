@@ -5,8 +5,9 @@ import { shellQuote } from "./wordpress";
 import type { SecurityFinding } from "./types";
 
 const version = z.string().max(80).regex(/^\d+(?:\.\d+){0,7}$/);
-const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]), updateOrigin: z.enum(["wordpress.org", "external", "unknown"]).optional(), manualReason: z.string().max(500).optional(), template: z.string().max(150).optional(), officialOffer: z.object({ source: z.enum(["wordpress.org", "vendor"]), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).optional() });
-export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default(""), manualReason: z.string().max(500).optional(), integrity: z.enum(["verified", "unverified"]).optional() }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]) }).superRefine((plan, context) => {
+export const wordpressPluginSlug = z.string().regex(/^[a-z0-9_][a-z0-9_-]{0,149}$/i);
+const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]), updateOrigin: z.enum(["wordpress.org", "external", "unknown"]).optional(), manualReason: z.string().max(500).optional(), closed: z.literal(true).optional(), template: z.string().max(150).optional(), officialOffer: z.object({ source: z.enum(["wordpress.org", "vendor"]), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).optional() });
+export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default(""), manualReason: z.string().max(500).optional(), integrity: z.enum(["verified", "unverified"]).optional() }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]), licenses: z.array(z.object({ component: z.enum(["wp-rocket", "Divi"]), status: z.enum(["active", "expired", "disconnected", "unknown"]) })).max(2).optional(), removePlugins: z.array(wordpressPluginSlug).max(1000).optional(), removalDependencies: z.array(wordpressPluginSlug).max(1000).optional() }).superRefine((plan, context) => {
   for (const item of plan.plugins) if (item.current !== item.target && (!version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) < 0)) context.addIssue({ code: "custom", message: "Version d’extension non admissible.", path: ["plugins"] });
   for (const item of plan.themes) if (item.current !== item.target && (!item.officialOffer || !version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) <= 0)) context.addIssue({ code: "custom", message: "Mise à jour de thème non admissible.", path: ["themes"] });
 });
@@ -74,7 +75,15 @@ if (($args[0] ?? '') === 'apply-offer') {
 wp_version_check(); wp_update_plugins(); wp_update_themes();
 $core = get_site_transient('update_core'); $target = get_bloginfo('version'); $requiresPhp = '';
 foreach (($core->updates ?? array()) as $update) { if ($update->response === 'upgrade') { $target = $update->version; $requiresPhp = $update->php_version ?? ''; break; } }
-$data = array('wordpress' => array('current' => get_bloginfo('version'), 'target' => $target, 'requiresPhp' => $requiresPhp), 'php' => PHP_VERSION, 'plugins' => array(), 'themes' => array(), 'warnings' => array());
+$data = array('wordpress' => array('current' => get_bloginfo('version'), 'target' => $target, 'requiresPhp' => $requiresPhp), 'php' => PHP_VERSION, 'plugins' => array(), 'themes' => array(), 'warnings' => array(), 'licenses' => array(), 'removalDependencies' => array());
+$declaredDependencies = static function ($headers) {
+  $slugs = array_map('trim', explode(',', $headers['RequiresPlugins'] ?? ''));
+  return array_filter($slugs, static fn($slug) => preg_match('/^[a-z0-9_][a-z0-9_-]{0,149}$/iD', $slug));
+};
+foreach (get_mu_plugins() as $file => $_headers) {
+  $headers = get_file_data(WPMU_PLUGIN_DIR.'/'.$file, array('RequiresPlugins' => 'Requires Plugins'));
+  $data['removalDependencies'] = array_merge($data['removalDependencies'], $declaredDependencies($headers));
+}
 $check = WP_CLI::runcommand('core verify-checksums --quiet', array('return' => 'all', 'exit_error' => false));
 $data['wordpress']['integrity'] = 'verified';
 if ($check->return_code !== 0 || trim($check->stderr) !== '' || trim($check->stdout) !== '') {
@@ -91,16 +100,19 @@ $origin = static function ($uri, $slug, $kind) {
 $updates = get_site_transient('update_plugins');
 foreach (get_plugins() as $file => $headers) {
   $update = $updates->response[$file] ?? null; $slug = $pluginSlug($file);
+  $data['removalDependencies'] = array_merge($data['removalDependencies'], $declaredDependencies($headers));
   $dependencies = $update->requires_plugins ?? ($headers['RequiresPlugins'] ?? '');
   if (is_string($dependencies)) { $dependencies = array_values(array_filter(array_map('trim', explode(',', $dependencies)))); }
   $current = (string)$headers['Version']; $next = $update->new_version ?? $current;
   if (!preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) || !preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $next)) { $next = $current; $data['warnings'][] = $slug . ' : version absente ou non standard, extension conservée.'; }
   $source = $origin($headers['UpdateURI'] ?? '', $slug, 'plugin'); $manual = '';
   $official = $officialOffer('plugin', $slug, $update);
-  if ($slug === 'wp-rocket' && !$official && function_exists('get_rocket_option')
-      && !get_rocket_option('consumer_key') && !get_rocket_option('consumer_email')
-      && !defined('WP_ROCKET_KEY') && !defined('WP_ROCKET_EMAIL')) {
-    $manual = 'WP Rocket ne dispose pas des identifiants de licence attendus et ne fournit pas de paquet officiel.';
+  if ($slug === 'wp-rocket') {
+    $missing = function_exists('get_rocket_option') && !get_rocket_option('consumer_key') && !get_rocket_option('consumer_email')
+      && !defined('WP_ROCKET_KEY') && !defined('WP_ROCKET_EMAIL');
+    $status = ($official['source'] ?? '') === 'vendor' ? 'active' : ($missing ? 'disconnected' : 'unknown');
+    $data['licenses'][] = array('component' => 'wp-rocket', 'status' => $status);
+    if ($status === 'disconnected') { $manual = 'WP Rocket ne dispose pas des identifiants de licence attendus et ne fournit pas de paquet officiel.'; }
   }
   if ($next !== $current && (!$official || ($source === 'external' && $official['source'] !== 'vendor'))) { $manual = 'Aucun paquet officiel vérifié pour la mise à jour proposée.'; }
   elseif ($next !== $current && $official['source'] === 'wordpress.org' && preg_match('/^[a-z0-9_-]{1,150}$/iD', $slug)) {
@@ -119,15 +131,23 @@ foreach (wp_get_themes() as $slug => $theme) {
   $current = (string)$theme->get('Version'); $target = $update['new_version'] ?? $current;
   $source = $origin($theme->get('UpdateURI'), $slug, 'theme');
   $official = $officialOffer('theme', $slug, $update);
+  if ($slug === 'Divi') {
+    $account = get_site_option('et_account_status');
+    $settings = (array)get_site_option('et_automatic_updates_options', get_option('et_automatic_updates_options', array()));
+    $status = $account === 'expired' ? 'expired' : (($official['source'] ?? '') === 'vendor' ? 'active'
+      : (empty($settings['username']) && empty($settings['api_key']) ? 'disconnected' : 'unknown'));
+    $data['licenses'][] = array('component' => 'Divi', 'status' => $status);
+  }
   $entry = array('slug' => $slug, 'current' => $current, 'target' => $current, 'requiresPhp' => $update['requires_php'] ?? '', 'requiresWordPress' => $update['requires'] ?? '', 'requiresPlugins' => array(), 'updateOrigin' => $source, 'template' => (string)$theme->get('Template'));
   if ($target !== $current && $official && ($source !== 'external' || $official['source'] === 'vendor') && preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) && preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $target) && version_compare($target, $current, '>')) {
     $entry['target'] = $target;
     $entry['officialOffer'] = $official;
-  } elseif ($slug === 'Divi' && $target !== $current && empty($update['package']) && get_site_option('et_account_status') === 'expired') {
+  } elseif ($slug === 'Divi' && $status === 'expired') {
     $entry['manualReason'] = 'Elegant Themes signale un abonnement expiré et ne fournit pas le paquet Divi. Renouvelez ou reconnectez un abonnement actif.';
   }
   $data['themes'][] = $entry;
 }
+$data['removalDependencies'] = array_values(array_unique($data['removalDependencies']));
 echo 'VIGIE_PLAN=' . base64_encode(wp_json_encode($data)) . "\\n";`;
   return php;
 }

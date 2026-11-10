@@ -17,7 +17,7 @@ import {
   disconnectRailway,
 } from "@/lib/railway";
 import { requireSession } from "@/lib/auth";
-import { projectUpdates, startProjectUpdate, configureUpdateSource, closeInterruptedUpdate } from "@/lib/updates/service";
+import { projectUpdates, startProjectUpdate, configureUpdateSource, configureWordPressRemoval, closeInterruptedUpdate } from "@/lib/updates/service";
 import { readUpdateSource } from "@/lib/updates/storage";
 import { updateTargets } from "@/lib/updates/targets";
 import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
@@ -302,6 +302,8 @@ async function handleRequest(request: Request, context: Context) {
         return Response.json(await startProjectUpdate(raw), { status: 202 });
       if (root === "updates" && id && child === "source" && path.length === 3)
         return Response.json(await configureUpdateSource(z.string().uuid().parse(id), raw));
+      if (root === "updates" && id && child === "wordpress-removal" && path.length === 3)
+        return Response.json(await configureWordPressRemoval(z.string().uuid().parse(id), raw));
       if (root === "updates" && id && child === "close" && path.length === 3)
         return Response.json(await closeInterruptedUpdate(z.string().uuid().parse(id), raw));
       if (root === "vercel" && path.length === 1)
