@@ -9,12 +9,16 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "db:migrate": "tsx --env-file-if-exists=.env.local scripts/migrate-postgres.ts",
-    "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts"
+    "db:import-sqlite": "tsx --env-file-if-exists=.env.local scripts/import-sqlite-to-postgres.ts",
+    "backups:tick": "tsx --env-file-if-exists=.env.local scripts/backup-worker.ts"
   },
   "engines": {
     "node": "24.21.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1164.0",
+    "@aws-sdk/lib-storage": "3.1164.0",
+    "@aws-sdk/s3-request-presigner": "3.1164.0",
     "@neon/realtime": "0.1.2",
     "better-auth": "1.7.14",
     "lucide-react": "1.63.0",

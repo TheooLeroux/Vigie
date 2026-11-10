@@ -12,12 +12,12 @@ export async function hostingStorage() {
   return db;
 }
 
-export async function claimHostingObservation(scope: string) {
+export async function claimHostingObservation(scope: string, leaseMs = 10 * 60_000) {
   const db = await hostingStorage();
   const key = `hosting:observation:lease:${scope}`;
   const token = randomUUID();
   const now = Date.now();
   const claimed = await db.prepare("INSERT INTO wordpress_catalog(cache_key,data,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at WHERE wordpress_catalog.expires_at<=?")
-    .run(key, token, new Date(now + 10 * 60_000).toISOString(), new Date(now).toISOString());
+    .run(key, token, new Date(now + leaseMs).toISOString(), new Date(now).toISOString());
   return claimed.changes ? async () => { await db.prepare("DELETE FROM wordpress_catalog WHERE cache_key=? AND data=?").run(key, token); } : null;
 }

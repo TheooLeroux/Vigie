@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createProject, save } from "../src/lib/db";
 import { createProjectSchema } from "../src/lib/validation";
 import { activityPage } from "../src/lib/activity";
-import { recordedBackups } from "../src/lib/backups";
+import { listBackups } from "../src/lib/backups";
 import { updateStorage } from "../src/lib/updates/storage";
 import { projectSummaries } from "../src/lib/project-summaries";
 import { observedInventory } from "../src/lib/project-summary";
@@ -81,17 +81,14 @@ test("Couverture limitée : pas de faux succès de sécurité, pas de retry tout
   assert.match(writes.find(report => report.targetId === target.id)!.error!, /404/);
 });
 
-test("Sauvegardes : catalogue de reprise sans export du rapport complet ni des paramètres privés", async () => {
+test("Sauvegardes : les traces de mise à jour ne sont pas des ZIP téléchargeables", async () => {
   const p = await project("Recovery fixture"), run = healthUpdates().runs[0];
   run.id = randomUUID(); run.projectId = p.id; run.targets[0].projectId = p.id;
   run.targets[0].mode = "wordpress"; run.targets[0].provider = "o2switch";
   run.results[0].backup = `/home/test/.vigie-backups/${run.id}/abc123`;
   run.results[0].warnings = ["private-content-not-for-catalog"];
   await (await updateStorage()).prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)").run(run.id, p.id, run.stage, JSON.stringify(run));
-  const data = await recordedBackups();
-  const saved = data.items.find(item => item.runId === run.id)!;
-  assert.equal(saved.kind, "wordpress"); assert.equal(saved.path, run.results[0].backup);
-  assert.doesNotMatch(JSON.stringify(data), /private-content-not-for-catalog|nodeEvidence|checks/);
+  assert.equal((await listBackups()).some(group => group.projectId === p.id), false);
 });
 
 test("Résumés groupés : un identifiant disparu ne supprime pas les autres projets, pas de faux état sûr", async () => {

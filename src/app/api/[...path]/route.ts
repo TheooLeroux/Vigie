@@ -24,7 +24,7 @@ import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
 import { projectSummaries } from "@/lib/project-summaries";
 import { securityWatch } from "@/lib/security-watch-data";
 import { activityPage } from "@/lib/activity";
-import { recordedBackups } from "@/lib/backups";
+import { downloadBackup, listBackups } from "@/lib/backups";
 import {
   hostingConnections,
   saveHostingConnection,
@@ -165,7 +165,12 @@ async function handleRequest(request: Request, context: Context) {
         return Response.json(await securityWatch(workspace, request.signal), { headers: { "Cache-Control": "private, no-store" } });
       }
       if (root === "activity" && path.length === 1) return Response.json(await activityPage(Object.fromEntries(url.searchParams.entries().filter(([key]) => key !== "workspace")), workspace));
-      if (root === "backups" && path.length === 1) return Response.json(await recordedBackups(z.coerce.number().int().min(0).max(1_000_000).parse(url.searchParams.get("offset") || 0)));
+      if (root === "backups" && path.length === 1) {
+        return Response.json(await listBackups(), { headers: { "Cache-Control": "private, no-store" } });
+      }
+      if (root === "backups" && id && child === "download" && path.length === 3) {
+        return await downloadBackup(z.uuid().parse(id));
+      }
       if (root === "updates" && id && child === "source" && path.length === 3) {
         const targets = await updateTargets(z.string().uuid().parse(id));
         const target = targets.find(target => target.id === url.searchParams.get("targetId"));

@@ -67,6 +67,19 @@ export async function hostingInstallation(id: string): Promise<HostingInstallati
   const row = (await requireInstallation(id));
   return (await view(row, (await connection(row.connection_id)), (await projectData())));
 }
+
+export async function backupHostingInstallations() {
+  const [installations, projects] = await Promise.all([rows(), list<Project>("projects", "live")]);
+  const lifecycle = new Map(projects.map(project => [project.id, project.lifecycle]));
+  return installations.map(row => ({
+    ...JSON.parse(row.data) as HostingInstallation,
+    id: row.id,
+    connectionId: row.connection_id,
+    documentRoot: row.document_root,
+    projectId: row.project_id,
+    projectActive: !row.project_id || lifecycle.get(row.project_id) === "active",
+  }));
+}
 async function projectData() {
   return {
     projects: (await list<Project>("projects", "live")),

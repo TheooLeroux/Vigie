@@ -1,21 +1,275 @@
-import { list } from "./db";
-import { updateStorage } from "./updates/storage";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { database, get } from "./db";
+import { ApiError } from "./http";
+import { authDatabase, isPostgres } from "./storage";
+import { backupDirectory, backupLeaseMs, backupStores, type BackupStore } from "./backup-store";
 import type { Project } from "./types";
-import type { UpdateRun } from "./updates/types";
-export async function recordedBackups(offset = 0) {
-  const db = await updateStorage();
-  const rows = await db.prepare("SELECT data FROM update_runs WHERE COALESCE(json_extract(data,'$.purpose'),'update')<>'assessment' AND (data LIKE ? OR data LIKE ? OR data LIKE ?) ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT ? OFFSET ?").all('%"backup":%', '%"previousCommit":%', '%"previousDeploymentId":%', 26, offset) as { data: string }[];
-  const projects = new Map((await list<Project>("projects", "live")).map(project => [project.id, project]));
-  const items = rows.slice(0, 25).flatMap(row => {
-    const run = JSON.parse(row.data) as UpdateRun;
-    const project = projects.get(run.projectId);
-    if (!project) return [];
-    return run.results.flatMap(result => {
-      const target = run.targets.find(target => target.id === result.targetId);
-      if (!target || !result.backup && !result.previousCommit && !result.previousDeploymentId) return [];
-      return [{ id: run.id + ":" + target.id, runId: run.id, projectId: project.id, projectName: project.name, targetName: target.name, createdAt: run.createdAt, stage: result.stage, provider: target.provider, kind: result.backup ? "wordpress" as const : "reference" as const, path: result.backup || null, commit: result.previousCommit || null, deploymentId: result.previousDeploymentId || null }];
-    });
-  });
-  return { items, nextOffset: rows.length > 25 ? offset + 25 : null };
+
+type BackupRow = {
+  id: string;
+  project_id: string | null;
+  source_id: string;
+  source_name: string | null;
+  slot: string;
+  owner: string;
+  created_at: string;
+  bytes: number | string;
+  storage_id: string;
+  sha256: string | null;
+};
+
+export type BackupGroup = { id: string; projectId: string | null; projectName: string; backups: { id: string; createdAt: string }[] };
+type SiteBackup = { installationId: string; projectId: string | null; domain: string };
+
+const backupSchema = `CREATE TABLE IF NOT EXISTS project_backups (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,
+  source_id TEXT NOT NULL,
+  source_name TEXT,
+  slot TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('running','failed','ready','expired')),
+  owner TEXT NOT NULL,
+  next_attempt_at TEXT NOT NULL,
+  created_at TEXT,
+  bytes BIGINT,
+  storage_id TEXT NOT NULL DEFAULT 'local',
+  sha256 TEXT,
+  UNIQUE(source_id, slot)
+);
+CREATE INDEX IF NOT EXISTS project_backups_state ON project_backups(source_id, state, created_at);
+CREATE TABLE IF NOT EXISTS backup_pending_uploads (
+  owner TEXT PRIMARY KEY,
+  storage_id TEXT NOT NULL,
+  discard_after TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS backup_pending_uploads_due ON backup_pending_uploads(storage_id, discard_after);`;
+
+function backupDatabase() {
+  const db = database();
+  if (isPostgres()) return db;
+  const sqlite = authDatabase() as import("node:sqlite").DatabaseSync;
+  const columns = () => sqlite.prepare("PRAGMA table_info(project_backups)").all().map(column => column.name);
+  const before = columns();
+  if (before.length && !before.includes("storage_id")) {
+    sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const current = columns();
+      if (!current.includes("source_id")) {
+        sqlite.exec(`ALTER TABLE project_backups RENAME TO project_backups_legacy;
+          DROP INDEX IF EXISTS project_backups_state;
+          ${backupSchema}
+          INSERT INTO project_backups (id,project_id,source_id,slot,state,owner,next_attempt_at,created_at,bytes)
+          SELECT id,project_id,'project:' || project_id,slot,state,owner,next_attempt_at,created_at,bytes FROM project_backups_legacy;
+          DROP TABLE project_backups_legacy;`);
+      } else if (!current.includes("storage_id")) {
+        sqlite.exec(`ALTER TABLE project_backups ADD COLUMN storage_id TEXT NOT NULL DEFAULT 'local';
+          ALTER TABLE project_backups ADD COLUMN sha256 TEXT;
+          ${backupSchema}`);
+      }
+      sqlite.exec("COMMIT");
+    } catch (error) {
+      sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  } else {
+    sqlite.exec(backupSchema);
+  }
+  return db;
 }
-export type RecordedBackups = Awaited<ReturnType<typeof recordedBackups>>;
+
+const paris = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
+function parisParts(date: Date) {
+  return Object.fromEntries(paris.formatToParts(date).map(part => [part.type, part.value]));
+}
+
+export function dueBackupSlot(now: Date) {
+  const { year, month, day, hour, minute } = parisParts(now);
+  const date = new Date(`${year}-${month}-${day}T00:00:00Z`);
+  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+  const beforeMondaySlot = daysSinceMonday === 0 && hour + minute < "0313";
+  date.setUTCDate(date.getUTCDate() - daysSinceMonday - (beforeMondaySlot ? 7 : 0));
+  return date.toISOString().slice(0, 10);
+}
+
+export function expiredBackupIds(rows: { id: string; created_at: string; slot: string }[], now: Date) {
+  const { year, month } = parisParts(now);
+  const cutoff = Number(year) * 12 + Number(month) - 11;
+  const months = new Set<number>();
+  return [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.slot.localeCompare(a.slot))
+    .flatMap((row, index) => {
+      const local = parisParts(new Date(row.created_at));
+      const monthIndex = Number(local.year) * 12 + Number(local.month);
+      const monthly = monthIndex >= cutoff && !months.has(monthIndex);
+      if (monthly) months.add(monthIndex);
+      return index < 5 || monthly ? [] : [row.id];
+    });
+}
+
+function archiveFilename(name: string, createdAt: string) {
+  const slug = name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").slice(0, 80).replace(/^-|-$/g, "") || "site";
+  return `${slug}-${createdAt.slice(0, 10)}.zip`;
+}
+
+export async function listBackups(): Promise<BackupGroup[]> {
+  const { byId } = backupStores();
+  if (!byId.size) return [];
+  const rows = await backupDatabase().prepare(`
+    SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name
+    FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
+    WHERE b.state='ready' AND (b.source_name IS NOT NULL OR p.id IS NOT NULL)
+    ORDER BY project_name, b.created_at DESC, b.slot DESC
+  `).all() as (BackupRow & { project_name: string })[];
+  const groups = new Map<string, BackupGroup>();
+  for (const row of rows) {
+    const store = byId.get(row.storage_id);
+    if (!store || (store.id === "local" && !await store.exists(row))) continue;
+    const group = groups.get(row.source_id) ?? { id: row.source_id, projectId: row.project_id, projectName: row.project_name, backups: [] };
+    group.backups.push({ id: row.id, createdAt: row.created_at });
+    groups.set(row.source_id, group);
+  }
+  return [...groups.values()];
+}
+
+export async function downloadBackup(id: string) {
+  const { byId } = backupStores();
+  const missing = () => new ApiError("Sauvegarde introuvable.", 404);
+  if (!byId.size) throw missing();
+  const row = await backupDatabase().prepare(`
+    SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name
+    FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
+    WHERE b.id=? AND b.state='ready' AND (b.source_name IS NOT NULL OR p.id IS NOT NULL)
+  `).get(id) as (BackupRow & { project_name: string }) | undefined;
+  if (!row) throw missing();
+  const response = await byId.get(row.storage_id)?.download(row, archiveFilename(row.project_name, row.created_at));
+  if (!response) throw missing();
+  return response;
+}
+
+async function purgeBackups(db: ReturnType<typeof backupDatabase>, stores: Map<string, BackupStore>, sourceId: string, now: Date) {
+  const rows = await db.prepare("SELECT * FROM project_backups WHERE source_id=? AND state='ready'").all(sourceId) as BackupRow[];
+  // A missing archive must not evict a good copy from either retention tier.
+  const present = [];
+  for (const row of rows) if (await stores.get(row.storage_id)?.exists(row)) present.push(row);
+  for (const id of expiredBackupIds(present, now)) {
+    await db.prepare("UPDATE project_backups SET state='expired' WHERE id=? AND state='ready'").run(id);
+  }
+  const expired = await db.prepare("SELECT owner,storage_id FROM project_backups WHERE source_id=? AND state='expired' AND bytes IS NOT NULL").all(sourceId) as Pick<BackupRow, "owner" | "storage_id">[];
+  for (const row of expired) {
+    const store = stores.get(row.storage_id);
+    if (!store) continue;
+    await store.remove(row.owner);
+    await db.prepare("UPDATE project_backups SET bytes=NULL WHERE owner=? AND state='expired'").run(row.owner);
+  }
+}
+
+export async function cleanupAbandonedBackupUploads(now = new Date()) {
+  const { remote } = backupStores();
+  if (!remote) return;
+  const db = backupDatabase();
+  await db.prepare(`DELETE FROM backup_pending_uploads WHERE storage_id=? AND EXISTS (
+    SELECT 1 FROM project_backups b WHERE b.owner=backup_pending_uploads.owner AND b.state='ready'
+  )`).run(remote.id);
+  const candidates = await db.prepare(`SELECT owner FROM backup_pending_uploads
+    WHERE storage_id=? AND discard_after<=? AND NOT EXISTS (
+      SELECT 1 FROM project_backups b WHERE b.owner=backup_pending_uploads.owner
+        AND (b.state='ready' OR (b.state='running' AND b.next_attempt_at>?))
+    ) ORDER BY discard_after LIMIT 20
+  `).all(remote.id, now.toISOString(), now.toISOString()) as { owner: string }[];
+  for (const row of candidates) {
+    await remote.remove(row.owner);
+    await db.prepare("DELETE FROM backup_pending_uploads WHERE owner=?").run(row.owner);
+  }
+}
+
+export async function runBackup(
+  source: string | SiteBackup,
+  collectVerifiedZip: (folder: string, zip: string) => Promise<void>,
+  now = new Date(),
+) {
+  const { byId, remote, destination, directory } = backupStores();
+  if (!destination) throw new Error("Configurez un stockage de sauvegarde pour lancer la collecte.");
+  const scratch = remote ? backupDirectory("VIGIE_BACKUP_SCRATCH_DIRECTORY") || join(tmpdir(), "vigie-backup-scratch") : directory!;
+  const projectId = typeof source === "string" ? source : source.projectId;
+  const sourceId = typeof source === "string" ? "project:" + source : "o2switch:" + source.installationId;
+  const sourceName = typeof source === "string" ? null : source.domain;
+  const project = projectId ? await get<Project>("projects", projectId, "live") : null;
+  if (projectId && project?.lifecycle !== "active") {
+    throw new Error("Projet actif introuvable.");
+  }
+  await mkdir(scratch, { recursive: true, mode: 0o700 });
+  const dir = await lstat(scratch);
+  if (!dir.isDirectory() || (process.platform !== "win32" && (dir.mode & 0o077))) {
+    throw new Error("Le dossier de sauvegardes doit être privé et appartenir à l’exécuteur.");
+  }
+  const db = backupDatabase();
+  const slot = dueBackupSlot(now);
+  const owner = randomUUID();
+  const start = now.toISOString();
+  const lease = new Date(now.getTime() + backupLeaseMs).toISOString();
+  const claimed = await db.prepare(`
+    INSERT INTO project_backups(id,project_id,source_id,source_name,slot,state,owner,next_attempt_at,storage_id)
+    VALUES(?,?,?,?,?,'running',?,?,?)
+    ON CONFLICT(source_id,slot) DO UPDATE SET state='running',owner=excluded.owner,next_attempt_at=excluded.next_attempt_at,
+      project_id=excluded.project_id,source_name=excluded.source_name,storage_id=excluded.storage_id
+    WHERE project_backups.state IN ('running','failed') AND project_backups.next_attempt_at<=?
+  `).run(randomUUID(), projectId, sourceId, sourceName, slot, owner, lease, destination.id, start);
+  if (!claimed.changes) {
+    if (await db.prepare("SELECT id FROM project_backups WHERE source_id=? AND slot=? AND state='ready'").get(sourceId, slot)) {
+      await purgeBackups(db, byId, sourceId, now);
+    }
+    return false;
+  }
+
+  let folder: string | undefined;
+  let publishing = false;
+  try {
+    folder = await mkdtemp(join(scratch, ".capture-"));
+    const zip = join(folder, "backup.zip");
+    await collectVerifiedZip(folder, zip);
+    const info = await lstat(zip);
+    if (!info.isFile() || info.size === 0) throw new Error("ZIP absent ou vide.");
+    if (remote) {
+      await db.prepare("INSERT INTO backup_pending_uploads(owner,storage_id,discard_after) VALUES(?,?,?)")
+        .run(owner, remote.id, new Date(now.getTime() + 2 * backupLeaseMs).toISOString());
+    }
+    publishing = true;
+    const digest = await destination.publish(zip, owner, info.size, archiveFilename(sourceName ?? project?.name ?? "site", start));
+    const result = await db.prepare(`
+      UPDATE project_backups SET state='ready',created_at=?,bytes=?,sha256=? WHERE owner=? AND state='running'
+    `).run(start, info.size, digest, owner);
+    if (!result.changes) throw new Error("La sauvegarde a perdu sa réservation.");
+  } catch (error) {
+    // On a lost connection during publication, the catalogue may already point to this file.
+    const failed = await db.prepare(`
+      UPDATE project_backups SET state='failed',next_attempt_at=? WHERE owner=? AND state='running'
+    `).run(new Date(now.getTime() + 15 * 60_000).toISOString(), owner);
+    if (publishing && failed.changes) {
+      try {
+        await destination.remove(owner);
+      } catch {
+        console.error("Nettoyage de l’archive interrompue en attente.");
+      }
+    }
+    throw error;
+  } finally {
+    if (folder) {
+      const pathFromStore = relative(
+        await realpath(/* turbopackIgnore: true */ scratch),
+        await realpath(/* turbopackIgnore: true */ folder),
+      );
+      if (!/^\.capture-[a-zA-Z0-9]+$/.test(pathFromStore)) throw new Error("Dossier temporaire de sauvegarde inattendu.");
+      await rm(folder, { recursive: true, force: true });
+    }
+  }
+  if (remote) await db.prepare("DELETE FROM backup_pending_uploads WHERE owner=?").run(owner);
+  await purgeBackups(db, byId, sourceId, now);
+  return true;
+}
