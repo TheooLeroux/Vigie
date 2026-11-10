@@ -60,16 +60,21 @@ export function ClientsPanel({
               Modifier
             </button>
           </div>
-          {(client.contactName || client.email || client.phone || client.website) && (
+        </header>
+        <section className="panel client-contact-panel" aria-labelledby="client-contact-heading">
+          <h2 id="client-contact-heading">Coordonnées</h2>
+          {client.contactName || client.email || client.phone || client.website ? (
             <dl className="client-contact">
               {client.contactName && <div><dt>Contact</dt><dd>{client.contactName}</dd></div>}
               {client.email && <div><dt>Email</dt><dd><a href={`mailto:${client.email}`}>{client.email}</a></dd></div>}
               {client.phone && <div><dt>Téléphone</dt><dd>{client.phone}</dd></div>}
               {client.website && <div><dt>Site</dt><dd><OutLink href={client.website}>{domain(client.website)}</OutLink></dd></div>}
             </dl>
+          ) : (
+            <p className="client-contact-empty">Aucune coordonnée renseignée.</p>
           )}
           {client.notes && <p className="client-notes">{client.notes}</p>}
-        </header>
+        </section>
         <section className="panel client-projects">
           <div className="panel-heading">
             <div className="panel-title-line"><h2>Sites & applications</h2><span className="badge neutral">{sites.length}</span></div>

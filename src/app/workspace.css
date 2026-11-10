@@ -890,10 +890,13 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   }
 }
 
-.client-detail-header { margin-bottom: 24px; }
+.client-detail-header { margin-bottom: 16px; }
 .client-detail-header .page-heading { flex-direction: row; align-items: center; gap: 12px; margin-bottom: 0; }
 .client-detail-header h1 { overflow-wrap: anywhere; }
-.client-contact { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 12px 0 0; font-size: 12px; }
+.client-contact-panel { padding: 14px 18px; margin-bottom: 16px; }
+.client-contact-panel h2 { font-size: 14px; }
+.client-contact-empty { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.client-contact { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 8px 0 0; font-size: 12px; }
 .client-contact > div { display: flex; flex-wrap: wrap; gap: 2px 6px; min-width: 0; }
 .client-contact dt { color: var(--muted); }
 .client-contact dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
