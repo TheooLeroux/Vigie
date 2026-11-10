@@ -45,8 +45,14 @@ test("Railpack : OSV et Trivy coexistent avec leurs dates pour le déploiement e
   assert.deepEqual(current.vulnerabilities.find(item => item.package === "apt")?.scanners, [{ tool: "Trivy", checkedAt: report.checkedAt }]);
   assert.equal(current.services[0].railpackImageCheckedAt, report.checkedAt);
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
-  assert.match(html, /Correctif à qualifier dans une image Railpack/);
+  assert.match(html, /Version corrigée référencée, image à valider/);
   assert.match(html, /Trivy · image Railpack/);
+  check.findings = [{ ...imageFinding, fixedVersions: undefined }];
+  const withoutFix = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  assert.match(withoutFix, /Aucune installation proposée pour ce signalement/);
+  assert.match(withoutFix, /aucune version correctrice indiquée dans ce rapport/);
+  assert.doesNotMatch(withoutFix, /Version corrigée référencée, image à valider/);
+  check.findings = [imageFinding];
 
   // Evidence must survive the normal five-run history window.
   const identity = railpackImageIdentity(target, detail.railway)!;
