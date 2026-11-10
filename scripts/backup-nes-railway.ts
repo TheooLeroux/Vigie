@@ -8,6 +8,7 @@ import { runCommand } from "../src/lib/updates/process";
 const projectId = "b318d717-ef03-44ca-8feb-f4e9eb6d6fe2";
 const environmentId = "b3ca01d9-0295-4dab-ac62-7860ba87df95";
 const vigieProjectId = "f458d781-18cd-48d3-b65b-42372755dd04";
+const backendId = "0bcc758c-7650-4500-9388-54b5fecbe170";
 const repository = "TheooLeroux/NesAppli";
 const supabaseRef = "yaakyyvqcdsizchkiozq";
 const roots = ["/backend", "/docs-site", "/frontend"];
@@ -33,8 +34,9 @@ async function inventory() {
     method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
     headers: { "Project-Access-Token": token, "Content-Type": "application/json" },
     body: JSON.stringify({
-      query: `query BackupNesApp($id:String!) {
+      query: `query BackupNesApp($id:String!,$project:String!,$backend:String!) {
         projectToken { projectId environmentId }
+        variables(projectId:$project,environmentId:$id,serviceId:$backend)
         environment(id:$id) {
           id
           volumeInstances(first:20) { edges { node { volumeId } } pageInfo { hasNextPage } }
@@ -47,13 +49,14 @@ async function inventory() {
           }
         }
       }`,
-      variables: { id: environmentId },
+      variables: { id: environmentId, project: projectId, backend: backendId },
     }),
   });
   if (!response.ok) throw new Error("Inventaire de production Railway indisponible.");
   const body = await response.json();
   const parsed = z.object({
     projectToken: z.object({ projectId: z.literal(projectId), environmentId: z.literal(environmentId) }),
+    variables: z.object({ SUPABASE_URL: z.string().regex(new RegExp("^https://" + supabaseRef + "\\.supabase\\.co/?$")) }),
     environment: z.object({
       id: z.literal(environmentId),
       volumeInstances: z.object({ edges: z.array(z.unknown()).length(0), pageInfo: z.object({ hasNextPage: z.literal(false) }) }),
@@ -68,6 +71,7 @@ async function inventory() {
     .sort((left, right) => left.serviceId.localeCompare(right.serviceId));
   const app = services.filter(service => service.source.repo === repository);
   if (JSON.stringify(app.map(service => service.rootDirectory).sort()) !== JSON.stringify(roots) ||
+      !app.some(service => service.rootDirectory === "/backend" && service.serviceId === backendId) ||
       app.some(service => !service.activeDeployments[0].meta.commitHash) ||
       services.filter(service => service.serviceName === "tailscale" && service.source.image?.startsWith("docker.io/tailscale/tailscale@sha256:")).length !== 1) {
     throw new Error("Sources de NES App différentes du périmètre validé.");
