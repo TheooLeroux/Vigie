@@ -4,6 +4,7 @@ import { hostingStorage } from "./hosting-storage";
 import { createProject, get, list, log, save, transaction } from "./db";
 import { createProjectSchema, accessSchema } from "./validation";
 import { ApiError } from "./http";
+import { isPostgres } from "./storage";
 import {
   canonicalHostname,
   isAddableInstallation,
@@ -58,7 +59,9 @@ async function rows(connectionId?: string): Promise<Row[]> {
     )
     .all(...(connectionId ? [connectionId] : []))) as Row[];
 }
-async function requireInstallation(id: string): Promise<Row> {
+async function requireInstallation(id: string, lock = false): Promise<Row> {
+  if (lock && isPostgres())
+    await (await hostingStorage()).prepare("SELECT id FROM hosting_installations WHERE id=? FOR UPDATE").get(id);
   const row = (await rows()).find((r) => r.id === id);
   if (!row) throw new ApiError("Installation introuvable.", 404);
   return row;
@@ -271,11 +274,11 @@ async function link(
   const project = (await get<Project>("projects", projectId, "live"));
   if (!project) throw new ApiError("Projet introuvable.", 404);
   if (row.project_id === projectId && row.link_method === method) return;
-  (await (await hostingStorage())
-    .prepare(
-      "UPDATE hosting_installations SET project_id=?,link_method=?,match_reason=? WHERE id=?",
-    )
-    .run(projectId, method, reason, row.id));
+  const update = await (await hostingStorage()).prepare(
+    "UPDATE hosting_installations SET project_id=?,link_method=?,match_reason=? WHERE id=?" +
+      (method === "automatic" ? " AND project_id IS NULL" : ""),
+  ).run(projectId, method, reason, row.id);
+  if (!update.changes) return;
   const item = JSON.parse(row.data) as HostingInstallation;
   (await addHostingAccess(projectId, (await connection(row.connection_id))));
   (await log(
@@ -425,9 +428,28 @@ export async function ignoreHostingInstallation(id: string, raw: unknown) {
     return (await hostingDiscovery(row.connection_id));
   }));
 }
+export async function resolveHostingInstallation(id: string) {
+  return transaction(async () => {
+    const row = await requireInstallation(id, true);
+    const item = JSON.parse(row.data) as HostingInstallation;
+    if (item.missingSince)
+      throw new ApiError("Cette installation n’a pas été retrouvée lors du dernier relevé.");
+
+    let projectId = row.project_id;
+    if (!projectId && !item.ignored && !item.inspectionError && isAddableInstallation(item.kind)) {
+      const candidates = findInstallationMatches(item, await connection(row.connection_id), await projectData());
+      if (candidates.length === 1 && candidates[0].lifecycle === "active") {
+        await link(row, candidates[0].id, "automatic", candidates[0].reason);
+        projectId = candidates[0].id;
+      }
+    }
+    return { projectId, discovery: await hostingDiscovery(row.connection_id) };
+  });
+}
+
 export async function createProjectFromInstallation(id: string) {
   return (await transaction(async () => {
-    const row = (await requireInstallation(id)),
+    const row = (await requireInstallation(id, true)),
       host = (await connection(row.connection_id)),
       item = JSON.parse(row.data) as HostingInstallation;
     if (row.project_id)

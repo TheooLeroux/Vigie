@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -7,7 +7,6 @@ import {
   Loader2,
   Pencil,
   Plus,
-  RefreshCw,
   Server,
   Unplug,
 } from "lucide-react";
@@ -16,15 +15,18 @@ import { EmptyState, Field, formatDate, Modal, OutLink } from "./ui";
 import { HostingDiscoveryPanel } from "./hosting-discovery-panel";
 import { RailwayConnectionsPanel } from "./railway-panel";
 import { VercelConnectionsPanel } from "./vercel-panel";
+import { useProjectRealtime } from "./project-realtime";
+import { createRefreshQueue } from "@/lib/project-realtime";
 
 type RequestApi = (
   path: string,
   method?: string,
   payload?: unknown,
+  options?: { signal?: AbortSignal },
 ) => Promise<any>;
 const labels = {
   unconfigured: "À configurer",
-  untested: "À vérifier",
+  untested: "Premier relevé en attente",
   connected: "Connecté",
   error: "Échec de connexion",
 };
@@ -41,7 +43,8 @@ export function ConnectionsPanel({
 }) {
   const [connections, setConnections] = useState<HostingConnection[]>([]),
     [loading, setLoading] = useState(true),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [loadError, setLoadError] = useState("");
   const [provider, setProvider] = useState("o2switch");
   const [edit, setEdit] = useState<HostingConnection | "new" | null>(null),
     [discoveries, setDiscoveries] = useState<Record<string, HostingDiscovery>>(
@@ -49,31 +52,50 @@ export function ConnectionsPanel({
     ),
     [busy, setBusy] = useState<string | null>(null),
     [disconnect, setDisconnect] = useState<HostingConnection | null>(null);
-  async function reload() {
-    const data = await request("connections");
-    setConnections(data.connections);
-    setDiscoveries(data.discoveries);
-  }
-  useEffect(() => {
-    let cancelled = false;
-    request("connections")
-      .then((data) => {
-        if (!cancelled) {
-          setConnections(data.connections);
-          setDiscoveries(data.discoveries);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const readRevision = useRef(0);
+  const { subscribe } = useProjectRealtime();
+  const reload = useCallback(async (signal?: AbortSignal) => {
+    const revision = ++readRevision.current;
+    const data = await request("connections", "GET", undefined, { signal });
+    if (!signal?.aborted && revision === readRevision.current) {
+      setConnections(data.connections);
+      setDiscoveries(data.discoveries);
+      setLoadError("");
+    }
   }, [request]);
-  async function synchronize(connection: HostingConnection) {
+
+  useEffect(() => {
+    if (provider !== "o2switch") return;
+    const controller = new AbortController();
+    const queue = createRefreshQueue(async () => {
+      try {
+        await reload(controller.signal);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, (error) => setLoadError((error as Error).message));
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible" && navigator.onLine)
+        queue.invalidate(["o2switch"]);
+    };
+    const unsubscribe = subscribe((change) => {
+      if (change.all || change.activity) refreshVisible();
+    });
+    const timer = window.setInterval(refreshVisible, 60_000);
+    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("online", refreshVisible);
+    queue.invalidate(["o2switch"]);
+    return () => {
+      controller.abort();
+      queue.dispose();
+      unsubscribe();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("online", refreshVisible);
+    };
+  }, [provider, reload, subscribe]);
+
+  async function discoverAfterSetup(connection: HostingConnection) {
     setBusy(connection.id);
     setError("");
     try {
@@ -82,6 +104,7 @@ export function ConnectionsPanel({
         "POST",
         {},
       );
+      readRevision.current++;
       setConnections((previous) =>
         previous.map((c) =>
           c.id === updated.connection.id ? updated.connection : c,
@@ -96,6 +119,7 @@ export function ConnectionsPanel({
         "POST",
         {},
       );
+      readRevision.current++;
       setDiscoveries((previous) => ({
         ...previous,
         [connection.id]: inventory.discovery,
@@ -174,10 +198,10 @@ export function ConnectionsPanel({
             Ajouter un compte o2switch
           </button>
         </div>
-        {error && (
+        {(error || loadError) && (
           <p className="form-error" role="alert">
             <AlertCircle size={16} />
-            {error}
+            {error || loadError}
           </p>
         )}
         {loading ? (
@@ -221,23 +245,11 @@ export function ConnectionsPanel({
                         </span>
                         {connection.lastSuccessAt && <small>Dernier accès réussi le {formatDate(connection.lastSuccessAt)}</small>}
                       </div>
-                      <button
-                        className="button primary"
-                        onClick={() => connection.configured ? void synchronize(connection) : setEdit(connection)}
-                        disabled={busy !== null}
-                      >
-                        {busy === connection.id ? (
-                          <Loader2 className="spin" size={15} />
-                        ) : (
-                          connection.configured ? <RefreshCw size={15} /> : <Pencil size={14} />
-                        )}
-                        {busy === connection.id
-                          ? "Synchronisation…"
-                          : !connection.configured ? "Configurer l’accès"
-                          : discoveries[connection.id]?.lastSuccessAt
-                            ? "Synchroniser les sites"
-                            : "Rechercher les sites"}
-                      </button>
+                      {!connection.configured && (
+                        <button className="button primary" onClick={() => setEdit(connection)} disabled={busy !== null}>
+                          <Pencil size={14} /> Configurer l’accès
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="connection-body">
@@ -297,11 +309,13 @@ export function ConnectionsPanel({
                     </details>
                     <HostingDiscoveryPanel
                       discovery={discoveries[connection.id]}
+                      configured={connection.configured}
                       projects={projects}
                       request={request}
                       onProject={onProject}
                       disabled={busy !== null}
                       onChanged={async (next) => {
+                        readRevision.current++;
                         setDiscoveries((previous) => ({
                           ...previous,
                           [connection.id]: next,
@@ -333,7 +347,7 @@ export function ConnectionsPanel({
             );
             await reload();
             setEdit(null);
-            if (input.secret || edit === "new") await synchronize(saved);
+            if (input.secret || edit === "new") await discoverAfterSetup(saved);
           }}
         />
       )}

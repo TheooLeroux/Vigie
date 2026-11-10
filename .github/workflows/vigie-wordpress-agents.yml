@@ -46,15 +46,6 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
         id: dependencies
-      - name: Retrouver les installations après une remise en ligne
-        id: discovery
-        if: inputs.installation_id == '' && !inputs.security_only
-        continue-on-error: true
-        run: node --import tsx scripts/hosting-control-worker.ts
-        env:
-          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
-          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
-          VIGIE_CONTROL_PROVIDER: o2switch
       - name: Installer et vérifier les agents sans mettre à jour les sites
         if: ${{ !inputs.security_only }}
         run: node --import tsx scripts/wordpress-agent-worker.ts
@@ -98,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [vercel, railway]
+        provider: [vercel, railway, o2switch]
     env:
       DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
       VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_UPDATES_ENCRYPTION_KEY }}
@@ -112,7 +103,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Relever les déploiements actuels
+      - name: Relever les projets et installations
         run: node --import tsx scripts/hosting-control-worker.ts
   wordpress-observations:
     concurrency:

@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { AlertCircle, Check, Loader2, Plus, Search, X } from "lucide-react";
+import { AlertCircle, Check, Loader2, Plus, Search } from "lucide-react";
 import type {
   HostingDiscovery,
   HostingInstallationView,
@@ -23,8 +23,16 @@ export const installationLabels: Record<
   empty: "Répertoire vide",
   unknown: "À identifier",
 };
+function isSiteKind(kind: HostingInstallationView["kind"]) {
+  return ["wordpress", "dolibarr", "next-static", "static", "php"].includes(kind);
+}
+function canCreateProject(item: HostingInstallationView) {
+  return isSiteKind(item.kind) && !item.inspectionError && !item.candidates.length;
+}
+
 export function HostingDiscoveryPanel({
   discovery,
+  configured,
   projects,
   request,
   onChanged,
@@ -32,6 +40,7 @@ export function HostingDiscoveryPanel({
   disabled,
 }: {
   discovery: HostingDiscovery | undefined;
+  configured: boolean;
   projects: Project[];
   request: (path: string, method?: string, payload?: unknown) => Promise<any>;
   onChanged: (next: HostingDiscovery) => Promise<void>;
@@ -43,50 +52,45 @@ export function HostingDiscoveryPanel({
     [error, setError] = useState("");
   const visible =
     discovery?.installations.filter((i) => !i.ignored && !i.missingSince) || [];
-  const linked = visible.filter((i) => i.project),
-    suggested = visible.filter(
-      (i) =>
-        !i.project &&
-        ["wordpress", "dolibarr", "next-static", "static", "php"].includes(
-          i.kind,
-        ) &&
-        !i.inspectionError &&
-        !i.candidates.length,
-    );
-  const review = visible.filter(
-    (i) =>
-      !i.project &&
-      (i.inspectionError ||
-        i.kind === "wordpress-incomplete" ||
-        i.candidates.length),
-  );
-  const other = visible.filter(
-    (i) => !linked.includes(i) && !suggested.includes(i) && !review.includes(i),
-  );
-  const hidden =
-      discovery?.installations.filter((i) => i.ignored && !i.missingSince) ||
-      [],
-    missing = discovery?.installations.filter((i) => i.missingSince) || [];
-  async function act(
-    item: HostingInstallationView,
-    action: "create" | "ignore",
-    payload: unknown = {},
-  ) {
+  const linked = visible.filter((item) => item.project);
+  const offered = visible.filter((item) => !item.project &&
+    (isSiteKind(item.kind) || item.inspectionError || item.kind === "wordpress-incomplete" || item.candidates.length));
+  const other = visible.filter((item) => !linked.includes(item) && !offered.includes(item));
+  const hidden = discovery?.installations.filter((item) => item.ignored && !item.missingSince) || [];
+  const missing = discovery?.installations.filter((item) => item.missingSince) || [];
+
+  async function addToPark(item: HostingInstallationView) {
     setBusy(item.id);
     setError("");
     try {
-      const result = await request(
-        `installations/${item.id}/${action}`,
-        "POST",
-        payload,
-      );
-      await onChanged(action === "create" ? result.discovery : result);
+      const result: { projectId: string | null; discovery: HostingDiscovery } =
+        await request(`installations/${item.id}/resolve`, "POST", {});
+      if (result.projectId) {
+        await onChanged(result.discovery);
+      } else {
+        const current = result.discovery.installations.find((site) => site.id === item.id);
+        if (!current) throw new Error("Cette installation n’apparaît plus dans le relevé.");
+        setLinking(current);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(null);
     }
   }
+
+  async function showAgain(item: HostingInstallationView) {
+    setBusy(item.id);
+    setError("");
+    try {
+      await onChanged(await request(`installations/${item.id}/ignore`, "POST", { ignored: false }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function facts(item: HostingInstallationView) {
     return (
       <span className="discovery-facts">
@@ -106,7 +110,7 @@ export function HostingDiscoveryPanel({
   }
   function row(
     item: HostingInstallationView,
-    mode: "linked" | "new" | "review",
+    mode: "linked" | "offered",
   ) {
     return (
       <li
@@ -174,38 +178,14 @@ export function HostingDiscoveryPanel({
               </button>
             </>
           ) : (
-            <>
-              {mode === "new" && (
-                <button
-                  className="button secondary"
-                  onClick={() => act(item, "create")}
-                  disabled={disabled || busy !== null}
-                >
-                  {busy === item.id ? (
-                    <Loader2 className="spin" size={14} />
-                  ) : (
-                    <Plus size={14} />
-                  )}
-                  Ajouter au parc
-                </button>
-              )}
-              <button
-                className="text-button"
-                onClick={() => setLinking(item)}
-                disabled={disabled || busy !== null}
-              >
-                {item.candidates.length ? "Choisir la fiche" : "Rattacher"}
-              </button>
-              <button
-                className="icon-button"
-                title="Masquer cette installation"
-                aria-label={`Masquer ${item.domains[0]}`}
-                onClick={() => act(item, "ignore", { ignored: true })}
-                disabled={disabled || busy !== null}
-              >
-                <X size={14} />
-              </button>
-            </>
+            <button
+              className="button secondary"
+              onClick={() => void addToPark(item)}
+              disabled={disabled || busy !== null}
+            >
+              {busy === item.id ? <Loader2 className="spin" size={14} /> : <Plus size={14} />}
+              Ajouter au parc
+            </button>
           )}
         </div>
       </li>
@@ -226,10 +206,7 @@ export function HostingDiscoveryPanel({
         </p>
       )}
       {!discovery?.lastSuccessAt ? (
-        <p className="subtle discovery-start">
-          Lancez la recherche pour retrouver les sites de ce compte et les
-          rattacher aux fiches existantes.
-        </p>
+        configured && !discovery?.error && <p className="subtle discovery-start">Premier relevé automatique en attente.</p>
       ) : (
         <>
           <div className="discovery-summary">
@@ -238,14 +215,7 @@ export function HostingDiscoveryPanel({
               {linked.length > 1 ? "s" : ""} rattaché
               {linked.length > 1 ? "s" : ""}
             </span>
-            <span>
-              <strong>{suggested.length}</strong> à ajouter
-            </span>
-            {review.length > 0 && (
-              <span>
-                <strong>{review.length}</strong> à vérifier
-              </span>
-            )}
+            {!!offered.length && <span><strong>{offered.length}</strong> à ajouter</span>}
             <small>Relevé du {formatDate(discovery.lastSuccessAt)}</small>
           </div>
           {!!linked.length && (
@@ -258,23 +228,11 @@ export function HostingDiscoveryPanel({
               </ul>
             </details>
           )}
-          {!!suggested.length && (
+          {!!offered.length && (
             <section className="discovery-group">
-              <h3>Nouveaux sites</h3>
-              <p>
-                Vigie a trouvé ces installations. Ajoutez celles que vous
-                souhaitez suivre.
-              </p>
+              <h3>Sites à ajouter au parc</h3>
               <ul className="discovery-list">
-                {suggested.map((i) => row(i, "new"))}
-              </ul>
-            </section>
-          )}
-          {!!review.length && (
-            <section className="discovery-group">
-              <h3>À vérifier</h3>
-              <ul className="discovery-list">
-                {review.map((i) => row(i, "review"))}
+                {offered.map((item) => row(item, "offered"))}
               </ul>
             </section>
           )}
@@ -304,7 +262,7 @@ export function HostingDiscoveryPanel({
                     <button
                       className="text-button"
                       disabled={disabled || busy !== null}
-                      onClick={() => act(i, "ignore", { ignored: false })}
+                      onClick={() => void showAgain(i)}
                     >
                       Réafficher
                     </button>
@@ -342,6 +300,11 @@ export function HostingDiscoveryPanel({
           installation={linking}
           projects={projects}
           onClose={() => setLinking(null)}
+          onCreate={!linking.project && canCreateProject(linking) ? async () => {
+            const result = await request(`installations/${linking.id}/create`, "POST", {});
+            await onChanged(result.discovery);
+            setLinking(null);
+          } : undefined}
           onSubmit={async (projectId) => {
             const next = await request(
               `installations/${linking.id}/link`,
@@ -360,11 +323,13 @@ function InstallationLinkForm({
   installation,
   projects,
   onSubmit,
+  onCreate,
   onClose,
 }: {
   installation: HostingInstallationView;
   projects: Project[];
   onSubmit: (id: string) => Promise<void>;
+  onCreate?: () => Promise<void>;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState(""),
@@ -388,28 +353,39 @@ function InstallationLinkForm({
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
+  async function submit(action: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <Modal
-      title="Rattacher à une fiche"
+      title={installation.project ? "Changer de fiche" : "Ajouter au parc"}
       description={installation.domains[0]}
       onClose={() => !busy && onClose()}
     >
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          if (!selected) return;
-          setBusy(true);
-          setError("");
-          try {
-            await onSubmit(selected);
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy(false);
-          }
+          if (selected) await submit(() => onSubmit(selected));
         }}
       >
         <div className="installation-picker">
+          {!installation.project && (
+            <p className="subtle">
+              {installation.candidates.length
+                ? "Vigie a trouvé des fiches possibles. Choisis celle qui correspond à ce site."
+                : onCreate
+                  ? "Choisis une fiche existante ou crée une nouvelle fiche pour ce site."
+                  : "Choisis une fiche existante. La création d’une fiche sera disponible après un relevé complet."}
+            </p>
+          )}
           <div className="search-input">
             <Search size={16} />
             <input
@@ -465,13 +441,18 @@ function InstallationLinkForm({
           >
             Annuler
           </button>
+          {onCreate && (
+            <button type="button" className="button secondary" disabled={busy} onClick={() => void submit(onCreate)}>
+              <Plus size={15} /> Créer une fiche
+            </button>
+          )}
           <button className="button primary" disabled={busy || !selected}>
             {busy ? (
               <Loader2 className="spin" size={15} />
             ) : (
               <Check size={15} />
             )}
-            Rattacher
+            Utiliser cette fiche
           </button>
         </div>
       </form>

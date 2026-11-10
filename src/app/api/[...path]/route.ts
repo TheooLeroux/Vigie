@@ -37,6 +37,7 @@ import {
   projectHostingInstallations,
   linkHostingInstallation,
   createProjectFromInstallation,
+  resolveHostingInstallation,
   ignoreHostingInstallation,
 } from "@/lib/hosting-discovery";
 import { withAuditActor } from "@/lib/audit-context";
@@ -389,6 +390,12 @@ async function handleRequest(request: Request, context: Context) {
         });
       }
       if (root === "installations" && id && path.length === 3) {
+        if (child === "resolve") {
+          const result = await resolveHostingInstallation(id);
+          if (!result.projectId) return Response.json(result);
+          await provisionLinkedObserver(id);
+          return Response.json({ ...result, discovery: await hostingDiscovery(result.discovery.connectionId) });
+        }
         if (child === "link") {
           (await linkHostingInstallation(id, raw));
           await provisionLinkedObserver(id);

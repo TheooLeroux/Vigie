@@ -27,6 +27,7 @@ import {
   projectHostingInstallations,
   findInstallationMatches,
   createProjectFromInstallation,
+  resolveHostingInstallation,
   linkHostingInstallation,
   ignoreHostingInstallation,
 } from "../src/lib/hosting-discovery";
@@ -332,6 +333,30 @@ test("synchronisation : rattachement unique, client conservé, ambiguïtés et a
   assert.equal((await projectHostingInstallations(p.id))[0].connectionName, host.name);
 });
 
+test("ajout au parc : rapprochement au clic, choix demandé en cas de doute", async () => {
+  const host = await saveHostingConnection({ ...credentials, username: "resolveuser" });
+  const domains = ["resolve-unique.example.org", "resolve-ambiguous.example.org", "resolve-new.example.org", "resolve-incomplete.example.org"];
+  await transaction(() => applyDiscoverySnapshot(host, result([
+    ...domains.slice(0, 3).map((domain) => item(domain)),
+    item(domains[3], "wordpress-incomplete"),
+  ])));
+  const { installations } = await hostingDiscovery(host.id);
+  const ids = domains.map(domain => installations.find(site => site.domains[0] === domain)!.id);
+  const expected = await project("Rapprochement apparu après le relevé", `https://${domains[0]}/`);
+  await project("Correspondance A", `https://${domains[1]}/`);
+  await project("Correspondance B", `https://${domains[1]}/`);
+  await project("Correspondance WordPress incomplète", `https://${domains[3]}/`);
+  const before = (await list("projects", "live")).length;
+  assert.equal((await resolveHostingInstallation(ids[0])).projectId, expected.id);
+  assert.equal((await resolveHostingInstallation(ids[0])).projectId, expected.id);
+  const choice = await resolveHostingInstallation(ids[1]);
+  assert.equal(choice.projectId, null);
+  assert.equal(choice.discovery.installations.find(site => site.id === ids[1])?.candidates.length, 2);
+  assert.equal((await resolveHostingInstallation(ids[2])).projectId, null);
+  assert.equal((await resolveHostingInstallation(ids[3])).projectId, null);
+  assert.equal((await list("projects", "live")).length, before);
+});
+
 test("création en un clic idempotente ; choix manuel, masquage et dernière observation conservés", async () => {
   const host = (await saveHostingConnection({
     ...credentials,
@@ -482,6 +507,7 @@ test("routes de découverte : session Google et périmètre requis, détail lié
   for (const path of [
     `connections/${host.id}/discover`,
     `installations/${id}/link`,
+    `installations/${id}/resolve`,
     `installations/${id}/create`,
     `installations/${id}/ignore`,
   ])
