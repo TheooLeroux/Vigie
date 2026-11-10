@@ -175,8 +175,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     const created = z.object({ id: uuid, name: z.literal(name), projectId: z.literal(projectId) }).parse(create.serviceCreate);
     preview = { ...target, remoteId: created.id, id: created.id, name, mode: "archive", root: "", repository: null, branch: null };
     log(`Service de test Railway créé (${name}).`);
-    const configured = await railwayUpdateRequest(preview, "mutation StaticPreviewConfig($serviceId:String!,$environmentId:String!,$input:ServiceInstanceUpdateInput!){serviceInstanceUpdate(serviceId:$serviceId,environmentId:$environmentId,input:$input)}", { serviceId: preview.remoteId, environmentId, input: { builder: "DOCKERFILE", healthcheckPath: "/health", healthcheckTimeout: 45 } });
-    if (configured.serviceInstanceUpdate !== true) throw new ApiError("Configuration du service de test refusée.", 422);
+    // Railway detects the Dockerfile at the root of an uploaded bundle.
     const deploymentId = await deployRailwayArchive(preview, bundle, randomUUID());
     log(`Image minimale envoyée à Railway (${deploymentId}).`);
     await waitForDeployment(preview, { deploymentId, runId: deploymentId }, async () => {});
