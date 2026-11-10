@@ -10,9 +10,10 @@ import {
   ClipboardList,
   PackagePlus,
   Search,
+  SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { RecordLink } from "./record-link";
 import { useProjectRealtime } from "./project-realtime";
 import { EmptyState, formatDate } from "./ui";
@@ -27,8 +28,13 @@ import {
   automaticControlActivity,
   type ActivityView,
 } from "@/lib/activity-model";
-const dayFormat = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "full",
+const weekdayFormat = new Intl.DateTimeFormat("fr-FR", {
+  weekday: "long",
+  timeZone: "Europe/Paris",
+});
+const dateFormat = new Intl.DateTimeFormat("fr-FR", {
+  day: "numeric",
+  month: "long",
   timeZone: "Europe/Paris",
 });
 const timeFormat = new Intl.DateTimeFormat("fr-FR", {
@@ -61,11 +67,6 @@ function ActivityEvent({ item, onProject }: { item: Activity; onProject: (id: st
       <ActivityTime date={item.createdAt} />
       <span className="activity-event-icon" aria-hidden="true"><Icon size={16} /></span>
       <div className="activity-event-body">
-        <div className="activity-event-title">
-          <strong>{title || item.detail || itemCategory}</strong>
-          {outcome && <span className="activity-event-tag">{outcome === "failure" ? "Échec" : "Changement détecté"}</span>}
-        </div>
-        {title && item.detail && <p>{item.detail}</p>}
         <div className="activity-event-meta">
           {item.projectId ? (
             <RecordLink
@@ -77,6 +78,11 @@ function ActivityEvent({ item, onProject }: { item: Activity; onProject: (id: st
           ) : item.projectName && item.projectName !== "Espace de travail" ? <span>{item.projectName}</span> : null}
           {item.actorName && <span>{item.actorName}</span>}
         </div>
+        <div className="activity-event-title">
+          {outcome && <span className="sr-only">{outcome === "failure" ? "Échec. " : "Changement détecté. "}</span>}
+          <strong>{title || item.detail || itemCategory}</strong>
+        </div>
+        {title && item.detail && <p>{item.detail}</p>}
       </div>
     </article>
   );
@@ -102,16 +108,14 @@ function ActivityGroup({ events, view, expanded, onProject }: {
         <ActivityTime date={latest.createdAt} />
         <span className="activity-event-icon" aria-hidden="true"><Icon size={16} /></span>
         <span className="activity-event-body">
-          <span className="activity-collection-label">
-            <span className="activity-event-title">
-              <strong>{incident ? title : `${count} inventaires WordPress relevés`}</strong>
-              {incident && <span className="activity-event-tag">{count} {automatic ? "passages" : "tentatives"}</span>}
-            </span>
-            <ChevronDown size={15} aria-hidden="true" />
+          {incident && latest.projectId && <span className="activity-event-meta">{latest.projectName}</span>}
+          <span className="activity-event-title">
+            <strong>{incident ? title : `${count} inventaires WordPress relevés`}</strong>
+            {incident && <span className="activity-event-tag">{count} {automatic ? "passages" : "tentatives"}</span>}
           </span>
           {incident && !automatic && <span className="activity-event-description">{latest.detail}</span>}
-          {incident && latest.projectId && <span className="activity-event-meta">{latest.projectName}</span>}
         </span>
+        <ChevronDown className="activity-collection-chevron" size={16} aria-hidden="true" />
       </summary>
       <ul className="activity-collection-items">
         {events.map(item => <li key={item.id}><ActivityEvent item={item} onProject={onProject} /></li>)}
@@ -136,6 +140,8 @@ export function ActivityPanel({
   allProjects?: { id: string; name: string }[];
 }) {
   const [view, setView] = useState<ActivityView>("focus");
+  const [showFilters, setShowFilters] = useState(false);
+  const filtersId = useId();
   const [query, setQuery] = useState("");
   const [project, setProject] = useState("");
   const [kind, setKind] = useState("");
@@ -190,9 +196,17 @@ export function ActivityPanel({
   const total = request ? remote?.total || 0 : localEntries.length;
   const currentPage = request ? remote?.page ?? page : Math.min(page, Math.max(0, Math.ceil(total / pageSize) - 1));
   const visible = request ? activityEntries(remote?.items || [], view) : localEntries.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  const days = new Map<string, typeof visible>();
+  for (const entry of visible) {
+    const date = activityDay(entry.latest.createdAt);
+    const day = days.get(date);
+    if (day) day.push(entry);
+    else days.set(date, [entry]);
+  }
   const pending = !!request && (loading || (!remote && !error));
   const resultLabel = total === 1 ? "entrée" : "entrées";
-  const hasFilters = !!(query || project || kind || since);
+  const filterCount = [project, kind, since].filter(Boolean).length;
+  const hasFilters = !!(query || filterCount);
   function reset() {
     setQuery("");
     setProject("");
@@ -206,97 +220,102 @@ export function ActivityPanel({
   }
 
   return (
-    <section className="panel activity-panel">
-      <div className="activity-view-header">
+    <section className="activity-panel" aria-label="Journal d’activité">
+      <div className="activity-toolbar">
         <div className="activity-view-switch" role="group" aria-label="Vue du journal">
           <button type="button" aria-pressed={view === "focus"} onClick={() => selectView("focus")}>À suivre</button>
           <button type="button" aria-pressed={view === "complete"} onClick={() => selectView("complete")}>Journal complet</button>
         </div>
-        <p>
-          {view === "focus"
-            ? "Échecs et nouveaux changements détectés."
-            : "Tous les événements, avec les relevés d’une même collecte regroupés."}
-        </p>
-      </div>
-      <div className="activity-tools">
-        <div className="activity-search">
-          <Search size={17} aria-hidden="true" />
-          <input
-            aria-label="Rechercher dans l’activité"
-            placeholder="Projet, action ou personne…"
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setPage(0);
-            }}
-          />
-          {query && (
-            <button
-              className="icon-button"
-              aria-label="Effacer la recherche d’activité"
-              onClick={() => {
-                setQuery("");
-                setPage(0);
-              }}
-            >
-              <X size={15} />
-            </button>
-          )}
-        </div>
-        <div className="activity-filters">
-          {!scoped && (
-            <label>
-              Projet
-              <select
-                aria-label="Projet"
-                value={project}
-                onChange={(e) => {
-                  setProject(e.target.value);
-                  setPage(0);
-                }}
-              >
-                <option value="">Tous les projets</option>
-                {projects.map(([id, name]) => (
-                  <option key={id} value={id}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          <label>
-            Type d’action
-            <select
-              aria-label="Type d’action"
-              value={kind}
-              onChange={(e) => {
-                setKind(e.target.value);
-                setPage(0);
-              }}
-            >
-              <option value="">Toutes les actions</option>
-              {activityKinds.map((k) => (
-                <option key={k}>{k}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Depuis le
+        <div className="activity-tools">
+          <div className="activity-search">
+            <Search size={17} aria-hidden="true" />
             <input
-              type="date"
-              value={since}
+              aria-label="Rechercher dans l’activité"
+              placeholder="Projet, action ou personne…"
+              value={query}
               onChange={(e) => {
-                setSince(e.target.value);
+                setQuery(e.target.value);
                 setPage(0);
               }}
             />
-          </label>
-          {hasFilters && (
-            <button className="text-button" onClick={reset}>
-              Réinitialiser <X size={13} />
-            </button>
-          )}
+            {query && (
+              <button
+                className="icon-button"
+                aria-label="Effacer la recherche d’activité"
+                onClick={() => {
+                  setQuery("");
+                  setPage(0);
+                }}
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
+          <button
+            className="activity-filter-button"
+            type="button"
+            aria-expanded={showFilters}
+            aria-controls={filtersId}
+            onClick={() => setShowFilters(open => !open)}
+          >
+            <SlidersHorizontal size={16} aria-hidden="true" /> Filtres
+            {!!filterCount && <span>{filterCount}</span>}
+          </button>
         </div>
+      </div>
+      <div className="activity-filters" id={filtersId} hidden={!showFilters}>
+        {!scoped && (
+          <label>
+            Projet
+            <select
+              aria-label="Projet"
+              value={project}
+              onChange={(e) => {
+                setProject(e.target.value);
+                setPage(0);
+              }}
+            >
+              <option value="">Tous les projets</option>
+              {projects.map(([id, name]) => (
+                <option key={id} value={id}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          Type d’action
+          <select
+            aria-label="Type d’action"
+            value={kind}
+            onChange={(e) => {
+              setKind(e.target.value);
+              setPage(0);
+            }}
+          >
+            <option value="">Toutes les actions</option>
+            {activityKinds.map((k) => (
+              <option key={k}>{k}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Depuis le
+          <input
+            type="date"
+            value={since}
+            onChange={(e) => {
+              setSince(e.target.value);
+              setPage(0);
+            }}
+          />
+        </label>
+        {hasFilters && (
+          <button className="text-button" onClick={reset}>
+            Réinitialiser <X size={13} />
+          </button>
+        )}
       </div>
       <div className="activity-results" role="status">
         {pending && !remote ? "Recherche dans l’historique…" : !error || remote ? `${countFormat.format(total)} ${resultLabel}` : null}
@@ -329,20 +348,33 @@ export function ActivityPanel({
           }
         />
       ) : (
-        <ol className="activity-timeline">
-          {visible.map(({ key, events, latest }, index) => (
-            <li key={key}>
-              {(index === 0 || activityDay(visible[index - 1].latest.createdAt) !== activityDay(latest.createdAt)) && (
-                <h2 className="activity-day">{dayFormat.format(new Date(latest.createdAt))}</h2>
-              )}
-              {events.length === 1 ? (
-                <ActivityEvent item={latest} onProject={onProject} />
-              ) : (
-                <ActivityGroup events={events} view={view} expanded={!!query.trim()} onProject={onProject} />
-              )}
-            </li>
-          ))}
-        </ol>
+        <div className="activity-timeline">
+          {[...days].map(([day, entries]) => {
+            const date = new Date(entries[0].latest.createdAt);
+            return (
+              <section key={day} className="activity-day-group">
+                <h2 className="activity-day">
+                  <time dateTime={day}>
+                    <span>{weekdayFormat.format(date)}</span>
+                    <strong>{dateFormat.format(date)}</strong>
+                    <span>{day.slice(0, 4)}</span>
+                  </time>
+                </h2>
+                <ol className="activity-day-events">
+                  {entries.map(({ key, events, latest }) => (
+                    <li key={key}>
+                      {events.length === 1 ? (
+                        <ActivityEvent item={latest} onProject={onProject} />
+                      ) : (
+                        <ActivityGroup events={events} view={view} expanded={!!query.trim()} onProject={onProject} />
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            );
+          })}
+        </div>
       )}
       {total > pageSize && (
         <div className="activity-pagination">
