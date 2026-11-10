@@ -2,7 +2,7 @@ import "./auth-fixture";
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { lookup } from "node:dns/promises";
-import { answerRuntimeChallenge, runtimeSignature, verifyRuntimeSignature } from "../src/lib/updates/vercel-runtime-protocol";
+import { answerRuntimeChallenge, neonDatabaseFingerprint, runtimeSignature, verifyRuntimeSignature } from "../src/lib/updates/vercel-runtime-protocol";
 import { hkdfSync } from "node:crypto";
 import { readVercelRuntime } from "../src/lib/updates/vercel-runtime";
 import { verifyDeployedNode, preflightNodeRuntime } from "../src/lib/updates/node-deployment";
@@ -11,7 +11,7 @@ import type { UpdateTarget } from "../src/lib/updates/types";
 
 const target: UpdateTarget = { id:"vercel:fixture",projectId:"fixture",name:"Vigie fixture",provider:"vercel",connectionId:"connection",remoteId:"prj_fixture",environmentId:null,repository:"owner/vigie",branch:"main",root:"",url:"https://vigie.example.test/",mode:"git",configured:true,unavailable:null };
 const reference = {deploymentId:"dpl_fixture",commit:"a".repeat(40)};
-const keys = ["VIGIE_CONNECTOR_ENCRYPTION_KEY","VIGIE_RUNTIME_PROBE_KEY","VERCEL","VERCEL_ENV","VERCEL_PROJECT_ID","VERCEL_DEPLOYMENT_ID","VERCEL_GIT_COMMIT_SHA","VERCEL_GIT_REPO_OWNER","VERCEL_GIT_REPO_SLUG","VERCEL_GIT_COMMIT_REF","VERCEL_REGION"];
+const keys = ["DATABASE_URL","VIGIE_CONNECTOR_ENCRYPTION_KEY","VIGIE_RUNTIME_PROBE_KEY","VERCEL","VERCEL_ENV","VERCEL_PROJECT_ID","VERCEL_DEPLOYMENT_ID","VERCEL_GIT_COMMIT_SHA","VERCEL_GIT_REPO_OWNER","VERCEL_GIT_REPO_SLUG","VERCEL_GIT_COMMIT_REF","VERCEL_REGION"];
 const original = new Map(keys.map(key=>[key,process.env[key]]));
 test.beforeEach(()=>{
  delete process.env.VIGIE_RUNTIME_PROBE_KEY;
@@ -57,6 +57,19 @@ test("Sonde Vercel : refuse signature forgée, message expiré et signature de r
  assert.throws(()=>answerRuntimeChallenge(input.raw,input.timestamp,input.signature),/déploiement servi/);
  process.env.VERCEL_ENV="preview";
  assert.throws(()=>answerRuntimeChallenge(input.raw,input.timestamp,input.signature),/production/);
+});
+
+test("Sonde Vercel : compare les accès Neon directs et poolés sans exposer les identifiants", () => {
+  const { raw, timestamp } = request();
+  process.env.DATABASE_URL = "postgresql://app:secret-probe@ep-test-pooler.eu.neon.tech/vigie";
+  const challenge = JSON.stringify({ ...JSON.parse(raw), database: true });
+  const packet = answerRuntimeChallenge(challenge, timestamp, runtimeSignature(target.remoteId, "request", challenge, timestamp));
+  assert.equal(packet.payload.databaseFingerprint,
+    neonDatabaseFingerprint(target.remoteId, "postgresql://worker:other@ep-test.eu.neon.tech:5432/vigie?sslmode=verify-full"));
+  assert.notEqual(packet.payload.databaseFingerprint,
+    neonDatabaseFingerprint(target.remoteId, "postgresql://worker:other@ep-test.eu.neon.tech/other"));
+  assert.doesNotMatch(JSON.stringify(packet), /secret-probe|ep-test/);
+  verifyRuntimeSignature(target.remoteId, "response", JSON.stringify(packet.payload), packet.timestamp, packet.signature);
 });
 test("Route Vercel : authentification exigée, taille bornée et réponse non mise en cache",async()=>{
  assert.equal((await POST(new Request(target.url!,{method:"POST",body:"{}"}))).status,401);

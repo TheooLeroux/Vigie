@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { runBackup } from "../src/lib/backups";
 import { runCommand } from "../src/lib/updates/process";
 import {
-  runtimeProofSchema, runtimeSignature, vercelRuntimePath, verifyRuntimeSignature,
+  neonDatabaseFingerprint, runtimeProofSchema, runtimeSignature, vercelRuntimePath, verifyRuntimeSignature,
 } from "../src/lib/updates/vercel-runtime-protocol";
 
 const vigieProjectId = "8f19124d-6da3-466b-9c44-ac385bf060a7";
@@ -21,7 +21,7 @@ async function productionDeployment() {
   if (ids.size !== 1) throw new Error("Identifiant du déploiement Vercel introuvable ou ambigu.");
   const [deploymentId] = ids;
   const nonce = randomBytes(32).toString("hex");
-  const body = JSON.stringify({ projectId: vercelProjectId, deploymentId, nonce });
+  const body = JSON.stringify({ projectId: vercelProjectId, deploymentId, nonce, database: true });
   const timestamp = String(Math.floor(Date.now() / 1000));
   const response = await fetch(origin + vercelRuntimePath, {
     ...options,
@@ -38,6 +38,11 @@ async function productionDeployment() {
   if (payload.nonce !== nonce || payload.projectId !== vercelProjectId || payload.deploymentId !== deploymentId ||
       payload.repository !== repository || !payload.commit) {
     throw new Error("Le déploiement de Vigie ne correspond pas au dépôt attendu.");
+  }
+  const sourceDatabase = neonDatabaseFingerprint(vercelProjectId, process.env.VIGIE_SELF_SOURCE_DATABASE_URL);
+  const catalogDatabase = neonDatabaseFingerprint(vercelProjectId, process.env.DATABASE_URL);
+  if (payload.databaseFingerprint !== sourceDatabase || catalogDatabase !== sourceDatabase) {
+    throw new Error("La base à sauvegarder et le catalogue doivent correspondre à la base de production de Vigie.");
   }
   return { service: "Vigie", root: serviceRoot, deploymentId, commit: payload.commit,
     repository, branch: payload.branch, node: payload.node, region: payload.region };

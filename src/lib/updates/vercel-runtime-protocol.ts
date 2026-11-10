@@ -3,8 +3,9 @@ import { z } from "zod";
 import { ApiError } from "../http";
 
 export const vercelRuntimePath = "/api/maintenance/runtime";
-export const runtimeChallengeSchema = z.object({ projectId: z.string().regex(/^prj_[\w]+$/), deploymentId: z.string().regex(/^dpl_[\w]+$/), nonce: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
-export const runtimeProofSchema = runtimeChallengeSchema.extend({ protocol: z.literal("vigie-vercel-runtime-v1"), node: z.string().regex(/^\d+\.\d+\.\d+$/), commit: z.string().regex(/^[a-f0-9]{40}$/).nullable(), repository: z.string().max(200).nullable(), branch: z.string().max(200).nullable(), environment: z.literal("production"), region: z.string().min(1).max(50), time: z.number().int() }).strict();
+const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
+export const runtimeChallengeSchema = z.object({ projectId: z.string().regex(/^prj_[\w]+$/), deploymentId: z.string().regex(/^dpl_[\w]+$/), nonce: fingerprint, database: z.literal(true).optional() }).strict();
+export const runtimeProofSchema = runtimeChallengeSchema.extend({ protocol: z.literal("vigie-vercel-runtime-v1"), node: z.string().regex(/^\d+\.\d+\.\d+$/), commit: z.string().regex(/^[a-f0-9]{40}$/).nullable(), repository: z.string().max(200).nullable(), branch: z.string().max(200).nullable(), environment: z.literal("production"), region: z.string().min(1).max(50), time: z.number().int(), databaseFingerprint: fingerprint.optional() }).strict();
 export type VercelRuntimeProof = z.infer<typeof runtimeProofSchema>;
 
 function key(projectId: string) {
@@ -22,6 +23,18 @@ function key(projectId: string) {
 export function runtimeSignature(projectId: string, purpose: "request" | "response", raw: string, timestamp: string) {
   return createHmac("sha256", key(projectId)).update(`${purpose}\n${vercelRuntimePath}\n${timestamp}\n${raw}`).digest("hex");
 }
+
+export function neonDatabaseFingerprint(projectId: string, connection: string | undefined) {
+  let url: URL;
+  try { url = new URL(connection ?? ""); }
+  catch { throw new ApiError("Base Neon de production indisponible pour la sonde.", 503); }
+  if (!["postgres:", "postgresql:"].includes(url.protocol) || !url.hostname.endsWith(".neon.tech") ||
+      url.pathname.length <= 1 || (url.port && url.port !== "5432")) {
+    throw new ApiError("Base Neon de production non reconnue.", 503);
+  }
+  const identity = [url.hostname.replace("-pooler.", "."), "5432", decodeURIComponent(url.pathname.slice(1))];
+  return createHmac("sha256", key(projectId)).update("neon-database\n" + JSON.stringify(identity)).digest("hex");
+}
 export function verifyRuntimeSignature(projectId: string, purpose: "request" | "response", raw: string, timestamp: string, signature: string) {
   if (Buffer.byteLength(raw) > 8192 || !/^\d{10}$/.test(timestamp) || Math.abs(Date.now() / 1000 - Number(timestamp)) > 90 || !/^[a-f0-9]{64}$/.test(signature)) throw new ApiError("Preuve Vercel non autorisée ou expirée.", 401);
   if (!timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(runtimeSignature(projectId, purpose, raw, timestamp), "hex"))) throw new ApiError("Signature de la preuve Vercel invalide.", 401);
@@ -34,7 +47,8 @@ export function answerRuntimeChallenge(raw: string, timestamp: string, signature
   verifyRuntimeSignature(projectId, "request", raw, timestamp, signature);
   const challenge = runtimeChallengeSchema.parse(JSON.parse(raw));
   if (challenge.projectId !== projectId || challenge.deploymentId !== env.VERCEL_DEPLOYMENT_ID) throw new ApiError("Le déploiement servi ne correspond pas à la demande.", 409);
-  const payload = runtimeProofSchema.parse({ ...challenge, protocol: "vigie-vercel-runtime-v1", node: process.versions.node, commit: env.VERCEL_GIT_COMMIT_SHA || null, repository: env.VERCEL_GIT_REPO_OWNER && env.VERCEL_GIT_REPO_SLUG ? `${env.VERCEL_GIT_REPO_OWNER}/${env.VERCEL_GIT_REPO_SLUG}` : null, branch: env.VERCEL_GIT_COMMIT_REF || null, environment: env.VERCEL_ENV, region: env.VERCEL_REGION, time: Math.floor(Date.now() / 1000) });
+  const database = challenge.database ? { databaseFingerprint: neonDatabaseFingerprint(projectId, env.DATABASE_URL) } : {};
+  const payload = runtimeProofSchema.parse({ ...challenge, protocol: "vigie-vercel-runtime-v1", node: process.versions.node, commit: env.VERCEL_GIT_COMMIT_SHA || null, repository: env.VERCEL_GIT_REPO_OWNER && env.VERCEL_GIT_REPO_SLUG ? `${env.VERCEL_GIT_REPO_OWNER}/${env.VERCEL_GIT_REPO_SLUG}` : null, branch: env.VERCEL_GIT_COMMIT_REF || null, environment: env.VERCEL_ENV, region: env.VERCEL_REGION, time: Math.floor(Date.now() / 1000), ...database });
   const time = String(payload.time);
   return { payload, timestamp: time, signature: runtimeSignature(projectId, "response", JSON.stringify(payload), time) };
 }
