@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { projectRealtimeSql } from "../src/lib/project-realtime-query";
 import { changedProjects, hasProjectChanges } from "../src/lib/project-realtime";
+import { securityWatchSnapshotKey } from "../src/lib/security-watch";
 
 test("PostgreSQL : événements de workers, rapports Railway sans sources, suppression et révocation", { skip: !process.env.VIGIE_UPDATES_TEST_DATABASE_URL }, async () => {
   const url = new URL(process.env.VIGIE_UPDATES_TEST_DATABASE_URL!);
@@ -38,6 +39,13 @@ test("PostgreSQL : événements de workers, rapports Railway sans sources, suppr
     const beforeDelete = await read();
     await db.query("DELETE FROM wordpress_catalog WHERE cache_key LIKE 'control:report:%'");
     assert.deepEqual(changedProjects(beforeDelete, await read()).projects, ["second"]);
+    const beforeWatch = await read();
+    await db.query("INSERT INTO wordpress_catalog VALUES ($1,'{ \"detected\": [] }','2099-01-01')", [securityWatchSnapshotKey]);
+    const change = changedProjects(beforeWatch, await read());
+    assert.deepEqual(change, { all: false, workspace: false, projects: [], activity: false, activityProjects: [], watch: true });
+    assert.deepEqual((await read()).find(row => row.key === securityWatchSnapshotKey), {
+      key: securityWatchSnapshotKey, project_id: null, kind: "watch", revision: "2099-01-01",
+    });
     await db.query(`UPDATE "user" SET "emailVerified"=false`);
     assert.deepEqual(await read(), []);
     await db.query(`UPDATE "user" SET "emailVerified"=true`);

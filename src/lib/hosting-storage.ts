@@ -12,6 +12,20 @@ export async function hostingStorage() {
   return db;
 }
 
+export async function readCatalogReports<T>(keys: Iterable<string>, expiresAfter?: string) {
+  const selected = [...new Set(keys)];
+  const reports = new Map<string, T>();
+  if (!selected.length) return reports;
+  const db = await hostingStorage();
+  for (let offset = 0; offset < selected.length; offset += 500) {
+    const batch = selected.slice(offset, offset + 500);
+    const rows = await db.prepare(`SELECT cache_key,data FROM wordpress_catalog WHERE cache_key IN (${batch.map(() => "?").join(",")})${expiresAfter ? " AND expires_at>?" : ""}`)
+      .all(...batch, ...(expiresAfter ? [expiresAfter] : [])) as { cache_key: string; data: string }[];
+    for (const row of rows) reports.set(row.cache_key, JSON.parse(row.data));
+  }
+  return reports;
+}
+
 export async function claimHostingObservation(scope: string, leaseMs = 10 * 60_000) {
   const db = await hostingStorage();
   const key = `hosting:observation:lease:${scope}`;

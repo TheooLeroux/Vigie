@@ -1,11 +1,11 @@
 import { normalizeImageDigest } from "../image-reference";
 import { railwayRuntimeDeployments } from "../railway-status";
-import type { ProjectDetail } from "../types";
+import type { ProjectObservationDetail } from "../types";
 import type { UpdateResult, UpdateState, UpdateTarget } from "./types";
 
 // A recent inventory can still predate a proven image replacement. Its scan
 // remains historical until the provider confirms which deployment is active.
-export function imageObservationPending(target: UpdateTarget, detail: ProjectDetail, state?: UpdateState | null) {
+export function imageObservationPending(target: UpdateTarget, detail: ProjectObservationDetail, state?: UpdateState | null) {
   if (target.provider !== "railway") return false;
   const project = detail.railway?.find(project => project.connectionId === target.connectionId && project.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId));
   const service = project?.services.find(service => service.id === target.remoteId && service.environmentId === target.environmentId);

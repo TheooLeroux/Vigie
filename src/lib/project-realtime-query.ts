@@ -1,4 +1,6 @@
-// Only opaque revisions leave Neon. The live engine computes these on its
+import { securityWatchSnapshotKey } from "./security-watch";
+
+// Only revisions leave Neon. The live engine computes these on its
 // replica; neither project data nor connector/source credentials are streamed.
 export const projectRealtimeSql = `
 WITH targets AS (
@@ -12,6 +14,8 @@ WITH targets AS (
   UNION ALL SELECT 'hosting:' || id, project_id FROM hosting_installations
 ), revisions AS (
   SELECT 'authorized' AS key, NULL::text AS project_id, 'auth' AS kind, '1' AS revision
+  UNION ALL SELECT cache_key, NULL, 'watch', expires_at
+    FROM wordpress_catalog WHERE cache_key = '${securityWatchSnapshotKey}'
   UNION ALL SELECT 'project:' || id, id, 'project', md5(data || COALESCE(client_id, '')) FROM projects WHERE workspace = 'live'
   UNION ALL SELECT 'client:' || id, NULL, 'workspace', md5(data) FROM clients WHERE workspace = 'live'
   UNION ALL SELECT 'service:' || id, project_id, 'project', md5(data) FROM services WHERE workspace = 'live'

@@ -26,7 +26,7 @@ import {
 } from "@/lib/railway-status";
 import { RecordLink } from "./record-link";
 import { RailwayBuildDetails, railwayVersionPreview } from "./railway-build-details";
-import { DeploymentConnectionReading, ObservationDetails, useObservationTime } from "./observation-details";
+import { ConnectionReading, ObservationDetails, useObservationTime } from "./observation-details";
 import { Modal, Field, formatDate, OutLink } from "./ui";
 type RequestApi = (
   path: string,
@@ -213,7 +213,7 @@ export function RailwayConnectionsPanel({
                     <p>{linked.length} dans le parc{needsAttention.length > 0 && ` · ${needsAttention.length} à traiter`}</p>
                   </div>
                   <div className="connection-card-tools">
-                    <DeploymentConnectionReading configured={c.configured} error={c.error} lastSuccessAt={c.lastSuccessAt} />
+                    <ConnectionReading configured={c.configured} error={c.error} lastSuccessAt={c.lastSuccessAt} />
                     <button
                       className="button primary"
                       disabled={!!busy}

@@ -29,6 +29,7 @@ import { ApiError } from "../src/lib/http";
 import type { VercelProject } from "../src/lib/vercel-types";
 import { finishAssessment } from "../src/lib/updates/assessment";
 import { expireInterruptedAssessments } from "../src/lib/updates/daily-assessments";
+import { activityPage } from "../src/lib/activity";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 process.env.VIGIE_UPDATES_ENABLED = "1";
@@ -99,7 +100,35 @@ test("Bilan durable : un résultat sans preuve de candidate ne devient pas une m
   const stored = (await readUpdateRun(run.id))!;
   assert.equal(stored.stage, "failed");
   assert.match(stored.results[0].message, /proposition vérifiable/);
+  const { items } = await activityPage({ projectId: project.id, kind: "Bilans automatiques" }, "live");
+  assert.deepEqual(items.map(item => item.action), ["updates.assessment_failed"]);
   assert.equal((await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE run_id=?").all(run.id)).length, 0);
+});
+
+test("Journal des bilans : seules les nouvelles propositions produisent une entrée", async () => {
+  const { project } = await fixture();
+  const db = await updateStorage();
+  const reports = [
+    { changes: [], expected: [] },
+    { changes: ["lib : 1.0.0 → 1.1.0"], expected: ["updates.assessment_changed"] },
+    { changes: ["lib : 1.0.0 → 1.1.0"], expected: ["updates.assessment_changed"] },
+    { changes: ["lib : 1.0.0 → 1.2.0"], expected: ["updates.assessment_changed", "updates.assessment_changed"] },
+  ];
+  for (const [index, { changes, expected }] of reports.entries()) {
+    const run = await startProjectUpdate({ projectId: project.id }, async () => {}, { assessment: true });
+    await executeUpdate(run.id, async (_run, _targets, results) => {
+      for (const result of results) {
+        result.checks = [{ tool: "OSV", phase: "candidate", checkedAt: new Date().toISOString(), scope: "", status: "passed", findings: [], message: "Test isolé" }];
+        finishAssessment(result, changes);
+      }
+    });
+    const stored = (await readUpdateRun(run.id))!;
+    assert.equal(stored.stage, "completed");
+    const { items } = await activityPage({ projectId: project.id, kind: "Bilans automatiques" }, "live");
+    assert.deepEqual(items.map(item => item.action), expected);
+    stored.createdAt = new Date(Date.UTC(2025, 0, index + 1)).toISOString();
+    await db.prepare("UPDATE update_runs SET data=? WHERE id=?").run(JSON.stringify(stored), run.id);
+  }
 });
 
 test("Bilan durable : un exécuteur interrompu libère seulement ses propres verrous, sans toucher une installation", async () => {
@@ -111,6 +140,7 @@ test("Bilan durable : un exécuteur interrompu libère seulement ses propres ver
   await db.prepare("UPDATE update_runs SET data=? WHERE id=?").run(JSON.stringify(report), report.id);
   await expireInterruptedAssessments();
   assert.equal((await readUpdateRun(report.id))!.stage, "failed");
+  assert.equal((await activityPage({ projectId: first.project.id, kind: "Bilans automatiques" }, "live")).items[0]?.action, "updates.assessment_failed");
   assert.equal((await readUpdateRun(installation.id))!.stage, "queued");
   assert.equal((await db.prepare("SELECT scope FROM update_locks WHERE run_id=?").all(report.id)).length, 0);
   assert.ok((await db.prepare("SELECT scope FROM update_locks WHERE run_id=?").all(installation.id)).length > 0);

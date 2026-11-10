@@ -200,6 +200,7 @@ export async function log(
   action: string,
   detail: string,
   projectId: string | null = null,
+  collectionId?: string,
 ) {
   const project = projectId
     ? (await get<Project>("projects", projectId, workspace))
@@ -215,6 +216,7 @@ export async function log(
     {
       actorName: auditActor()?.name,
       actorEmail: auditActor()?.email,
+      collectionId,
       id: randomUUID(),
       projectId,
       projectName: project?.name || "Espace de travail",
@@ -283,9 +285,16 @@ export async function createProject(
   (await log(workspace, "project.created", "Projet ajouté à l’inventaire.", p.id));
   return p;
 }
+export const visibleActivity = "COALESCE(json_extract(data,'$.action'),'') NOT IN ('updates.assessment_started', 'updates.assessed')";
+export const activityDetail = "CASE WHEN json_extract(data,'$.action')='updates.assessment_failed' THEN 'Consultez le bilan dans la fiche du projet.' ELSE json_extract(data,'$.detail') END";
+
+export function readActivity({ data, detail }: { data: string; detail: string }) {
+  return { ...JSON.parse(data) as Activity, detail };
+}
+
 async function recentActivity(workspace: Workspace, projectId?: string) {
-  const rows = await database().prepare("SELECT data FROM activity WHERE workspace=?" + (projectId ? " AND project_id=?" : "") + " ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT 100").all(workspace, ...(projectId ? [projectId] : [])) as { data: string }[];
-  return rows.map(row => JSON.parse(row.data) as Activity);
+  const rows = await database().prepare(`SELECT data, ${activityDetail} AS detail FROM activity WHERE workspace=? AND ${visibleActivity}` + (projectId ? " AND project_id=?" : "") + " ORDER BY json_extract(data,'$.createdAt') DESC,id DESC LIMIT 100").all(workspace, ...(projectId ? [projectId] : [])) as Parameters<typeof readActivity>[0][];
+  return rows.map(readActivity);
 }
 export async function workspaceData(workspace: Workspace): Promise<WorkspaceData> {
   return {

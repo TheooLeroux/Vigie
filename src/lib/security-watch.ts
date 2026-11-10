@@ -2,6 +2,8 @@ import type { ProjectVulnerability } from "./project-security";
 import type { Project } from "./types";
 import { groupVulnerabilityReferences, severityOrder } from "./vulnerability-references";
 
+export const securityWatchSnapshotKey = "security-watch:snapshot:1:live";
+
 type Severity = ProjectVulnerability["severity"];
 
 export const severityLabels: Record<Severity, string> = {

@@ -224,6 +224,7 @@ export type Inventory = {
   componentCount: number;
 };
 export type Activity = {
+  collectionId?: string;
   actorName?: string;
   actorEmail?: string;
   id: string;
@@ -243,6 +244,8 @@ export type WorkspaceData = {
   inventories: Inventory[];
   activity: Activity[];
 };
+export type ProjectObservationDetail = Pick<ProjectDetail, "project" | "hosting" | "vercel" | "railway">;
+
 export type ProjectDetail = {
   vercel?: import('./vercel-types').VercelProjectView[];
   railway?: import('./railway-types').RailwayProjectView[];

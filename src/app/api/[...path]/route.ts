@@ -22,7 +22,7 @@ import { readUpdateSource } from "@/lib/updates/storage";
 import { updateTargets } from "@/lib/updates/targets";
 import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
 import { projectSummaries } from "@/lib/project-summaries";
-import { securityWatch } from "@/lib/security-watch-data";
+import { readSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { activityPage } from "@/lib/activity";
 import { downloadBackup, listBackups } from "@/lib/backups";
 import {
@@ -157,13 +157,19 @@ async function handleRequest(request: Request, context: Context) {
       return Response.json(await projectSummaries(input.ids, request.signal));
     }
     if (method === "POST" && root === "updates" && id === "refresh" && path.length === 2) {
-      const input = z.object({ projectId: z.string().uuid() }).parse(await body(request));
-      const refresh = await refreshProjectHosting(input.projectId);
-      return Response.json({ ...refresh, state: await projectUpdates(input.projectId) });
+      const input = z.object({ projectId: z.string().uuid(), force: z.boolean().optional() }).parse(await body(request));
+      const refresh = await refreshProjectHosting(input.projectId, undefined, { wordpress: true, force: input.force });
+      return Response.json({ ...refresh, state: await projectUpdates(input.projectId) }, { headers: { "Cache-Control": "private, no-store" } });
     }
     if (method === "GET") {
       if (root === "security-watch" && path.length === 1) {
-        return Response.json(await securityWatch(workspace, request.signal), { headers: { "Cache-Control": "private, no-store" } });
+        const snapshot = await readSecurityWatchSnapshot();
+        return Response.json(snapshot
+          ? { ...snapshot.watch, savedAt: snapshot.savedAt }
+          : { error: "Aucun relevé récent de la veille n’est disponible." }, {
+          status: snapshot ? 200 : 503,
+          headers: { "Cache-Control": "private, no-store" },
+        });
       }
       if (root === "activity" && path.length === 1) return Response.json(await activityPage(Object.fromEntries(url.searchParams.entries().filter(([key]) => key !== "workspace")), workspace));
       if (root === "backups" && path.length === 1) {

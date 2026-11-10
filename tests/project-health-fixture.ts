@@ -2,7 +2,7 @@ import type { ProjectDetail } from "../src/lib/types";
 import type { RailwayProjectView, SoftwareRelease } from "../src/lib/railway-types";
 import type { UpdateCheck, UpdateState } from "../src/lib/updates/types";
 
-export const healthAt = "2026-10-27T15:00:00.000Z", healthDigest = "sha256:" + "a".repeat(64);
+export const healthAt = new Date().toISOString(), healthDigest = "sha256:" + "a".repeat(64);
 export const healthRelease: SoftwareRelease = { state: "current", latestVersion: "24.22.1", latestStable: "25.1.0", latestLts: "24.22.1", supported: true, supportEndsAt: "2028-04-30", securityUpdate: false, checkedAt: healthAt, source: "https://nodejs.org/" };
 export function healthFixture(): ProjectDetail {
   const railway: RailwayProjectView = { id: "remote-project", name: "App", connectionId: "connection", connectionName: "Railway", workspaceId: "workspace", workspaceName: "Workspace", environments: [], observedAt: healthAt, missingSince: null, connectionError: null, configured: true, projectId: "project", projectName: "App", linkMethod: "manual", services: [{ id: "backend", name: "Backend", environmentId: "production", environmentName: "Production", domains: [], repository: "example/app", image: null, builder: "DOCKERFILE", region: null, replicas: 1, rootDirectory: "/backend", healthcheckPath: "/health", cronSchedule: null, latestDeployment: null, activeDeployments: [{ id: "deployed", status: "SUCCESS", createdAt: healthAt, updatedAt: healthAt, evidence: { repository: "example/app", branch: "main", commit: "b".repeat(40), rootDirectory: "/backend", imageDigest: healthDigest, railpackVersion: "0.43.0", framework: null, staticSite: false, packages: [{ name: "node", version: "24.22.1", usage: "runtime", release: { ...healthRelease } }] } }] }] };

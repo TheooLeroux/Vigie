@@ -1,4 +1,4 @@
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { join, posix } from "node:path";
@@ -114,6 +114,7 @@ export async function collectHostingInventories(
   if (running.has(scope))
     throw new ApiError("Une collecte est déjà en cours sur ce compte.", 409);
   running.add(scope);
+  const collectionId = randomUUID();
   try {
     return await withHostingCredentials(connectionId, async (input) => {
       const client = cpanelReadClient(input, transport);
@@ -161,6 +162,7 @@ export async function collectHostingInventories(
                 "hosting.inventory",
                 `Inventaire ${snapshot.source === "wordpress-observer" ? "WordPress" : "des fichiers WordPress"} relevé sur ${item.domains[0]} : ${snapshot.plugins.length} extensions, ${snapshot.themes.length} thèmes.`,
                 item.project?.id || null,
+                collectionId,
               ));
             }));
             if (item.project && !options.readOnlyProjectId) await enqueueLocalAgent(item.id);

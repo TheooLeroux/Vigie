@@ -1,13 +1,14 @@
 import { gt, valid } from "semver";
 import { railwayRuntimeDeployments } from "./railway-status";
 import type { SoftwareRelease } from "./railway-types";
-import type { ProjectDetail, SiteInventory } from "./types";
+import type { ProjectObservationDetail, SiteInventory } from "./types";
 import { activeUpdateStages, type SecurityFinding, type UpdateCheck, type UpdateState } from "./updates/types";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { controlMatches, automaticControlFresh } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
 import { currentAssessmentResults } from "./updates/assessment";
 import { activeRailpackImageReport } from "./updates/railpack-image-report";
+import { deploymentObservationLifetime, observationIsFresh, wordpressInventoryIsFresh, wordpressUpdateIsFresh } from "./observation-freshness";
 
 export type ProjectHealth = {
   securityEvidence: { targetId: string; name: string; tool: UpdateCheck["tool"]; checkedAt: string; finding: SecurityFinding; railpackImage?: boolean; minimalStaticImage?: boolean }[];
@@ -40,7 +41,7 @@ const isWordPressSecurityCheck = (check: UpdateCheck) => check.tool === "WPScan"
 
 // Read existing observations only. A rejected candidate never describes the
 // deployed site; accepted Node scans must match its active image identity.
-export function projectHealth(detail: ProjectDetail, state?: UpdateState | null): ProjectHealth {
+export function projectHealth(detail: ProjectObservationDetail, state?: UpdateState | null): ProjectHealth {
   const security = new Map<string, string>(), updates = new Map<string, string>();
   const updateOrigins = new Map<string, string>();
   const setUpdate = (key: string, label: string, targetId?: string) => { updates.set(key, label); if (targetId) updateOrigins.set(key, targetId); };
@@ -67,7 +68,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     }
   };
   for (const project of detail.railway || []) {
-    if (project.connectionError || project.missingSince) incomplete = true;
+    if (project.configured === false || project.connectionError || project.missingSince || !observationIsFresh(project.observedAt, deploymentObservationLifetime)) { incomplete = true; continue; }
     for (const service of project.services) {
       const active = railwayRuntimeDeployments(service);
       const result = latest?.results.find(result => latest.targets.some(target => target.id === result.targetId && target.connectionId === project.connectionId && target.remoteId === service.id && target.environmentId === service.environmentId));
@@ -84,9 +85,10 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     }
   }
   for (const project of detail.vercel || []) {
-    if (project.connectionError || project.missingSince || !project.production) incomplete = true;
+    if (project.excluded) continue;
+    if (project.configured === false || project.connectionError || project.missingSince || !observationIsFresh(project.observedAt, deploymentObservationLifetime)) { incomplete = true; continue; }
     const deployment = project.production;
-    if (!deployment) continue;
+    if (!deployment) { incomplete = true; continue; }
     const managed = history.flatMap(run => run.results.map(result => ({ run, result }))).find(({ run, result }) => {
       const target = run.targets.find(target => target.id === result.targetId);
       const proof = result.checks?.findLast(check => check.tool === "Node" && check.phase === "after" && check.status === "passed")?.nodeEvidence;
@@ -110,9 +112,10 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
     }
   }
   for (const installation of detail.hosting || []) {
+    if (installation.kind !== "wordpress" || installation.ignored) continue;
     const inventory = installation.inventory;
-    if (!inventory || installation.missingSince || installation.inspectionError || inventory.error || inventory.collectionMode === "early") incomplete = true;
-    if (!inventory) continue;
+    if (!inventory || !wordpressInventoryIsFresh(installation)) { incomplete = true; continue; }
+    if (installation.inspectionError || inventory.collectionMode === "early") incomplete = true;
     const siteRun = state?.runs.find(run => run.projectId === detail.project.id && run.targets.some(target => target.mode === "wordpress" && target.remoteId === installation.id && target.connectionId === installation.connectionId));
     const result = siteRun?.results.find(result => siteRun.targets.some(target => target.id === result.targetId && target.mode === "wordpress" && target.remoteId === installation.id && target.connectionId === installation.connectionId));
     const installed = result?.checks?.findLast(check => isWordPressSecurityCheck(check) && check.phase === "after");
@@ -126,6 +129,7 @@ export function projectHealth(detail: ProjectDetail, state?: UpdateState | null)
       ...inventory.themes.map(item => ({ ...item, id: "theme:" + item.file })),
     ];
     for (const component of components) {
+      if (!wordpressUpdateIsFresh(component)) { incomplete = true; continue; }
       if (component.updateState === "available") {
         versionsKnown = true;
         const key = `${installation.id}:${component.id}`;

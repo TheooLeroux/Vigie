@@ -2,19 +2,24 @@ import { authFixture } from "./auth-fixture";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { createProject, save } from "../src/lib/db";
+import { createProject, database, projectDetail, save, workspaceData } from "../src/lib/db";
 import { createProjectSchema } from "../src/lib/validation";
 import { activityPage } from "../src/lib/activity";
+import { activityEntries, activityOutcome } from "../src/lib/activity-model";
 import { listBackups } from "../src/lib/backups";
 import { updateStorage } from "../src/lib/updates/storage";
 import { projectSummaries } from "../src/lib/project-summaries";
 import { observedInventory } from "../src/lib/project-summary";
 import { refreshProjectHosting } from "../src/lib/updates/refresh-hosting";
 import { reconcileAutomaticControls } from "../src/lib/automatic-controls";
-import { automaticControlDue, controlMatches, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
+import { automaticControlDue, controlMatches, controlSource, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
+import { writeAutomaticControl } from "../src/lib/automatic-control-storage";
+import { observedProjectDetail } from "../src/lib/project-observations";
+import { railwayState } from "../src/lib/railway";
+import { updateTargets } from "../src/lib/updates/targets";
 import { ApiError } from "../src/lib/http";
 import { GET, POST } from "../src/app/api/[...path]/route";
-import { healthFixture, healthUpdates } from "./project-health-fixture";
+import { healthCheck, healthFixture, healthUpdates } from "./project-health-fixture";
 
 async function project(name: string) { return createProject("live", createProjectSchema.parse({ name, url: "https://example.test", technology: "Node.js", provider: "Vercel", runtime: "Node", version: "24" })); }
 
@@ -38,19 +43,85 @@ test("Historique serveur : caractères LIKE littéraux et date civile de Paris s
   await assert.rejects(activityPage({ since: "2026-02-30" }, "live"), /invalide/);
 });
 
-test("Historique serveur : les bilans et les mises à jour sont filtrés séparément", async () => {
+test("Activité et historique : seuls les bilans en échec et les nouvelles propositions sont affichés", async () => {
   const p = await project("Maintenance history fixture");
-  const actions = ["updates.assessment_started", "updates.assessed", "updates.assessment_failed", "updates.completed", "updates.failed", "project.updated"];
+  const actions = ["updates.assessment_started", "updates.assessed", "updates.assessment_failed", "updates.assessment_changed", "updates.completed", "updates.failed", "project.updated"];
   for (const [index, action] of actions.entries()) {
     await save("activity", "live", {
       id: randomUUID(), projectId: p.id, projectName: p.name, action,
-      detail: "Maintenance history marker", createdAt: new Date(Date.UTC(2025, 0, 1) + index * 1000).toISOString(),
+      detail: "Maintenance history marker", createdAt: new Date(Date.UTC(2025, 0, 2) + index * 1000).toISOString(),
     }, p.id);
   }
-  const rows = async (kind: string) => (await activityPage({ projectId: p.id, query: "Maintenance history marker", kind }, "live")).items.map(item => item.action);
-  assert.deepEqual(await rows("Bilans automatiques"), actions.slice(0, 3).reverse());
-  assert.deepEqual(await rows("Mises à jour"), actions.slice(3, 5).reverse());
-  assert.deepEqual(await rows("Modifications"), ["project.updated"]);
+  for (const projectId of [undefined, p.id]) {
+    const filters = { projectId, query: p.name };
+    const assessments = await activityPage({ ...filters, kind: "Bilans automatiques" }, "live");
+    assert.equal(assessments.total, 2);
+    assert.deepEqual(assessments.items.map(item => item.action), ["updates.assessment_changed", "updates.assessment_failed"]);
+    assert.equal(assessments.items[1].detail, "Consultez le bilan dans la fiche du projet.");
+    assert.equal((await activityPage({ projectId, kind: "Bilans automatiques", query: "assessment_started" }, "live")).total, 0);
+    const updates = await activityPage({ ...filters, kind: "Mises à jour" }, "live");
+    assert.deepEqual(updates.items.map(item => item.action), ["updates.failed", "updates.completed"]);
+  }
+  for (const data of [await workspaceData("live"), await projectDetail(p.id, "live")]) {
+    assert.deepEqual(data.activity.filter(item => item.projectId === p.id && item.action.startsWith("updates.assess")).map(item => item.action), ["updates.assessment_changed", "updates.assessment_failed"]);
+  }
+});
+
+test("À suivre : les échecs et propositions sont recherchés dans tout le journal", async () => {
+  const p = await project("Focus activity fixture");
+  const samples = [
+    ["hosting.inventory", "Relevé ordinaire"],
+    ["hosting.inventory_failed", "Relevé en échec"],
+    ["Échec historique", "Ancien format"],
+    ["updates.assessment_changed", "Nouvelle proposition"],
+    ["updates.completed", "Installation terminée"],
+    ["hosting.automatic_control", "Contrôle automatique : 2 service(s) vérifié(s), 0 couverture(s) limitée(s), 0 échec(s), 0 différé(s)."],
+    ["hosting.automatic_control", "Contrôle automatique : 2 service(s) vérifié(s), 0 couverture(s) limitée(s), 12 échec(s), 0 différé(s)."],
+  ];
+  for (const [index, [action, detail]] of samples.entries()) {
+    await save("activity", "live", {
+      id: randomUUID(), projectId: p.id, projectName: p.name, action, detail,
+      createdAt: new Date(Date.UTC(2025, 0, 3, 0, index)).toISOString(),
+    }, p.id);
+  }
+  for (const projectId of [undefined, p.id]) {
+    const page = await activityPage({ projectId, query: p.name, view: "focus" }, "live");
+    assert.equal(page.total, 4);
+    assert.deepEqual(page.items.map(item => item.action), [
+      "hosting.automatic_control", "updates.assessment_changed", "Échec historique", "hosting.inventory_failed",
+    ]);
+    assert.deepEqual(page.items.map(activityOutcome), ["failure", "change", "failure", "failure"]);
+  }
+});
+
+test("Journal complet : une collecte ne se coupe pas à la pagination et respecte les filtres", async () => {
+  const first = await project("Collection premier projet");
+  const second = await project("Collection second projet");
+  const collectionId = randomUUID();
+  const otherCollection = randomUUID();
+  for (let index = 0; index < 56; index++) {
+    const p = index === 55 ? second : first;
+    await save("activity", "live", {
+      id: randomUUID(), projectId: p.id, projectName: p.name,
+      action: "hosting.inventory", detail: `pagination-inventaire ${index}`,
+      createdAt: new Date(Date.UTC(2025, 0, 3, 0, index)).toISOString(),
+      collectionId: index >= 26 ? collectionId : index >= 24 ? otherCollection : undefined,
+    }, p.id);
+  }
+  const filters = { view: "complete", query: "pagination-inventaire" };
+  const firstPage = await activityPage(filters, "live");
+  assert.equal(firstPage.total, 26);
+  const entries = activityEntries(firstPage.items, true);
+  assert.equal(entries.length, 25);
+  assert.equal(entries[0].events.length, 30);
+  assert.equal(entries[0].latest.projectId, second.id);
+  assert.equal(entries[1].events.length, 2);
+  const lastPage = await activityPage({ ...filters, page: 1 }, "live");
+  assert.deepEqual(lastPage.items.map(item => item.detail), ["pagination-inventaire 0"]);
+  const scoped = await activityPage({ ...filters, projectId: first.id }, "live");
+  assert.equal(activityEntries(scoped.items, true)[0].events.length, 29);
+  const search = await activityPage({ ...filters, query: "pagination-inventaire 55" }, "live");
+  assert.deepEqual(search.items.map(item => item.projectId), [second.id]);
 });
 
 test("Actualisation : seules les connexions liées et périmées sont relues, avec déduplication des appels concurrents", async () => {
@@ -97,6 +168,33 @@ test("Résumés groupés : un identifiant disparu ne supprime pas les autres pro
   assert.ok(data[p.id]); assert.equal(Object.keys(data).length, 1);
   assert.equal(data[p.id].known, false); assert.equal(data[p.id].count, 0);
   const detail = healthFixture(); assert.equal(observedInventory(detail), true, "les paquets de l’image observée constituent un relevé technique");
+});
+
+test("Résumés groupés : le rapport et le dernier traitement restent associés à leur projet", async () => {
+  const [first, second] = await Promise.all([project("Railway avec rapport"), project("Projet sans rapport")]);
+  const remote = healthFixture().railway![0];
+  const now = new Date().toISOString();
+  await railwayState();
+  await database().prepare("INSERT INTO railway_connections(id,workspace_id,data,secret_cipher) VALUES(?,?,?,?)")
+    .run(remote.connectionId, remote.workspaceId, JSON.stringify({ id: remote.connectionId, name: "Railway", workspaceId: remote.workspaceId }), "unused");
+  await database().prepare("INSERT INTO railway_projects(connection_id,remote_id,project_id,observed_at,data) VALUES(?,?,?,?,?)")
+    .run(remote.connectionId, remote.id, first.id, now, JSON.stringify(remote));
+  const [target] = await updateTargets(first.id);
+  const source = controlSource(target, await observedProjectDetail(first.id, "live"))!;
+  await writeAutomaticControl({ targetId: target.id, identity: source.identity, attemptedAt: now, checkedAt: now,
+    checks: [healthCheck({ phase: "before", checkedAt: now })], updates: [], warnings: [] });
+
+  const run = { ...healthUpdates().runs[0], id: randomUUID(), projectId: second.id, createdAt: now, stage: "attention" as const };
+  await (await updateStorage()).prepare("INSERT INTO update_runs(id,project_id,stage,data) VALUES(?,?,?,?)")
+    .run(run.id, run.projectId, run.stage, JSON.stringify(run));
+
+  const summaries = await projectSummaries([first.id, second.id, first.id]);
+  assert.equal(Object.keys(summaries).length, 2);
+  assert.equal(summaries[first.id].severityCounts?.high, 1);
+  assert.equal(summaries[first.id].attention, false);
+  assert.equal(summaries[second.id].count, 0);
+  assert.equal(summaries[second.id].known, false);
+  assert.equal(summaries[second.id].attention, true);
 });
 
 test("Routes audit : authentification conservée et requête de résumé bornée", async () => {

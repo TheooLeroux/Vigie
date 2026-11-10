@@ -32,7 +32,6 @@ function canCreateProject(item: HostingInstallationView) {
 
 export function HostingDiscoveryPanel({
   discovery,
-  configured,
   projects,
   request,
   onChanged,
@@ -40,7 +39,6 @@ export function HostingDiscoveryPanel({
   disabled,
 }: {
   discovery: HostingDiscovery | undefined;
-  configured: boolean;
   projects: Project[];
   request: (path: string, method?: string, payload?: unknown) => Promise<any>;
   onChanged: (next: HostingDiscovery) => Promise<void>;
@@ -52,6 +50,7 @@ export function HostingDiscoveryPanel({
     [error, setError] = useState("");
   const visible =
     discovery?.installations.filter((i) => !i.ignored && !i.missingSince) || [];
+  const failedSites = visible.filter((item) => item.inspectionError || item.inventory?.error);
   const linked = visible.filter((item) => item.project);
   const offered = visible.filter((item) => !item.project &&
     (isSiteKind(item.kind) || item.inspectionError || item.kind === "wordpress-incomplete" || item.candidates.length));
@@ -99,7 +98,7 @@ export function HostingDiscoveryPanel({
         {item.inventory?.php && ` · PHP ${item.inventory.php.version}`}
         {item.inventory?.observedAt &&
           ` · ${item.inventory.plugins.length} extensions`}
-        {item.inventory?.error && (
+        {(item.inspectionError || item.inventory?.error) && (
           <span className="badge warning">Collecte à vérifier</span>
         )}
         {item.suggestedEnvironment === "staging" && (
@@ -131,12 +130,6 @@ export function HostingDiscoveryPanel({
               <strong>{item.project.name}</strong>
               <small>{item.domains.join(", ")}</small>
               {facts(item)}
-              {item.inspectionError && (
-                <small className="discovery-warning">
-                  {item.inspectionError} Dernier relevé conservé :{" "}
-                  {formatDate(item.observedAt)}.
-                </small>
-              )}
             </span>
           </RecordLink>
         ) : (
@@ -147,11 +140,6 @@ export function HostingDiscoveryPanel({
             <span>
               <strong>{item.domains[0] || item.documentRoot}</strong>
               {facts(item)}
-              {item.inspectionError && (
-                <small className="discovery-warning">
-                  {item.inspectionError}
-                </small>
-              )}
               {item.kind === "wordpress-incomplete" && (
                 <small className="discovery-warning">
                   Des fichiers WordPress sont présents, mais l’installation doit
@@ -199,15 +187,36 @@ export function HostingDiscoveryPanel({
           {error}
         </p>
       )}
-      {discovery?.error && (
-        <p className="discovery-error" role="alert">
-          <AlertCircle size={15} />
-          {discovery.error}
-        </p>
+      {failedSites.length > 0 && (
+        <section className="discovery-group">
+          <h3>Erreurs de collecte des sites ({failedSites.length})</h3>
+          <ul className="discovery-list">
+            {failedSites.map((item) => (
+              <li className="discovery-item" key={item.id}>
+                <div className="discovery-identity">
+                  <span className="discovery-icon"><AlertCircle size={16} aria-hidden="true" /></span>
+                  <span>
+                    <strong>{item.domains[0] || item.documentRoot}</strong>
+                    {item.inspectionError && (
+                      <small className="discovery-warning">
+                        Inspection de l’hébergement : {item.inspectionError}
+                        {item.observedAt && ` Dernière inspection réussie le ${formatDate(item.observedAt)}.`}
+                      </small>
+                    )}
+                    {item.inventory?.error && (
+                      <small className="discovery-warning">
+                        Inventaire WordPress : {item.inventory.error}
+                        {item.inventory.observedAt && ` Dernier inventaire réussi le ${formatDate(item.inventory.observedAt)}.`}
+                      </small>
+                    )}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
-      {!discovery?.lastSuccessAt ? (
-        configured && !discovery?.error && <p className="subtle discovery-start">Premier relevé automatique en attente.</p>
-      ) : (
+      {discovery?.lastSuccessAt && (
         <>
           <div className="discovery-summary">
             <span>
@@ -216,7 +225,6 @@ export function HostingDiscoveryPanel({
               {linked.length > 1 ? "s" : ""}
             </span>
             {!!offered.length && <span><strong>{offered.length}</strong> à ajouter</span>}
-            <small>Relevé du {formatDate(discovery.lastSuccessAt)}</small>
           </div>
           {!!linked.length && (
             <details className="discovery-linked">

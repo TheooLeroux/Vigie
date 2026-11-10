@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { hostingStorage } from "./hosting-storage";
+import { hostingStorage, readCatalogReports } from "./hosting-storage";
 import type { AutomaticControl } from "./automatic-control-state";
 
 // Durable reports and leases use separate keys in the existing catalog. Reports
@@ -8,6 +8,11 @@ const reportKey = (id: string) => `control:report:1:${id}`;
 export async function readAutomaticControl(id: string): Promise<AutomaticControl | null> {
   const row = await (await hostingStorage()).prepare("SELECT data FROM wordpress_catalog WHERE cache_key=?").get(reportKey(id)) as { data: string } | undefined;
   return row ? JSON.parse(row.data) : null;
+}
+export async function readAutomaticControls(ids: string[]) {
+  const keys = new Map(ids.map(id => [reportKey(id), id]));
+  const reports = await readCatalogReports<AutomaticControl>(keys.keys());
+  return new Map([...reports].map(([key, report]) => [keys.get(key)!, report]));
 }
 export async function writeAutomaticControl(control: AutomaticControl) {
   await (await hostingStorage()).prepare("INSERT INTO wordpress_catalog(cache_key,data,expires_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,expires_at=excluded.expires_at").run(reportKey(control.targetId), JSON.stringify(control), "9999-12-31T00:00:00.000Z");

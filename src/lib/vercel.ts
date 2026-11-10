@@ -70,7 +70,7 @@ export async function withVercelCredentials<T>(id: string, run: (token: string, 
   return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.team_id);
 }
 const running = new Set<string>();
-export async function vercelState(): Promise<VercelState> {
+export async function vercelState({ includeDisplayLabels = true } = {}): Promise<VercelState> {
   const connections = (
     (await (await storage())
       .prepare("SELECT * FROM vercel_connections ORDER BY rowid")
@@ -82,11 +82,11 @@ export async function vercelState(): Promise<VercelState> {
       .all()) as ProjectRow[]
   ).map(async (r) => {
     const c = connections.find((c) => c.id === r.connection_id)!,
-      p = r.project_id ? (await get<Project>("projects", r.project_id, "live")) : null;
+      p = includeDisplayLabels && r.project_id ? (await get<Project>("projects", r.project_id, "live")) : null;
     const remote = JSON.parse(r.data) as VercelProject;
     return {
       ...remote,
-      clientSuggestion: (await mappedClient(remote))?.name || remote.clientSuggestion,
+      clientSuggestion: (includeDisplayLabels ? (await mappedClient(remote))?.name : undefined) || remote.clientSuggestion,
       connectionId: r.connection_id,
       connectionName: c.name,
       configured: c.configured,

@@ -1,4 +1,4 @@
-import type { HostingInstallationView, ProjectDetail, UpdateInfo } from "./types";
+import type { HostingInstallationView, ProjectObservationDetail, UpdateInfo } from "./types";
 
 export const deploymentObservationLifetime = 15 * 60_000;
 export const wordpressObservationLifetime = 60 * 60_000;
@@ -35,7 +35,7 @@ export function wordpressObservationNeedsRefresh(site: HostingInstallationView, 
   return !inventory || !!inventory.error || !observationIsFresh(inventory.observedAt, wordpressObservationLifetime - 10 * 60_000, now);
 }
 
-export function projectObservations(detail: ProjectDetail, now = Date.now()) {
+export function projectObservations(detail: ProjectObservationDetail, now = Date.now()) {
   const deployment = (provider: string, item: { id: string; connectionId: string; name: string; observedAt: string; connectionError: string | null; missingSince: string | null; configured: boolean }) => ({
     id: `${provider}:${item.connectionId}:${item.id}`, label: `${provider} · ${item.name}`, at: item.observedAt,
     status: deploymentStatus(item, now),

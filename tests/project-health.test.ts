@@ -70,7 +70,7 @@ test("Résumé projet : inventaire en retard après publication ne réannonce pa
   const detail = healthFixture(), deployment = detail.railway![0].services[0].activeDeployments[0];
   deployment.id = "old-deployment";
   deployment.evidence!.packages[0].release = { ...healthRelease, state: "available", securityUpdate: true };
-  detail.railway![0].observedAt = "2026-10-27T14:59:00.000Z";
+  detail.railway![0].observedAt = new Date(Date.parse(healthAt) - 60_000).toISOString();
   const state = projectHealth(detail, healthUpdates());
   assert.equal(state.incomplete, true);
   assert.equal(state.updates.length, 0);

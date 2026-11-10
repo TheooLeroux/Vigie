@@ -10,13 +10,12 @@ import "./security-watch.css";
 
 const visibleFindings = 10;
 export const securityWatchCacheKey = "vigie.security-watch.v1";
-const watchRefreshInterval = 15 * 60_000;
-type WatchSnapshot = SecurityWatchSnapshot & { sessionId: string };
+type WatchSnapshot = SecurityWatchSnapshot & { sessionId: string; version: 2 };
 
 function readWatchSnapshot(sessionId: string): WatchSnapshot | null {
   try {
     const snapshot = JSON.parse(sessionStorage.getItem(securityWatchCacheKey) || "null") as WatchSnapshot | null;
-    if (snapshot?.sessionId === sessionId && Number.isFinite(Date.parse(snapshot.savedAt)) &&
+    if (snapshot?.version === 2 && snapshot.sessionId === sessionId && Number.isFinite(Date.parse(snapshot.savedAt)) &&
       Array.isArray(snapshot.watch?.detected) && Array.isArray(snapshot.watch?.recent)) return snapshot;
     sessionStorage.removeItem(securityWatchCacheKey);
   } catch { /* Storage may be disabled. */ }
@@ -63,7 +62,7 @@ function AdvisoryList({ items, onProject }: { items: WatchItem[]; onProject: (id
 export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject }: {
   sessionId: string;
   initialWatch: SecurityWatchSnapshot | null;
-  request: (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<SecurityWatch>;
+  request: (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<SecurityWatch & { savedAt: string }>;
   onProject: (id: string) => void;
 }) {
   const { subscribe } = useProjectRealtime();
@@ -90,17 +89,14 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
       setBusy(true);
       setError(false);
       try {
-        const result = await request("security-watch", "GET", undefined, { signal: controller.signal });
+        const { savedAt, ...watch } = await request("security-watch", "GET", undefined, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        if (!result.coverage) {
-          setError(true);
-          return;
-        }
-        const next = { sessionId, savedAt: new Date().toISOString(), watch: result };
+        const next = { savedAt, watch };
         setSnapshot(next);
         try {
-          sessionStorage.setItem(securityWatchCacheKey, JSON.stringify(next));
-        } catch { /* The live view remains available if storage is disabled or full. */ }
+          const stored: WatchSnapshot = { ...next, sessionId, version: 2 };
+          sessionStorage.setItem(securityWatchCacheKey, JSON.stringify(stored));
+        } catch { /* The view remains available if storage is disabled or full. */ }
       } catch (error) {
         if (controller.signal.aborted) return;
         const status = (error as { status?: number } | null)?.status;
@@ -116,10 +112,15 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
     refresh.current = () => queue.invalidate(["watch"]);
     refresh.current();
     const unsubscribe = subscribe(change => {
-      if (change.all || change.workspace || change.projects.length) refresh.current();
+      if (change.watch) refresh.current();
     });
-    const timer = setInterval(refresh.current, watchRefreshInterval);
-    return () => { controller.abort(); queue.dispose(); unsubscribe(); clearInterval(timer); };
+    window.addEventListener("online", refresh.current);
+    return () => {
+      controller.abort();
+      queue.dispose();
+      unsubscribe();
+      window.removeEventListener("online", refresh.current);
+    };
   }, [request, sessionId, subscribe]);
 
   return <div className="security-watch">
@@ -148,7 +149,7 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
         <header>
           <h2 id="watch-detected"><ShieldAlert size={19} aria-hidden="true" /> Failles relevées sur votre parc {(searching || watch.detected.length > 0 || !!watch.coverage?.fullyCovered) && <span className="count-pill" aria-live="polite">{matches.detected.length}</span>}</h2>
           {watch.coverage ? <p>
-            {watch.coverage.projects === 0 ? "Aucun projet actif à surveiller." : `${watch.coverage.fullyCovered} sur ${watch.coverage.projects} projets actifs disposent d’un contrôle récent couvrant tous leurs services suivis.`}
+            {watch.coverage.projects === 0 ? "Aucun projet actif au moment du relevé." : `Au moment du relevé, ${watch.coverage.fullyCovered} sur ${watch.coverage.projects} projets actifs avaient un contrôle récent couvrant tous leurs services suivis.`}
           </p> : <p role="status">Les contrôles du parc sont indisponibles.</p>}
         </header>
         {matches.detected.length > 0
@@ -162,7 +163,7 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
           </>
           : searching ? <p className="watch-empty">Aucune faille du parc ne correspond à cette recherche.</p>
           : !!watch.coverage?.projects && <p className="watch-empty">{watch.coverage.fullyCovered === watch.coverage.projects
-            ? "Aucune faille relevée dans les contrôles récents."
+            ? "Aucune faille dans les contrôles pris en compte lors du relevé."
             : "Les relevés disponibles ne permettent pas d’établir le nombre de failles sur tout le parc."}</p>}
       </section>
       <section className="panel watch-panel" aria-labelledby="watch-recent">

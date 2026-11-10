@@ -1,6 +1,7 @@
 "use client";
 import type { Ref } from "react";
 import { projectHealth } from "@/lib/project-health";
+import { projectObservations } from "@/lib/observation-freshness";
 import type { ProjectDetail } from "@/lib/types";
 import type { UpdateState } from "@/lib/updates/types";
 import { ProjectSecurityPanel } from "./project-security-panel";
@@ -24,7 +25,8 @@ export function ProjectMaintenanceSummary({ detail, updates }: ProjectHealthProp
   const automaticFixes = health.securityFixes.filter(item => !manualFixes.has(item));
   const pendingUpdates = [...automaticFixes, ...health.updates.filter(item => !manualLabels.has(item))];
   const available = pendingUpdates.length > 0;
-  const quietTitle = health.assessedServices > 0 ? "Aucune meilleure version validée" : health.versionsKnown ? "Aucune mise à jour signalée" : "Versions à vérifier";
+  const observationsIncomplete = projectObservations(detail).some(item => item.status !== "fresh" || item.expiredCatalogs > 0);
+  const quietTitle = observationsIncomplete ? "Relevés à vérifier" : health.assessedServices > 0 ? "Aucune meilleure version validée" : health.versionsKnown ? "Aucune mise à jour signalée" : "Versions à vérifier";
   const unavailableTargets = updates?.targets.filter(target => target.unavailable) || [];
   const pendingTitle = updates?.assessment ? health.unvalidatedUpdates > 0 ? "Versions détectées à valider" : "Propositions validées avant installation" : "Mises à jour disponibles";
   const pendingDescription = updates?.assessment
@@ -45,6 +47,7 @@ export function ProjectMaintenanceSummary({ detail, updates }: ProjectHealthProp
       <p>{wordpress && updates && !updates.enabled ? updates.disabledReason || "L’exécuteur de maintenance doit être configuré et activé." : wordpress && updates?.targets.length && unavailableTargets.length === updates.targets.length ? "Le contrôle de l’agent ou de la configuration doit être renouvelé avant un lancement." : available ? pendingDescription : health.manualUpdates.length ? `${health.manualUpdates.length} composant(s) à mettre à jour ou à vérifier manuellement.` : health.attention ? "Le résultat du dernier traitement reste à vérifier." : security ? "Aucun correctif compatible validé pour les alertes signalées." : health.versionsKnown ? "Selon les versions relevées." : "Actualisez les relevés pour vérifier les versions."}</p>
       {wordpress && health.manualUpdates.length > 0 && <small>{health.manualUpdates.length} composant(s) à traiter manuellement. Ils ne bloquent pas les autres mises à jour compatibles.</small>}
       {available && health.attention && <small>Le dernier traitement attend une vérification ; son succès n’est pas confirmé.</small>}
+      {observationsIncomplete && <small>Voir les relevés dans « Services et configuration ».</small>}
       <DailyUpdateAssessment detail={detail} state={updates} />
       {health.assessedServices > 0 && <small>{health.assessedServices} bloc(s) vérifié(s) : leurs propositions proviennent du bilan préalable, et remplacent la simple comparaison des catalogues. Les autres blocs restent à valider.</small>}
       {(available || health.manualUpdates.length > 0) && <details className="health-details">

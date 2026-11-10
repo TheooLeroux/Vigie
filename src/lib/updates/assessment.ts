@@ -1,5 +1,5 @@
 import { controlSource } from "../automatic-control-state";
-import type { ProjectDetail } from "../types";
+import type { ProjectObservationDetail } from "../types";
 import { remainingNpmFindings, type UpdateResult, type UpdateState, type UpdateTarget } from "./types";
 
 export const assessmentInterval = 24 * 60 * 60_000;
@@ -11,7 +11,7 @@ export function finishAssessment(result: UpdateResult, changes: string[], limita
   if (remainingNpmFindings(result).length) result.message += " Des failles npm restent à corriger. Le détail des alertes et du gain est disponible dans les contrôles.";
 }
 
-export function currentAssessmentEvidence(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
+export function currentAssessmentEvidence(detail: ProjectObservationDetail, state?: UpdateState | null, now = Date.now()) {
   const run = state?.assessment;
   if (!run || run.purpose !== "assessment" || !["completed", "failed"].includes(run.stage)) return [];
   const age = now - Date.parse(run.updatedAt);
@@ -26,7 +26,7 @@ export function currentAssessmentEvidence(detail: ProjectDetail, state?: UpdateS
   });
 }
 
-export function currentAssessmentResults(detail: ProjectDetail, state?: UpdateState | null, now = Date.now()) {
+export function currentAssessmentResults(detail: ProjectObservationDetail, state?: UpdateState | null, now = Date.now()) {
   return currentAssessmentEvidence(detail, state, now).filter(result => result.stage === "completed" && result.assessment);
 }
 

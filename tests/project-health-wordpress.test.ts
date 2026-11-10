@@ -8,6 +8,7 @@ import { healthFixture, healthUpdates, healthCheck, healthAt } from "./project-h
 import type { SiteInventory, WordPressComponent } from "../src/lib/types";
 import { wordpressSecurityVersions } from "../src/lib/updates/wordpress-security-key";
 import { UpdateReadiness } from "../src/components/project-updates";
+import { projectObservations } from "../src/lib/observation-freshness";
 
 function component(slug: string, version: string, latestVersion = version): WordPressComponent {
   return { file: slug + "/main.php", slug, name: slug, version, latestVersion, updateState: version === latestVersion ? "current" : "available", updateCheckedAt: healthAt, updateSource: "wordpress", active: true, mustUse: false, autoUpdate: false, requiresPhp: null, requiresWordPress: null, template: null };
@@ -74,9 +75,18 @@ test("WordPress : WPVulnerability après installation montre les alertes applica
 test("WordPress : un ancien inventaire ne réannonce pas une extension déjà corrigée par le rapport gratuit", () => {
   const { detail, inventory, state } = wordpressFixture();
   inventory.plugins[1] = component("webtoffee", "4.9.0", "5.0.4");
-  state.runs[0].results[0].checks = [healthCheck({ tool: "WPVulnerability", phase: "after", checkedAt: "2026-10-27T15:01:00.000Z", findings: [] })];
+  state.runs[0].results[0].checks = [healthCheck({ tool: "WPVulnerability", phase: "after", checkedAt: new Date(Date.parse(healthAt) + 60_000).toISOString(), findings: [] })];
   assert.equal(projectHealth(detail, state).updates.length, 0);
   assert.equal(projectHealth(detail, state).incomplete, true);
+});
+
+test("WordPress : un inventaire récent ne rend pas actuels des flux de mises à jour expirés", () => {
+  const { detail, inventory } = wordpressFixture();
+  for (const item of [inventory.wordpress!, ...inventory.plugins, ...inventory.themes]) item.updateCheckedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+  assert.equal(projectObservations(detail)[0].status, "fresh");
+  assert.equal(projectObservations(detail)[0].expiredCatalogs, 5);
+  assert.equal(projectHealth(detail).updates.length, 0);
+  assert.match(renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail })), /Relevés à vérifier/);
 });
 
 test("WordPress : contrôle actuel remplace le faux positif historique, y compris sans exécution préalable", () => {

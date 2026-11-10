@@ -1,8 +1,9 @@
 import { controlRenewalInterval } from "../automatic-control-state";
-import { hostingStorage } from "../hosting-storage";
-import type { UpdateCheck, UpdateTarget } from "./types";
-import { sameRailpackImage, type RailpackImageIdentity, type RailpackImageReport } from "./railpack-image-report";
+import { hostingStorage, readCatalogReports } from "../hosting-storage";
+import type { UpdateCheck, UpdateRun, UpdateTarget } from "./types";
+import { railpackImageReport, sameRailpackImage, type RailpackImageIdentity, type RailpackImageReport } from "./railpack-image-report";
 import { scanRailpackImage, type RailpackInventory } from "./railpack-image-scan";
+import { readRailpackImageReports } from "./storage";
 
 type Scan = RailpackImageIdentity & {
   attemptedAt: string;
@@ -38,6 +39,30 @@ export async function saveMinimalStaticScan(identity: RailpackImageIdentity, che
 }
 const inventoryKey = (id: string) => `railpack:inventory:1:${id}`;
 export const readRailpackScan = (id: string) => read<Scan>(scanKey(id));
+export async function readRailpackScans(ids: string[]) {
+  const keys = new Map(ids.map(id => [scanKey(id), id]));
+  const reports = await readCatalogReports<Scan>(keys.keys());
+  return new Map([...reports].map(([key, report]) => [keys.get(key)!, report]));
+}
+export async function projectRailpackReports(projectId: string, identities: RailpackImageIdentity[], runs: UpdateRun[], scans?: ReadonlyMap<string, Scan>) {
+  const cached = scans ?? await readRailpackScans(identities.map(identity => identity.targetId));
+  const imageScans = identities.map(identity => {
+    const scan = cached.get(identity.targetId);
+    return scan && sameRailpackImage(scan, identity) ? scan : undefined;
+  });
+  const missing = identities.filter((identity, index) => !imageScans[index]?.report && !runs.some(run => railpackImageReport(run, identity)));
+  const archived = await readRailpackImageReports(projectId, missing);
+  return identities.flatMap((identity, index) => {
+    const scan = imageScans[index];
+    if (scan?.report) return [{ ...scan.report, ...(scan.error ? { error: scan.error } : {}) }];
+    const fallback = archived.find(report => sameRailpackImage(report, identity));
+    if (fallback || scan?.error) {
+      const report = fallback || runs.map(run => railpackImageReport(run, identity)).find(item => item !== null);
+      if (report) return [{ ...report, ...(scan?.error ? { error: scan.error } : {}) }];
+    }
+    return [];
+  });
+}
 export async function cachedRailpackInventory(identity: RailpackImageIdentity) {
   const cached = await read<Inventory>(inventoryKey(identity.targetId));
   return cached && sameRailpackImage(cached, identity) ? cached.inventory : undefined;

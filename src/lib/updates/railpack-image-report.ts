@@ -1,7 +1,7 @@
 import { normalizeImageDigest } from "../image-reference";
 import { deploymentObservationLifetime, observationIsFresh } from "../observation-freshness";
 import { railwayRuntimeDeployments } from "../railway-status";
-import type { ProjectDetail } from "../types";
+import type { ProjectObservationDetail } from "../types";
 import type { UpdateCheck, UpdateRun, UpdateState, UpdateTarget } from "./types";
 
 export type RailpackImageIdentity = { targetId: string; projectId: string; deploymentId: string; imageDigest: string; commit: string; caddy: string };
@@ -12,7 +12,7 @@ export function sameRailpackImage(a: RailpackImageIdentity, b: RailpackImageIden
     a.imageDigest === b.imageDigest && a.commit === b.commit && a.caddy === b.caddy;
 }
 
-export function railpackImageIdentity(target: UpdateTarget, railway: ProjectDetail["railway"]): RailpackImageIdentity | null {
+export function railpackImageIdentity(target: UpdateTarget, railway: ProjectObservationDetail["railway"]): RailpackImageIdentity | null {
   if (target.provider !== "railway" || target.mode !== "git") return null;
   const project = railway?.find(item => item.projectId === target.projectId && item.connectionId === target.connectionId &&
     item.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId));
@@ -46,7 +46,7 @@ export function railpackImageReport(run: UpdateRun, identity: RailpackImageIdent
   return { ...identity, check };
 }
 
-export function activeRailpackImageReport(target: UpdateTarget, detail: ProjectDetail, state?: UpdateState | null) {
+export function activeRailpackImageReport(target: UpdateTarget, detail: ProjectObservationDetail, state?: UpdateState | null) {
   const identity = railpackImageIdentity(target, detail.railway);
   if (!identity) return null;
   const report = state?.railpackImageReports?.find(item => sameRailpackImage(item, identity));

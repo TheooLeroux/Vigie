@@ -25,7 +25,7 @@ export function ObservationDetails({ label, action }: { label: ReactNode; action
   </details>;
 }
 
-export function DeploymentConnectionReading({ configured, error, lastSuccessAt }: {
+export function ConnectionReading({ configured, error, lastSuccessAt }: {
   configured: boolean;
   error?: string | null;
   lastSuccessAt?: string | null;

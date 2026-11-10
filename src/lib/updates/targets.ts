@@ -5,11 +5,13 @@ import { projectHostingInstallations } from "../hosting-discovery";
 import { requireProject } from "../db";
 import { ApiError } from "../http";
 import { githubUpdateToken, repositoryAllowed } from "./github";
-import { readUpdateSource, updateStorage } from "./storage";
+import { readConfiguredUpdateTargets, readUpdateSource } from "./storage";
 import type { UpdateTarget } from "./types";
 import { wordpressAgentPackageVersion } from "./wordpress-agent-package";
 import { maintenanceCapability } from "./capabilities";
-import { readAutomaticControl } from "../automatic-control-storage";
+import { readAutomaticControls } from "../automatic-control-storage";
+import type { AutomaticControl } from "../automatic-control-state";
+import type { ProjectObservationDetail } from "../types";
 
 export function sourceRoot(value: string | null) {
   const root = (value || "").replace(/^\/+|\/+$/g, "");
@@ -22,12 +24,18 @@ export function updateScope(target: UpdateTarget) {
 export async function updateTargets(projectId: string, railwaySnapshot?: ReturnType<typeof railwayState>): Promise<UpdateTarget[]> {
   const project = await requireProject(projectId, "live");
   const [vercel, railway, hosting] = await Promise.all([vercelState(), railwaySnapshot ?? railwayState(), projectHostingInstallations(projectId)]);
-  const configured = new Set((await (await updateStorage()).prepare("SELECT target_id FROM update_sources WHERE project_id=?").all(projectId) as { target_id: string }[]).map(row => row.target_id));
+  const prepared = await prepareUpdateTargets({ project, vercel: vercel.projects.filter(item => item.projectId === projectId), railway: railway.projects.filter(item => item.projectId === projectId), hosting });
+  return prepared.qualify(await readAutomaticControls(prepared.ids));
+}
+
+export async function prepareUpdateTargets({ project, vercel = [], railway = [], hosting = [] }: ProjectObservationDetail, configuredTargets?: ReadonlySet<string>) {
+  const projectId = project.id;
+  const configured = configuredTargets ?? (await readConfiguredUpdateTargets([projectId])).get(projectId)!;
   const targets: UpdateTarget[] = [];
-  for (const item of vercel.projects.filter(item => item.projectId === projectId && !item.excluded)) {
+  for (const item of vercel.filter(item => !item.excluded)) {
     targets.push({ id: `vercel:${item.connectionId}:${item.id}`, projectId, name: item.name, provider: "vercel", connectionId: item.connectionId, remoteId: item.id, environmentId: null, repository: item.repository, branch: item.productionBranch || item.production?.branch || null, root: sourceRoot(item.rootDirectory), url: item.domains.find(domain => domain.environment === "production" && !domain.redirect)?.name ? `https://${item.domains.find(domain => domain.environment === "production" && !domain.redirect)!.name}/` : project.url || null, mode: item.repository ? "git" : "archive", configured: item.configured, unavailable: hostingControlIssue("Vercel", item) || (item.missingSince ? "Projet non retrouvé chez Vercel." : null) });
   }
-  for (const item of railway.projects.filter(item => item.projectId === projectId)) {
+  for (const item of railway) {
     for (const service of item.services.filter(service => service.environmentName.toLowerCase() === "production")) {
       const evidence = service.activeDeployments[0]?.evidence;
       targets.push({ id: `railway:${item.connectionId}:${service.id}:${service.environmentId}`, projectId, name: service.name, provider: "railway", builder: service.builder, connectionId: item.connectionId, remoteId: service.id, environmentId: service.environmentId, repository: service.repository, branch: evidence?.branch || null, root: sourceRoot(service.rootDirectory), url: service.domains[0] ? `https://${service.domains[0]}${service.healthcheckPath || "/"}` : null, mode: service.image ? "image" : service.repository ? "git" : "archive", ...(service.image ? { image: service.image } : {}), configured: item.configured, unavailable: hostingControlIssue("Railway", item) || (item.missingSince ? "Projet non retrouvé chez Railway." : !service.image && !["RAILPACK", "DOCKERFILE"].includes(service.builder) ? "Construction personnalisée : une adaptation est nécessaire." : null) });
@@ -53,12 +61,15 @@ export async function updateTargets(projectId: string, railwaySnapshot?: ReturnT
     if (item.ignored) targets[targets.length - 1].unavailable = "Installation exclue du suivi.";
     else if (item.inventory?.collectionMode === "early") targets[targets.length - 1].unavailable = "Inventaire partiel : le chargement complet de WordPress n’est pas confirmé. Les autres services admissibles restent indépendants.";
   }
-  return Promise.all(targets.map(async target => {
-    const cached = await readAutomaticControl(target.id);
-    const v = vercel.projects.find(item => item.connectionId === target.connectionId && item.id === target.remoteId);
-    const r = railway.projects.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
-    const evidence = r?.activeDeployments[0]?.evidence;
-    const capability = target.capability || maintenanceCapability(target, target.mode === "wordpress" ? { installation: "wordpress" } : v ? { framework: v.production?.framework || v.framework, runtimes: v.production?.analysis?.status === "observed" ? v.production.analysis.runtimes.map(item => item.name) : undefined, commit: v.production?.commit, source: cached?.sourceQualification } : { framework: evidence?.framework, staticSite: evidence?.staticSite, image: r?.image, cron: r?.cronSchedule, commit: evidence?.commit, source: cached?.sourceQualification });
-    return { ...target, capability, unavailable: project.lifecycle !== "active" ? "Projet archivé." : capability.status !== "automatic" ? capability.reason : target.unavailable || (!target.url && capability.adapter !== "node-worker" && capability.adapter !== "railway-image" ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) };
-  }));
+  function qualify(controls: ReadonlyMap<string, AutomaticControl>) {
+    return targets.map(target => {
+      const cached = controls.get(target.id);
+      const v = vercel.find(item => item.connectionId === target.connectionId && item.id === target.remoteId);
+      const r = railway.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
+      const evidence = r?.activeDeployments[0]?.evidence;
+      const capability = target.capability || maintenanceCapability(target, target.mode === "wordpress" ? { installation: "wordpress" } : v ? { framework: v.production?.framework || v.framework, runtimes: v.production?.analysis?.status === "observed" ? v.production.analysis.runtimes.map(item => item.name) : undefined, commit: v.production?.commit, source: cached?.sourceQualification } : { framework: evidence?.framework, staticSite: evidence?.staticSite, image: r?.image, cron: r?.cronSchedule, commit: evidence?.commit, source: cached?.sourceQualification });
+      return { ...target, capability, unavailable: project.lifecycle !== "active" ? "Projet archivé." : capability.status !== "automatic" ? capability.reason : target.unavailable || (!target.url && capability.adapter !== "node-worker" && capability.adapter !== "railway-image" ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) };
+    });
+  }
+  return { ids: targets.map(target => target.id), qualify };
 }

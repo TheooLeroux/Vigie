@@ -1,7 +1,7 @@
 import { automaticControlFresh, controlInterval, controlMatches, controlSource } from "./automatic-control-state";
 import { imageObservationPending } from "./updates/image-observation";
 import { projectHealth, type ProjectHealth } from "./project-health";
-import type { ProjectDetail } from "./types";
+import type { ProjectObservationDetail } from "./types";
 import type { SecurityFinding, UpdateState, UpdateTarget } from "./updates/types";
 import { groupVulnerabilityReferences, severityOrder } from "./vulnerability-references";
 import { activeRailpackImageReport, railpackImageIdentity } from "./updates/railpack-image-report";
@@ -74,7 +74,7 @@ export function normalizedVulnerabilities(evidence: ProjectHealth["securityEvide
   }).sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity) || a.key.localeCompare(b.key));
 }
 
-function expectedTargets(detail: ProjectDetail, state?: UpdateState | null) {
+function expectedTargets(detail: ProjectObservationDetail, state?: UpdateState | null) {
   const targets = (state?.targets || []).filter(target => !(target.provider === "o2switch" && detail.hosting?.some(item => item.id === target.remoteId && item.connectionId === target.connectionId && item.ignored)) && !(target.provider === "vercel" && detail.vercel?.some(item => item.id === target.remoteId && item.connectionId === target.connectionId && item.excluded)));
   const add = (target: UpdateTarget) => {
     if (!targets.some(item => item.provider === target.provider && item.connectionId === target.connectionId && item.remoteId === target.remoteId && item.environmentId === target.environmentId)) targets.push(target);
@@ -86,7 +86,7 @@ function expectedTargets(detail: ProjectDetail, state?: UpdateState | null) {
   return targets;
 }
 
-function serviceCoverage(target: UpdateTarget, detail: ProjectDetail, state?: UpdateState | null): ServiceCoverage {
+function serviceCoverage(target: UpdateTarget, detail: ProjectObservationDetail, state?: UpdateState | null): ServiceCoverage {
   const control = state?.automaticControls?.find(item => item.targetId === target.id);
   const service = detail.railway?.flatMap(item => item.connectionId === target.connectionId ? item.services : []).find(item => item.id === target.remoteId && item.environmentId === target.environmentId);
   const image = control?.securityCoverage?.scope === "image" || !!service?.image && !target.repository;
@@ -163,7 +163,7 @@ export function lastRecordedSecurity(projectId: string, targets: Pick<UpdateTarg
   return { ...vulnerabilityCounts(vulnerabilities), signalCount: signals.length, checkedAt: dates[0], latestCheckedAt: dates.at(-1)!, analyzedServices, totalServices: targets.length, partial: limited || analyzedServices < targets.length, vulnerabilities, signals };
 }
 
-export function projectSecurity(detail: ProjectDetail, state?: UpdateState | null, health = projectHealth(detail, state)) {
+export function projectSecurity(detail: ProjectObservationDetail, state?: UpdateState | null, health = projectHealth(detail, state)) {
   const entries = normalizedVulnerabilities(health.securityEvidence);
   const vulnerabilities = entries.filter(item => item.kind === "vulnerability");
   const signals = entries.filter(item => item.kind !== "vulnerability" && !item.id.startsWith("EOL-"));

@@ -14,28 +14,26 @@ import type {
   UpdateInfo,
 } from "@/lib/types";
 import { formatDate, Modal } from "./ui";
-import { observationIsFresh, wordpressObservationLifetime } from "@/lib/observation-freshness";
+import { observationIsFresh, wordpressInventoryIsFresh, wordpressObservationLifetime, wordpressUpdateIsFresh } from "@/lib/observation-freshness";
 import { ObservationDetails, useObservationTime } from "./observation-details";
 type Request = (
   path: string,
   method?: string,
   payload?: unknown,
 ) => Promise<any>;
-export function UpdateBadge({ value }: { value: UpdateInfo }) {
-  const stale =
-    value.updateCheckedAt &&
-    Date.now() - Date.parse(value.updateCheckedAt) > 24 * 3600_000;
+export function UpdateBadge({ value, inventoryFresh = true }: { value: UpdateInfo; inventoryFresh?: boolean }) {
+  const fresh = inventoryFresh && wordpressUpdateIsFresh(value);
   return (
     <span
-      className={`badge ${stale ? "neutral" : value.updateState === "available" ? "warning" : value.updateState === "current" ? "sage" : "neutral"}`}
+      className={`badge ${!fresh ? "neutral" : value.updateState === "available" ? "warning" : value.updateState === "current" ? "sage" : "neutral"}`}
       title={
-        value.updateCheckedAt
+        value.updateCheckedAt && Number.isFinite(Date.parse(value.updateCheckedAt))
           ? `Vérifié le ${formatDate(value.updateCheckedAt)}${value.updateSource === "wordpress.org" ? " dans l’annuaire WordPress.org" : " par WordPress"}`
           : "Aucun flux de mise à jour vérifié"
       }
     >
-      {stale
-        ? "Relevé ancien"
+      {!fresh
+        ? !inventoryFresh ? "Inventaire à actualiser" : value.updateCheckedAt ? "Vérification expirée" : "Non vérifiable"
         : value.updateState === "available"
           ? `Mise à jour · ${value.latestVersion}`
           : value.updateState === "current"
@@ -51,11 +49,13 @@ function ComponentsTable({
   kind,
   php,
   wordpress,
+  inventoryFresh,
 }: {
   items: WordPressComponent[];
   kind: "plugins" | "themes";
   php?: string;
   wordpress?: string;
+  inventoryFresh: boolean;
 }) {
   const [query, setQuery] = useState(""),
     [updatesOnly, setUpdatesOnly] = useState(false);
@@ -63,7 +63,7 @@ function ComponentsTable({
     .filter(
       (i) =>
         (i.name + " " + i.slug).toLowerCase().includes(query.toLowerCase()) &&
-        (!updatesOnly || i.updateState === "available"),
+        (!updatesOnly || inventoryFresh && wordpressUpdateIsFresh(i) && i.updateState === "available"),
     )
     .sort(
       (a, b) =>
@@ -161,7 +161,7 @@ function ComponentsTable({
                   )}
                 </td>
                 <td>
-                  <UpdateBadge value={item} />
+                  <UpdateBadge value={item} inventoryFresh={inventoryFresh} />
                   {item.requiresPhp && <small>PHP ≥ {item.requiresPhp}</small>}
                 </td>
               </tr>
@@ -196,6 +196,7 @@ export function WordPressInventoryPanel({
   const observedAt = inventory?.observedAt;
   const observationTime = useObservationTime(observedAt, wordpressObservationLifetime);
   const stale = Boolean(observedAt) && !observationIsFresh(observedAt, wordpressObservationLifetime, observationTime);
+  const inventoryFresh = wordpressInventoryIsFresh(installation, observationTime);
   const canRefresh = !installation.missingSince;
   const showRefresh = canRefresh && (stale || Boolean(collectionError || inventory?.error) || inventory?.collectionMode === "early");
   const observationLabel = observedAt
@@ -227,7 +228,7 @@ export function WordPressInventoryPanel({
   const components = inventory
       ? [...inventory.plugins, ...inventory.themes]
       : [],
-    updates = components.filter((i) => i.updateState === "available").length;
+    updates = inventoryFresh ? components.filter(i => wordpressUpdateIsFresh(i) && i.updateState === "available").length : 0;
   const refreshButton = <button className="button secondary small" onClick={collect} disabled={busy}>
     {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
     Actualiser le relevé
@@ -283,7 +284,7 @@ export function WordPressInventoryPanel({
                 <small>WordPress</small>
                 <strong>{inventory.wordpress?.version || "Non relevé"}</strong>
                 {inventory.wordpress && (
-                  <UpdateBadge value={inventory.wordpress} />
+                  <UpdateBadge value={inventory.wordpress} inventoryFresh={inventoryFresh} />
                 )}
               </div>
               <div>
@@ -357,6 +358,7 @@ export function WordPressInventoryPanel({
                 kind="plugins"
                 php={inventory.php?.version}
                 wordpress={inventory.wordpress?.version}
+                inventoryFresh={inventoryFresh}
               />
             </details>
             <details className="wp-inventory-section">
@@ -368,6 +370,7 @@ export function WordPressInventoryPanel({
                 kind="themes"
                 php={inventory.php?.version}
                 wordpress={inventory.wordpress?.version}
+                inventoryFresh={inventoryFresh}
               />
             </details>
             {(inventory.php || inventory.site) && (

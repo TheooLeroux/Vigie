@@ -24,6 +24,7 @@ import {
   hostingDiscovery,
 } from "../src/lib/hosting-discovery";
 import { transaction, createProject } from "../src/lib/db";
+import { activityPage } from "../src/lib/activity";
 import { createProjectSchema } from "../src/lib/validation";
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 const credentials = {
@@ -299,4 +300,7 @@ test("persistance : collecte réelle liée, échec conserve le relevé et aucune
   assert.equal(current.plugins.length, 3);
   assert.ok(current.error);
   assert.ok(!JSON.stringify(current).includes("do-not-expose"));
+  const { items } = await activityPage({ view: "complete", query: "files.example.org" }, "live");
+  assert.match(items.find(item => item.action === "hosting.inventory")?.collectionId ?? "", /^[a-f0-9-]{36}$/);
+  assert.equal(items.find(item => item.action === "hosting.inventory_failed")?.collectionId, undefined);
 });

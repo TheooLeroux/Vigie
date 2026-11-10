@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
-import { GET } from "../src/app/api/[...path]/route";
 import { controlInterval, controlSource } from "../src/lib/automatic-control-state";
 import { writeAutomaticControl } from "../src/lib/automatic-control-storage";
 import { createProject } from "../src/lib/db";
 import { observedProjectDetail } from "../src/lib/project-observations";
 import { filterSecurityWatch, rankSecurityWatch, type ProjectFinding, type PublicAdvisory } from "../src/lib/security-watch";
+import { securityWatch } from "../src/lib/security-watch-data";
 import { updateTargets } from "../src/lib/updates/targets";
 import { createProjectSchema } from "../src/lib/validation";
 import { applyVercelSnapshot, linkVercelProject, saveVercelConnection } from "../src/lib/vercel";
 import type { VercelProject } from "../src/lib/vercel-types";
-import { authFixture } from "./auth-fixture";
+import "./auth-fixture";
 import { healthCheck } from "./project-health-fixture";
 
 test("Veille : regroupe les alias entre projets et sépare les avis publics des failles détectées", () => {
@@ -49,8 +49,7 @@ test("Veille : regroupe les alias entre projets et sépare les avis publics des 
   assert.equal(filterSecurityWatch(recent, "railway").length, 0);
 });
 
-test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse privée", async t => {
-  const { cookie } = await authFixture();
+test("Veille : flux indisponible puis rétabli et couverture calculée à partir des relevés", async t => {
   const current = {
     ghsa_id: "GHSA-aaaa-bbbb-cccc", cve_id: null, summary: "Avis en cours", severity: "medium",
     published_at: "2026-11-04T00:00:00Z", withdrawn_at: null, vulnerabilities: [],
@@ -65,20 +64,14 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
     }
     return Response.json([current, withdrawn]);
   });
-  const read = () => GET(new Request("http://127.0.0.1:3001/api/security-watch", { headers: { cookie } }), {
-    params: Promise.resolve({ path: ["security-watch"] }),
-  });
-  const unavailable = await read();
-  assert.equal(unavailable.status, 200);
-  const partial = await unavailable.json();
+  const read = () => securityWatch("live", new AbortController().signal);
+  const partial = await read();
   assert.equal(partial.feedCheckedAt, null);
   assert.deepEqual(partial.coverage, { projects: 0, fullyCovered: 0 });
 
-  const response = await read();
-  assert.equal(response.headers.get("cache-control"), "private, no-store");
-  const result = await response.json();
+  const result = await read();
   assert.ok(result.feedCheckedAt);
-  assert.deepEqual(result.recent.map((item: PublicAdvisory) => [item.id, item.severity]), [["GHSA-AAAA-BBBB-CCCC", "moderate"]]);
+  assert.deepEqual(result.recent.map(item => [item.id, item.severity]), [["GHSA-AAAA-BBBB-CCCC", "moderate"]]);
 
   process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
   const project = await createProject("live", createProjectSchema.parse({ name: "Site de test", url: "https://watch.example.test", client: "Client Étoile" }));
@@ -94,7 +87,7 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   const report = { targetId: target.id, identity: controlSource(target, detail)!.identity, attemptedAt: at, checkedAt: at, checks: [check], updates: [], warnings: [] };
   await writeAutomaticControl(report);
 
-  const matched = await (await read()).json();
+  const matched = await read();
   assert.deepEqual(matched.coverage, { projects: 1, fullyCovered: 1 });
   assert.equal(matched.detected[0].affected[0].project.id, project.id);
   assert.equal(matched.detected[0].affected[0].historical, false);
@@ -102,13 +95,13 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   assert.equal(filterSecurityWatch(matched.detected, "vercel client etoile next.js library").length, 1);
 
   await writeAutomaticControl({ ...report, error: "Dernier contrôle en erreur" });
-  const failed = await (await read()).json();
+  const failed = await read();
   assert.equal(failed.detected[0].affected.length, 1);
   assert.equal(failed.detected[0].affected[0].historical, true);
 
   const expired = new Date(Date.now() - controlInterval).toISOString();
   await writeAutomaticControl({ ...report, checkedAt: expired, checks: [{ ...check, checkedAt: expired }] });
-  const stale = await (await read()).json();
+  const stale = await read();
   assert.deepEqual(stale.coverage, { projects: 1, fullyCovered: 0 });
   assert.equal(stale.detected[0].affected[0].historical, true);
   assert.equal(stale.detected[0].latestCheckedAt, expired);
@@ -116,12 +109,12 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
 
   await writeAutomaticControl(report);
   await applyVercelSnapshot(connection.id, [{ ...remote, production: { ...production, id: "redeployed" } }]);
-  const redeployed = await (await read()).json();
+  const redeployed = await read();
   assert.equal(redeployed.detected[0].affected[0].historical, true);
 
   const redeployedDetail = await observedProjectDetail(project.id, "live");
   await writeAutomaticControl({ ...report, identity: controlSource(target, redeployedDetail)!.identity, checks: [{ ...check, findings: [] }] });
-  const clean = await (await read()).json();
+  const clean = await read();
   assert.deepEqual(clean.coverage, { projects: 1, fullyCovered: 1 });
   assert.deepEqual(clean.detected, []);
   assert.equal(clean.recent[0].id, "GHSA-AAAA-BBBB-CCCC");
@@ -132,7 +125,7 @@ test("Veille : flux indisponible puis rétabli, avis retirés exclus et réponse
   const otherTarget = (await updateTargets(project.id)).find(item => item.remoteId === other.id)!;
   const mixedDetail = await observedProjectDetail(project.id, "live");
   await writeAutomaticControl({ ...report, targetId: otherTarget.id, identity: controlSource(otherTarget, mixedDetail)!.identity, checkedAt: expired, checks: [{ ...check, checkedAt: expired }] });
-  const mixed = await (await read()).json();
+  const mixed = await read();
   assert.deepEqual(mixed.coverage, { projects: 1, fullyCovered: 0 });
   assert.equal(mixed.detected[0].affected.length, 1);
   assert.equal(mixed.detected[0].affected[0].historical, true);

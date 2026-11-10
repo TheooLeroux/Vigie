@@ -1,18 +1,19 @@
 export type ProjectRevision = { key: string; project_id: string | null; kind: string; revision: string };
-export type ProjectChange = { projects: string[]; all: boolean; workspace: boolean; activity: boolean; activityProjects: string[] };
-export const emptyProjectChange = (): ProjectChange => ({ projects: [], all: false, workspace: false, activity: false, activityProjects: [] });
+export type ProjectChange = { projects: string[]; all: boolean; workspace: boolean; activity: boolean; activityProjects: string[]; watch: boolean };
+export const emptyProjectChange = (): ProjectChange => ({ projects: [], all: false, workspace: false, activity: false, activityProjects: [], watch: false });
 export function mergeProjectChanges(a: ProjectChange, b: ProjectChange): ProjectChange {
-  return { projects: [...new Set([...a.projects, ...b.projects])], all: a.all || b.all, workspace: a.workspace || b.workspace, activity: a.activity || b.activity, activityProjects: [...new Set([...a.activityProjects, ...b.activityProjects])] };
+  return { projects: [...new Set([...a.projects, ...b.projects])], all: a.all || b.all, workspace: a.workspace || b.workspace, activity: a.activity || b.activity, activityProjects: [...new Set([...a.activityProjects, ...b.activityProjects])], watch: a.watch || b.watch };
 }
 export function changedProjects(previous: readonly ProjectRevision[] | undefined, rows: readonly ProjectRevision[]): ProjectChange {
   // Initial catch-up closes the gap between the initial HTTP read and subscribing.
-  if (!previous) return { ...emptyProjectChange(), all: true, workspace: true, activity: true };
+  if (!previous) return { ...emptyProjectChange(), all: true, workspace: true, activity: true, watch: true };
   let result = emptyProjectChange();
   const before = new Map(previous.map(row => [row.key, row]));
   const after = new Map(rows.map(row => [row.key, row]));
   const add = (row: ProjectRevision) => {
     const change = emptyProjectChange();
     if (row.kind === "activity") { change.activity = row.project_id === null; change.activityProjects = row.project_id ? [row.project_id] : []; }
+    else if (row.kind === "watch") change.watch = true;
     else if (row.kind !== "auth") {
       change.projects = row.project_id ? [row.project_id] : [];
       change.all = row.kind === "all";
@@ -30,7 +31,7 @@ export function changedProjects(previous: readonly ProjectRevision[] | undefined
   for (const [key, row] of before) if (!after.has(key)) add(row);
   return result;
 }
-export const hasProjectChanges = (change: ProjectChange) => change.all || change.workspace || change.activity || !!change.projects.length || !!change.activityProjects.length;
+export const hasProjectChanges = (change: ProjectChange) => change.all || change.workspace || change.activity || !!change.projects.length || !!change.activityProjects.length || change.watch;
 
 // Debounce bursts and retain changes that arrive during an HTTP read. There is
 // no periodic wake-up: another request requires another invalidation.

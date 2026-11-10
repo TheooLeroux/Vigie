@@ -70,7 +70,7 @@ export async function withRailwayCredentials<T>(id: string, run: (token: string,
   return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.workspace_id);
 }
 const running = new Set<string>();
-export async function railwayState(): Promise<RailwayState> {
+export async function railwayState({ includeDisplayLabels = true } = {}): Promise<RailwayState> {
   const connections = (
     (await (await storage())
       .prepare("SELECT * FROM railway_connections ORDER BY rowid")
@@ -92,7 +92,7 @@ export async function railwayState(): Promise<RailwayState> {
       connections.find((c) => c.id === r.connection_id)?.error || null,
     configured:
       connections.find((c) => c.id === r.connection_id)?.configured || false,
-    projectName: r.project_id
+    projectName: includeDisplayLabels && r.project_id
       ? (await get<Project>("projects", r.project_id, "live"))?.name || null
       : null,
     linkMethod: r.link_method,

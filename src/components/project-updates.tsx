@@ -9,8 +9,14 @@ import { updateProgressStatus } from "@/lib/updates/progress";
 import { allowsAutomaticMaintenance } from "@/lib/updates/capabilities";
 import { createRefreshQueue } from "@/lib/project-realtime";
 import { useProjectRealtime } from "./project-realtime";
+import { projectObservations } from "@/lib/observation-freshness";
+import type { ProjectDetail } from "@/lib/types";
 
 type Request = (path: string, method?: string, payload?: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
+const observationLabels = {
+  fresh: "Relevé récent", stale: "Relevé expiré", error: "Collecte en échec",
+  missing: "Absent du dernier relevé", unverified: "Non vérifié", partial: "Relevé partiel",
+};
 export function FindingDetails({ finding }: { finding: SecurityFinding }) {
   const level = { critical: "critique", high: "élevée", moderate: "modérée", low: "faible", unknown: "non classée" }[finding.severity];
   return <div><p><strong>{finding.title || finding.package}</strong></p><p><code>{finding.package}@{finding.version}</code> · {finding.aliases[0] || finding.id} · sévérité {level}</p>{finding.explanation && <p>{finding.explanation}</p>}{finding.fixedVersions?.length ? <p>Version(s) correctrice(s) référencée(s) : {finding.fixedVersions.join(", ")}. Leur compatibilité doit être vérifiée avant installation.</p> : null}{finding.url && <a href={finding.url} target="_blank" rel="noreferrer">Consulter la source du signalement</a>}</div>;
@@ -86,7 +92,7 @@ export function UpdateProgress({ run }: { run: UpdateRun }) {
   return <div className={`updates-progress ${run.stage}`} role="status" aria-live="polite">
     {active ? <Loader2 size={18} className="spin" /> : run.stage === "completed" ? <Check size={18} /> : <CircleAlert size={18} />}
     <div><strong>{delayed ? "Le traitement met plus de temps que prévu" : stopped?.title || updateStageLabels[run.stage]}</strong><p>{delayed ? "Vigie attend une confirmation de l’exécuteur. Ne relancez pas une deuxième mise à jour." : stopped?.reason || run.message}</p>
-      {stopped && <><p>{stopped.notice}</p>{stopped.findings.length > 0 && <><p>Derniers signalements relevés pendant cette tentative :</p><ul>{stopped.findings.map(({target, finding}, index) => <li key={index}><strong>{target} · {finding.package} {finding.version}</strong> : {finding.aliases[0] || finding.id}. {finding.fixedVersions?.length ? `Correctifs référencés : ${finding.fixedVersions.join(", ")} ; compatibilité à valider.` : "Aucun correctif référencé dans ce rapport."}</li>)}</ul>{stopped.additionalFindings > 0 && <p>{stopped.additionalFindings} autre(s) signalement(s) dans le compte rendu détaillé.</p>}</> }</>}
+      {stopped && <><p>{stopped.notice}</p>{stopped.findings.length > 0 && <><p>Alertes qui ont bloqué la mise à jour</p><ul>{stopped.findings.map(({target, finding}, index) => <li key={index}><strong>{target} · {finding.package} {finding.version}</strong> : {finding.aliases[0] || finding.id}. {finding.fixedVersions?.length ? `Correctifs référencés : ${finding.fixedVersions.join(", ")} ; compatibilité à valider.` : "Aucun correctif référencé dans ce rapport."}</li>)}</ul>{stopped.additionalFindings > 0 && <p>{stopped.additionalFindings} autre(s) signalement(s) dans le compte rendu détaillé.</p>}</> }</>}
       {noConfirmedProgress && !delayed && <p>Aucune nouvelle étape confirmée depuis au moins 15 minutes. L’exécuteur répond encore ; l’étape en cours reste à vérifier.</p>}
       <small>{run.lastProgressAt ? `Dernière progression : ${formatDate(run.lastProgressAt)} · Activité de l’exécuteur : ` : ""}{formatDate(run.updatedAt)}</small></div>
   </div>;
@@ -167,10 +173,13 @@ export function MaintenanceDetails({ label, status, warning, children }: {
   </details>;
 }
 
-export function ProjectUpdates({ projectId, request, onState, embedded = false, children, overviewActionTarget }: {
+export function ProjectUpdates({ projectId, request, onState, detail, observationTime, onObservationsRefreshed, embedded = false, children, overviewActionTarget }: {
   projectId: string;
   request: Request;
   onState?: (projectId: string, state: UpdateState | null) => void;
+  detail?: ProjectDetail;
+  observationTime?: number;
+  onObservationsRefreshed?: (projectId: string) => Promise<void>;
   embedded?: boolean;
   children?: ReactNode;
   overviewActionTarget?: HTMLDivElement | null;
@@ -178,17 +187,25 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
   const [state, setState] = useState<UpdateState | null>(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const alive = useRef(true);
   const refreshing = useRef(false);
+  const lastObservationAttempt = useRef(0);
   const { subscribe } = useProjectRealtime();
   const [refreshingHosting, setRefreshingHosting] = useState(false), [hostingError, setHostingError] = useState("");
-  const refreshHosting = useCallback(async () => {
+  const refreshHosting = useCallback(async (force = false) => {
     if (refreshing.current) return;
+    lastObservationAttempt.current = Date.now();
     refreshing.current = true; setRefreshingHosting(true);
+    setHostingError("");
     try {
-      const response = await request("updates/refresh", "POST", { projectId });
-      if (alive.current) { setState(response.state); onState?.(projectId, response.state); setHostingError(response.errors.join(" ")); }
+      const response = await request("updates/refresh", "POST", { projectId, force });
+      if (!alive.current) return;
+      setState(response.state);
+      setError("");
+      onState?.(projectId, response.state);
+      setHostingError(response.errors.join(" "));
+      await onObservationsRefreshed?.(projectId);
     } catch (error) { if (alive.current) setHostingError(error instanceof Error ? error.message : "Actualisation non confirmée."); }
     finally { refreshing.current = false; if (alive.current) setRefreshingHosting(false); }
-  }, [projectId, request, onState]);
+  }, [projectId, request, onState, onObservationsRefreshed]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
       const next: UpdateState = await request(`updates?projectId=${encodeURIComponent(projectId)}`, "GET", undefined, { signal });
@@ -204,6 +221,12 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
     queue.invalidate([projectId]);
     return () => { alive.current = false; controller.abort(); queue.dispose(); unsubscribe(); };
   }, [refresh, subscribe, projectId]);
+  useEffect(() => {
+    if (!detail || detail.project.lifecycle !== "active" || document.visibilityState !== "visible" || !navigator.onLine) return;
+    const now = Date.now();
+    if (now - lastObservationAttempt.current >= 5 * 60_000 && projectObservations(detail, now).some(item => item.due)) void refreshHosting();
+  }, [detail, observationTime, refreshHosting]);
+  const observations = detail ? projectObservations(detail) : [];
   const latest = state?.runs[0], active = latest && activeUpdateStages.includes(latest.stage);
   const assessmentActive = !!state?.assessment && activeUpdateStages.includes(state.assessment.stage);
   const blocked = new Set(state?.blockedTargetIds);
@@ -268,9 +291,18 @@ export function ProjectUpdates({ projectId, request, onState, embedded = false, 
         {state?.targets.some(target => target.provider === "vercel" && target.capability?.workload === "static") && <p className="updates-note">Sites statiques Vercel : Vite, Astro et Create React App sont pris en charge après qualification des sources et de la sortie du build. Les fichiers publiés sont comparés aux empreintes du build validé ; Node sert à la construction locale. Les fonctions serveur, workspaces, variables externes et configurations particulières demandent une qualification séparée.</p>}
         </details>}
         {available.filter(target => target.mode === "image").map(target => <p className="updates-note" key={target.id}><button className="button secondary" disabled={busy || refreshingHosting || !!active || assessmentActive || !state?.enabled} onClick={() => void startUpdate([target.id])}>Mettre à jour l’image de {target.name}</button></p>)}
-        {state.targets.some(target => target.provider !== "o2switch") && <details className="updates-details"><summary>Relevés d’hébergement</summary>
-          <p className="updates-note"><button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting()}>{refreshingHosting ? "Actualisation des hébergements…" : "Actualiser les relevés d’hébergement"}</button> · Lecture des déploiements, sans mise à jour des sites.</p>
-          {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
+        {detail && observations.length > 0 && <details className="updates-details"><summary>Relevés d’hébergement</summary>
+          <div className="updates-scope">
+                  {observations.length ? <ul>
+              {observations.map(item => <li key={item.id}>
+                {item.label} · <span className={`badge ${item.status === "fresh" ? "sage" : "warning"}`}>{observationLabels[item.status]}</span>
+                {item.at && Number.isFinite(Date.parse(item.at)) && <> · Dernière lecture réussie le {formatDate(item.at)}</>}
+                {item.expiredCatalogs > 0 && <> · {item.expiredCatalogs} vérification(s) de mises à jour expirée(s)</>}
+              </li>)}
+            </ul> : <p>Aucun relevé d’hébergement associé à ce projet.</p>}
+            {detail.project.lifecycle === "active" && observations.some(item => item.refreshable) && <button className="text-button" disabled={refreshingHosting} onClick={() => void refreshHosting(true)}>{refreshingHosting ? "Actualisation des relevés…" : "Actualiser les relevés"}</button>}
+            {hostingError && <p role="alert" className="updates-error">{hostingError}</p>}
+          </div>
         </details>}
         <p className="updates-note">Les versions majeures sont incluses si leur validation réussit. {state?.targets.some(target => target.mode === "wordpress") && "L’agent installe les mises à jour officielles compatibles de WordPress, des extensions et des thèmes. Les sauvegardes sont gérées dans Backup. PHP reste géré par l’hébergeur."}</p>
         {state?.targets.map(target => {

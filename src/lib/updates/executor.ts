@@ -876,13 +876,12 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
       if (failures.length) {
         run.stage = run.results.some(result => result.stage === "attention") ? "attention" : "failed";
         run.message = `${run.results.filter(result => result.stage === "completed").length} service(s) terminé(s), ${run.results.filter(result => result.stage !== "completed").length} service(s) non confirmé(s). ${failures.join(" ")} Les groupes indépendants ont été traités ; le succès global n’est pas confirmé.`;
-        await log("live", run.purpose === "assessment" ? "updates.assessment_failed" : "updates.failed", run.message, run.projectId);
+        if (run.purpose !== "assessment") await log("live", "updates.failed", run.message, run.projectId);
         return;
       }
       if (run.purpose === "assessment") {
         run.stage = "completed";
         run.message = "Bilan préalable terminé. Aucun composant installé ni déployé.";
-        await log("live", "updates.assessed", run.message, run.projectId);
         return;
       }
       requireZeroFinalFindings(run.results);
@@ -903,12 +902,24 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
     run.stage = run.purpose === "assessment" ? "failed" : published ? "attention" : "failed";
     run.message = error instanceof ApiError ? error.message : "Une étape de mise à jour a échoué. Les informations de récupération sont conservées.";
     for (const result of run.results.filter(result => result.stage !== "completed" && result.stage !== "attention")) { result.stage = run.stage; result.message = run.message; }
-    await withAuditActor(run.actor, () => log("live", run.purpose === "assessment" ? "updates.assessment_failed" : "updates.failed", run.message, run.projectId));
+    if (run.purpose !== "assessment") await withAuditActor(run.actor, () => log("live", "updates.failed", run.message, run.projectId));
   } finally {
     clearInterval(heartbeat);
     await writes;
     trackProgress(run.stage, run.message);
     await transaction(async () => {
+      if (run.purpose === "assessment") await withAuditActor(run.actor, async () => {
+        if (run.stage === "failed") {
+          await log("live", "updates.assessment_failed", run.message, run.projectId);
+        } else if (run.results.some(result => result.assessment?.changes.length)) {
+          const row = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND stage='completed' AND json_extract(data,'$.purpose')='assessment' ORDER BY json_extract(data,'$.createdAt') DESC, id DESC LIMIT 1").get(run.projectId) as { data: string } | undefined;
+          const previous = row ? JSON.parse(row.data) as UpdateRun : undefined;
+          const previousChanges = new Map(previous?.results.map(result => [result.targetId, new Set(result.assessment?.changes)]));
+          if (run.results.some(result => result.assessment?.changes.some(change => !previousChanges.get(result.targetId)?.has(change)))) {
+            await log("live", "updates.assessment_changed", "Consultez le bilan dans la fiche du projet.", run.projectId);
+          }
+        }
+      });
       await writeUpdateRun(run);
       if (run.stage !== "attention") await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(id);
       else for (const scope of new Set(run.targets.map(updateScope))) {

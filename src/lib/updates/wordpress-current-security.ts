@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { hostingInstallation } from "../hosting-discovery";
-import { hostingStorage } from "../hosting-storage";
+import { hostingStorage, readCatalogReports } from "../hosting-storage";
+import type { HostingInstallationView } from "../types";
 import { freeWordPressScanner } from "./wordpress-free-security";
 import { wordpressPlanSchema } from "./wordpress-security";
 import { wordpressSecurityVersions } from "./wordpress-security-key";
@@ -8,19 +9,33 @@ import { securityCheck } from "./security";
 import { recordWordPressManualUpdates } from "./wordpress-maintenance";
 import type { UpdateResult } from "./types";
 import type { UpdateState, UpdateTarget } from "./types";
+import { wordpressInventoryIsFresh } from "../observation-freshness";
 
 type Observation = NonNullable<UpdateState["currentSecurity"]>[number];
 const pending = new Map<string, Promise<Observation>>();
-export async function currentWordPressSecurity(target: UpdateTarget, dependencies: { site?: typeof hostingInstallation; transport?: typeof fetch; cacheOnly?: boolean; fresh?: boolean } = {}): Promise<Observation> {
-  const site = await (dependencies.site || hostingInstallation)(target.remoteId), inventory = site.inventory;
+function wordpressReportLookup(target: UpdateTarget, site: HostingInstallationView | undefined) {
+  const inventory = site?.inventory;
   const versions = inventory ? wordpressSecurityVersions(inventory) : "";
   const unavailable = { targetId: target.id, versions, warnings: [], error: "Actualisez l’inventaire WordPress pour contrôler les versions actuelles." };
-  if (target.mode !== "wordpress" || site.project?.id !== target.projectId || site.connectionId !== target.connectionId || site.documentRoot !== target.root || site.missingSince || !inventory?.wordpress || !inventory.php || inventory.error || (inventory.collectionMode === "early" && inventory.source !== "wordpress-observer") || !inventory.observedAt || !Number.isFinite(Date.parse(inventory.observedAt)) || Date.now() - Date.parse(inventory.observedAt) > 24 * 3600_000) return unavailable;
+  if (target.mode !== "wordpress" || site?.project?.id !== target.projectId || site.connectionId !== target.connectionId || site.documentRoot !== target.root || !inventory?.wordpress || !inventory.php || !wordpressInventoryIsFresh(site) || (inventory.collectionMode === "early" && inventory.source !== "wordpress-observer")) return { unavailable };
   const key = "security:wp-current:4:" + createHash("sha256").update(JSON.stringify([target.id, target.projectId, target.connectionId, target.root, versions, ...(inventory.collectionMode === "early" ? ["early"] : [])])).digest("hex");
+  return { key, inventory, versions, unavailable };
+}
+function pendingReport(unavailable: Observation): Observation {
+  return { ...unavailable, error: "Le contrôle automatique est attendu. Il s’exécute sans ouvrir cette fiche." };
+}
+export async function readWordPressSecurityReports(targets: UpdateTarget[], sites: ReadonlyMap<string, HostingInstallationView>) {
+  const lookups = targets.map(target => wordpressReportLookup(target, sites.get(target.remoteId)));
+  const cached = await readCatalogReports<Observation>(lookups.flatMap(item => item.key ? [item.key] : []), new Date().toISOString());
+  return new Map(lookups.map(({ key, unavailable }) => [unavailable.targetId, key ? cached.get(key) ?? pendingReport(unavailable) : unavailable]));
+}
+export async function currentWordPressSecurity(target: UpdateTarget, dependencies: { site?: typeof hostingInstallation; transport?: typeof fetch; cacheOnly?: boolean; fresh?: boolean } = {}): Promise<Observation> {
+  const { key, inventory, versions, unavailable } = wordpressReportLookup(target, await (dependencies.site || hostingInstallation)(target.remoteId));
+  if (!key) return unavailable;
   const db = await hostingStorage();
   const cached = await db.prepare("SELECT data FROM wordpress_catalog WHERE cache_key=? AND expires_at>?").get(key, new Date().toISOString()) as { data: string } | undefined;
   if (cached && !dependencies.fresh) return JSON.parse(cached.data) as Observation;
-  if (dependencies.cacheOnly) return { ...unavailable, error: "Le contrôle automatique est attendu. Il s’exécute sans ouvrir cette fiche." };
+  if (dependencies.cacheOnly) return pendingReport(unavailable);
   if (pending.has(key)) return pending.get(key)!;
   const task = (async () => {
     let result: Observation;

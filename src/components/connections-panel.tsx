@@ -13,6 +13,7 @@ import {
 import type { HostingConnection, Project, HostingDiscovery } from "@/lib/types";
 import { EmptyState, Field, formatDate, Modal, OutLink } from "./ui";
 import { HostingDiscoveryPanel } from "./hosting-discovery-panel";
+import { ConnectionReading } from "./observation-details";
 import { RailwayConnectionsPanel } from "./railway-panel";
 import { VercelConnectionsPanel } from "./vercel-panel";
 import { useProjectRealtime } from "./project-realtime";
@@ -24,12 +25,6 @@ type RequestApi = (
   payload?: unknown,
   options?: { signal?: AbortSignal },
 ) => Promise<any>;
-const labels = {
-  unconfigured: "À configurer",
-  untested: "Premier relevé en attente",
-  connected: "Connecté",
-  error: "Échec de connexion",
-};
 export function ConnectionsPanel({
   request,
   projects,
@@ -220,6 +215,8 @@ export function ConnectionsPanel({
         ) : (
           <div className="connections-list">
             {connections.map((connection) => {
+              const discovery = discoveries[connection.id];
+              const accountError = connection.error?.message || (connection.configured && connection.lastCheckedAt ? discovery?.error : null);
               return (
                 <section className="panel connection-card" key={connection.id}>
                   <div className="panel-heading">
@@ -236,15 +233,11 @@ export function ConnectionsPanel({
                       </div>
                     </div>
                     <div className="connection-card-tools">
-                      <div className="connection-reading">
-                        <span
-                          className={`badge ${connection.status === "connected" ? "sage" : connection.status === "error" ? "warning" : "neutral"}`}
-                        >
-                          {connection.status === "connected" && <Check size={12} />}
-                          {labels[connection.status]}
-                        </span>
-                        {connection.lastSuccessAt && <small>Dernier accès réussi le {formatDate(connection.lastSuccessAt)}</small>}
-                      </div>
+                      <ConnectionReading
+                        configured={connection.configured}
+                        error={accountError}
+                        lastSuccessAt={connection.status === "untested" ? null : connection.lastSuccessAt}
+                      />
                       {!connection.configured && (
                         <button className="button primary" onClick={() => setEdit(connection)} disabled={busy !== null}>
                           <Pencil size={14} /> Configurer l’accès
@@ -253,12 +246,12 @@ export function ConnectionsPanel({
                     </div>
                   </div>
                   <div className="connection-body">
-                    {connection.error && (
+                    {accountError && (
                       <div className="connection-error" role="alert">
                         <AlertCircle size={17} />
                         <p>
-                          {connection.error.message}
-                          {connection.error.httpStatus && (
+                          {accountError}
+                          {connection.error?.httpStatus && (
                             <small>
                               Réponse HTTP {connection.error.httpStatus}
                             </small>
@@ -308,8 +301,7 @@ export function ConnectionsPanel({
                       </div>
                     </details>
                     <HostingDiscoveryPanel
-                      discovery={discoveries[connection.id]}
-                      configured={connection.configured}
+                      discovery={discovery}
                       projects={projects}
                       request={request}
                       onProject={onProject}

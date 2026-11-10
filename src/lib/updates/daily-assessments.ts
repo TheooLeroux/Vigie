@@ -1,4 +1,5 @@
-import { list, transaction } from "../db";
+import { withAuditActor } from "../audit-context";
+import { list, log, transaction } from "../db";
 import type { Project } from "../types";
 import { startProjectUpdate } from "./service";
 import { updateStorage } from "./storage";
@@ -15,7 +16,10 @@ export async function expireInterruptedAssessments(now = Date.now()) {
     run.stage = "failed"; run.updatedAt = new Date(now).toISOString(); run.message = "Bilan préalable interrompu : aucun résultat actuel confirmé, aucune installation effectuée.";
     await transaction(async () => {
       const changed = await db.prepare("UPDATE update_runs SET stage=?,data=? WHERE id=? AND data=?").run(run.stage, JSON.stringify(run), run.id, row.data);
-      if (changed.changes) await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(run.id);
+      if (changed.changes) {
+        await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(run.id);
+        await withAuditActor(run.actor, () => log("live", "updates.assessment_failed", run.message, run.projectId));
+      }
     });
   }
 }

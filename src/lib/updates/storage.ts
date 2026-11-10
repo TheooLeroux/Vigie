@@ -16,6 +16,43 @@ export async function readUpdateRun(id: string) {
   const row = await (await updateStorage()).prepare("SELECT data FROM update_runs WHERE id=?").get(id) as { data: string } | undefined;
   return row ? JSON.parse(row.data) as UpdateRun : null;
 }
+export type UpdateHistory = { runs: UpdateRun[]; assessment: UpdateRun | null };
+export async function readConfiguredUpdateTargets(projectIds: string[]) {
+  const configured = new Map<string, Set<string>>(projectIds.map(id => [id, new Set()]));
+  if (!configured.size) return configured;
+  const rows = await (await updateStorage())
+    .prepare(`SELECT project_id,target_id FROM update_sources WHERE project_id IN (${[...configured].map(() => "?").join(",")})`)
+    .all(...configured.keys()) as { project_id: string; target_id: string }[];
+  for (const row of rows) configured.get(row.project_id)!.add(row.target_id);
+  return configured;
+}
+
+export async function readUpdateHistory(projectIds: string[]) {
+  const history = new Map<string, UpdateHistory>(projectIds.map(id => [id, { runs: [], assessment: null }]));
+  if (!history.size) return history;
+  const rows = await (await updateStorage()).prepare(`
+    SELECT project_id, data, assessment FROM (
+      SELECT project_id, data, COALESCE(json_extract(data,'$.purpose'),'update')='assessment' AS assessment,
+        ROW_NUMBER() OVER (
+          PARTITION BY project_id, COALESCE(json_extract(data,'$.purpose'),'update')='assessment'
+          ORDER BY json_extract(data,'$.createdAt') DESC
+        ) AS position
+      FROM update_runs WHERE project_id IN (${[...history].map(() => "?").join(",")})
+    ) ranked
+    WHERE position <= CASE WHEN assessment THEN 1 ELSE 5 END
+    ORDER BY project_id, position
+  `).all(...history.keys()) as { project_id: string; data: string; assessment: boolean | number }[];
+  for (const row of rows) {
+    const run = JSON.parse(row.data) as UpdateRun;
+    const projectHistory = history.get(row.project_id)!;
+    if (row.assessment) projectHistory.assessment = run;
+    else {
+      delete run.nodeReceipts;
+      projectHistory.runs.push(run);
+    }
+  }
+  return history;
+}
 export async function writeUpdateRun(run: UpdateRun) {
   run.updatedAt = new Date().toISOString();
   await (await updateStorage()).prepare("UPDATE update_runs SET stage=?,data=? WHERE id=?").run(run.stage, JSON.stringify(run), run.id);

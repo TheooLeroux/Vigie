@@ -6,6 +6,15 @@ import { githubRequest, updateRunner } from "@/lib/updates/github";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
+async function dispatchSecurityControls() {
+  const runner = updateRunner();
+  if (!runner) throw new ApiError("Le contrôle automatique n’est pas configuré.", 503);
+  await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-wordpress-agents.yml/dispatches`, runner.token, "POST", {
+    ref: runner.ref,
+    inputs: { security_only: true },
+  });
+}
+
 export async function GET(request: Request) {
   try {
     assertLocal(request);
@@ -15,13 +24,8 @@ export async function GET(request: Request) {
     if (!secret || authorization.length !== expected.length || !timingSafeEqual(authorization, expected)) {
       throw new ApiError("Contrôle automatique non autorisé.", 401);
     }
-    const runner = updateRunner();
-    if (!runner) throw new ApiError("Le contrôle automatique n’est pas configuré.", 503);
     const [dispatch, cache] = await Promise.allSettled([
-      githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-wordpress-agents.yml/dispatches`, runner.token, "POST", {
-        ref: runner.ref,
-        inputs: { security_only: true },
-      }),
+      dispatchSecurityControls(),
       refreshSecurityWatchSnapshot(AbortSignal.timeout(85_000)),
     ]);
     if (cache.status === "rejected") console.warn("Vigie : cache de surveillance non renouvelé.");

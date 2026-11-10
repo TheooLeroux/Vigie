@@ -83,9 +83,9 @@ export async function backupHostingInstallations() {
     projectActive: !row.project_id || lifecycle.get(row.project_id) === "active",
   }));
 }
-async function projectData() {
+async function projectData(projects?: Project[]) {
   return {
-    projects: (await list<Project>("projects", "live")),
+    projects: projects ?? (await list<Project>("projects", "live")),
     services: (await list<Service>("services", "live")),
     environments: (await list<Environment>("environments", "live")),
     accesses: (await list<Access>("accesses", "live")),
@@ -230,13 +230,25 @@ export async function hostingDiscovery(connectionId: string): Promise<HostingDis
   return { connectionId, ...run, installations, summary };
 }
 export async function projectHostingInstallations(projectId: string) {
-  const data = (await projectData());
-  return (await Promise.all((await rows())
-    .filter((row) => row.project_id === projectId)
-    .map(async (row) => ({
-      ...(await view(row, (await connection(row.connection_id)), data)),
-      connectionName: (await connection(row.connection_id)).name,
-    }))));
+  return (await projectHostingInstallationsByProject(new Set([projectId]))).get(projectId) || [];
+}
+export async function projectHostingInstallationsByProject(projectIds: ReadonlySet<string>, projects?: Project[]) {
+  const result = new Map<string, (HostingInstallationView & { connectionName: string })[]>();
+  const installations = (await rows()).filter(row => row.project_id && projectIds.has(row.project_id));
+  if (!installations.length) return result;
+  const data = await projectData(projects);
+  const hosts = new Map([...new Set(installations.map(row => row.connection_id))].map(id => [id, connection(id)]));
+  const views = await Promise.all(installations.map(async row => {
+    const host = await hosts.get(row.connection_id)!;
+    return { ...(await view(row, host, data)), connectionName: host.name };
+  }));
+  installations.forEach((row, index) => {
+    const projectId = row.project_id!;
+    const linked = result.get(projectId) || [];
+    linked.push(views[index]);
+    result.set(projectId, linked);
+  });
+  return result;
 }
 async function saveRow(row: Row, item: HostingInstallation) {
   (await (await hostingStorage())

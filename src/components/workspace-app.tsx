@@ -220,6 +220,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
     [incompleteOnly, setIncompleteOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null),
     [detail, setDetail] = useState<ProjectDetail | null>(null);
+  const [observationTime, setObservationTime] = useState(Date.now);
   const selectedRef = useRef(selected), workspaceRead = useRef(0), detailRead = useRef(0);
   selectedRef.current = selected;
   const [projectTab, setProjectTab] = useState<ProjectTab>("overview");
@@ -328,8 +329,18 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
       else setError((error as Error).message);
     });
     const unsubscribe = subscribe(change => { if (change.all || change.projects.includes(selected)) queue.invalidate([selected]); });
+    const tick = () => { if (document.visibilityState === "visible") setObservationTime(Date.now()); };
+    const online = () => { tick(); queue.invalidate([selected]); };
+    const timer = window.setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", tick);
+    window.addEventListener("online", online);
+    tick();
     queue.invalidate([selected]);
-    return () => { controller.abort(); queue.dispose(); unsubscribe(); };
+    return () => {
+      controller.abort(); queue.dispose(); unsubscribe(); window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("online", online);
+    };
   }, [readDetail, selected, ready, subscribe]);
   useEffect(() => {
     const keyboard = (e: KeyboardEvent) => {
@@ -887,12 +898,13 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
               Ajouter un service
             </button>
           </details>
-          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} overviewActionTarget={overviewUpdateTarget}>
+          <ProjectUpdates key={p.id} projectId={p.id} request={api} onState={onProjectUpdateState} detail={detail} observationTime={observationTime} onObservationsRefreshed={readDetail} overviewActionTarget={overviewUpdateTarget}>
             <ProjectMaintenanceSummary detail={detail} updates={projectUpdateState?.projectId === p.id ? projectUpdateState.state : undefined} />
           </ProjectUpdates>
         </div>
         <div className="project-content project-tab-panel" id="project-panel-history" role="tabpanel" aria-labelledby="project-tab-history" hidden={projectTab !== "history"} tabIndex={0}>
           <ActivityPanel
+            key={p.id}
             items={detail.activity}
             request={api}
             projectId={p.id}

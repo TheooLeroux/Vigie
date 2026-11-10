@@ -1,4 +1,4 @@
-import type { ProjectDetail } from "./types";
+import type { ProjectObservationDetail } from "./types";
 import type { UpdateCheck, UpdateTarget, UpdateState } from "./updates/types";
 import { railwayRuntimeDeployments } from "./railway-status";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
@@ -35,7 +35,7 @@ export type AutomaticControl = {
 
 // Include deployment IDs as well as commits: redeploying the same sources also
 // invalidates the previous observation. Never substitute the branch head.
-export function controlSource(target: UpdateTarget, detail: ProjectDetail, now = Date.now()) {
+export function controlSource(target: UpdateTarget, detail: ProjectObservationDetail, now = Date.now()) {
   const root = (value?: string | null) => (value || "").replace(/^\/+|\/+$/g, "");
   const recent = (at?: string | null, maxAge = deploymentObservationLifetime) => observationIsFresh(at, maxAge, now);
   let commit: string | null = null;
@@ -84,7 +84,7 @@ export function automaticControlFresh(control: AutomaticControl, now = Date.now(
   const age = now - Date.parse(control.checkedAt || "");
   return !control.error && Number.isFinite(age) && age >= 0 && age < controlInterval;
 }
-export function controlMatches(control: AutomaticControl, target: UpdateTarget, detail: ProjectDetail) {
+export function controlMatches(control: AutomaticControl, target: UpdateTarget, detail: ProjectObservationDetail) {
   const source = controlSource(target, detail);
   return source?.identity === control.identity || control.coverage === "partial" && control.identity === "unavailable" && !source;
 }
@@ -98,7 +98,7 @@ export function automaticControlDue(previous: AutomaticControl | null, identity:
     : !Number.isFinite(checkedAge) || checkedAge < 0 || checkedAge >= controlRenewalInterval;
 }
 
-export function hasVerifiedSecurityControl(detail: ProjectDetail, state: UpdateState) {
+export function hasVerifiedSecurityControl(detail: ProjectObservationDetail, state: UpdateState) {
   return state.automaticControls?.some(control => {
     const target = state.targets.find(target => target.id === control.targetId);
     return target && automaticControlFresh(control) && controlSource(target, detail)?.identity === control.identity && control.checks.some(check => ["OSV", "WPScan", "WPVulnerability", "Trivy"].includes(check.tool));

@@ -27,6 +27,19 @@ test("PostgreSQL isolé : historique complet filtré et catalogue des sauvegarde
     const result = await activityPage({ projectId: p.id, query: "PG archive", kind: "Revues", page: 4 }, "live");
     assert.equal(result.total, 105); assert.equal(result.items.length, 5);
     assert.equal((await activityPage({ projectId: p.id, query: "100%_0" }, "live")).total, 1);
+    const collectionId = randomUUID();
+    for (const [index, action] of ["hosting.inventory", "hosting.inventory", "hosting.inventory_failed"].entries()) {
+      await save("activity", "live", {
+        id: randomUUID(), projectId: p.id, projectName: p.name, action,
+        collectionId: index < 2 ? collectionId : undefined,
+        detail: "PG collection", createdAt: new Date(Date.UTC(2025, 0, 2) + index * 1000).toISOString(),
+      }, p.id);
+    }
+    const complete = await activityPage({ projectId: p.id, query: "PG collection", view: "complete" }, "live");
+    assert.equal(complete.total, 2);
+    assert.deepEqual(complete.items.map(item => item.collectionId), [undefined, collectionId, collectionId]);
+    const focus = await activityPage({ projectId: p.id, query: "PG collection", view: "focus" }, "live");
+    assert.deepEqual(focus.items.map(item => item.action), ["hosting.inventory_failed"]);
     const writeFixture = (_folder: string, zip: string) => writeFile(zip, "fixture");
     assert.equal(await runBackup(p.id, writeFixture), true);
     assert.equal(await runBackup(p.id, writeFixture), false);

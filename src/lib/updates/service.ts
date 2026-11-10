@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { auditActor } from "../audit-context";
+import { auditActor, withAuditActor } from "../audit-context";
 import { log, requireProject, transaction } from "../db";
 import { ApiError } from "../http";
 import { dispatchUpdate, githubRequest, updateRunner } from "./github";
-import { readRailpackImageReports, readUpdateRun, readUpdateSource, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
+import { readUpdateHistory, readUpdateRun, readUpdateSource, updateStorage, writeUpdateRun, writeUpdateSource } from "./storage";
 import { updateScope, updateTargets } from "./targets";
 import { activeUpdateStages, type UpdateRun, type UpdateState } from "./types";
 import { currentSourceDeployment } from "./providers";
@@ -23,8 +23,8 @@ import { refreshProjectHosting } from "./refresh-hosting";
 import { observedProjectDetail } from "../project-observations";
 import { controlSource } from "../automatic-control-state";
 import { railwayState } from "../railway";
-import { railpackImageIdentity, railpackImageReport, sameRailpackImage } from "./railpack-image-report";
-import { readRailpackScan } from "./railpack-image-control";
+import { railpackImageIdentity } from "./railpack-image-report";
+import { projectRailpackReports } from "./railpack-image-control";
 
 function attentionScopes(run: UpdateRun) {
   const targets = run.targets || [];
@@ -43,40 +43,18 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
   const railway = railwayState();
   const [targets, { projects }] = await Promise.all([updateTargets(projectId, railway), railway]);
   const db = await updateStorage();
-  const rows = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND COALESCE(json_extract(data,'$.purpose'),'update')<>'assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 5").all(projectId) as { data: string }[];
-  const daily = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND json_extract(data,'$.purpose')='assessment' ORDER BY json_extract(data,'$.createdAt') DESC LIMIT 1").get(projectId) as { data: string } | undefined;
-  const runs = rows.map(row => {
-    const run = JSON.parse(row.data) as UpdateRun;
-    delete run.nodeReceipts;
-    return run;
-  });
+  const { runs, assessment } = (await readUpdateHistory([projectId])).get(projectId)!;
   const pendingRows = await db.prepare("SELECT data FROM update_runs WHERE project_id=? AND stage='attention' ORDER BY json_extract(data,'$.createdAt') DESC").all(projectId) as { data: string }[];
   const pending = pendingRows.map(row => JSON.parse(row.data) as UpdateRun);
   const blockedScopes = new Set(pending.flatMap(attentionScopes));
   const identities = targets.map(target => railpackImageIdentity(target, projects)).filter(identity => identity !== null);
-  const assessment = daily ? JSON.parse(daily.data) as UpdateRun : null;
   const wordpressTargets = targets.filter(target => target.mode === "wordpress");
-  const [imageScans, automaticControls, currentSecurity, wordpressSources] = await Promise.all([
-    Promise.all(identities.map(async identity => {
-      const scan = await readRailpackScan(identity.targetId);
-      return scan && sameRailpackImage(scan, identity) ? scan : undefined;
-    })),
+  const [railpackImageReports, automaticControls, currentSecurity, wordpressSources] = await Promise.all([
+    projectRailpackReports(projectId, identities, runs),
     Promise.all(targets.map(target => readAutomaticControl(target.id))),
     Promise.all(wordpressTargets.map(target => currentWordPressSecurity(target, { cacheOnly: true }))),
     Promise.all(wordpressTargets.map(target => readUpdateSource(target.id))),
   ]);
-  const missing = identities.filter((identity, index) => !imageScans[index]?.report && !runs.some(run => railpackImageReport(run, identity)));
-  const archived = await readRailpackImageReports(projectId, missing);
-  const railpackImageReports = identities.flatMap((identity, index) => {
-    const scan = imageScans[index];
-    if (scan?.report) return [{ ...scan.report, ...(scan.error ? { error: scan.error } : {}) }];
-    const fallback = archived.find(report => sameRailpackImage(report, identity));
-    if (fallback || scan?.error) {
-      const report = fallback || runs.map(run => railpackImageReport(run, identity)).find(item => item !== null);
-      if (report) return [{ ...report, ...(scan?.error ? { error: scan.error } : {}) }];
-    }
-    return [];
-  });
   const wordpressSettings = wordpressTargets.map((target, index) => {
     const allowed = allowedWordPressRemovals(target, wordpressSources[index]?.settings);
     const history = [...runs, ...(assessment ? [assessment] : [])].flatMap(run => run.results.filter(result => result.targetId === target.id));
@@ -140,7 +118,7 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
       const lock = await db.prepare("INSERT INTO update_locks(scope,run_id) VALUES(?,?) ON CONFLICT(scope) DO NOTHING").run(scope, candidate.id);
       if (!lock.changes) throw new ApiError("Une mise à jour utilise déjà ces sources. Son suivi reste disponible sur le projet concerné.", 409);
     }
-    await log("live", options.assessment ? "updates.assessment_started" : "updates.started", options.assessment ? "Bilan quotidien demandé, sans installation." : "Mise à jour du projet demandée.", input.projectId);
+    if (!options.assessment) await log("live", "updates.started", "Mise à jour du projet demandée.", input.projectId);
     return { run: candidate, created: true };
   });
   if (created) {
@@ -154,7 +132,10 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
       }
       await transaction(async () => {
         const changed = await db.prepare("UPDATE update_runs SET stage=?,data=? WHERE id=? AND stage='queued'").run(run.stage, JSON.stringify(run), run.id);
-        if (changed.changes && run.stage === "failed") await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(run.id);
+        if (changed.changes && run.stage === "failed") {
+          await db.prepare("DELETE FROM update_locks WHERE run_id=?").run(run.id);
+          if (run.purpose === "assessment") await withAuditActor(run.actor, () => log("live", "updates.assessment_failed", run.message, run.projectId));
+        }
       });
     }
   }
