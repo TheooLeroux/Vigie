@@ -17,7 +17,9 @@ Les fichiers et la base sont lus à des instants différents. Un site qui reçoi
 
 ## Planification et rétention
 
-Après validation du pilote, programmer `npm run backups:tick` avec le cron `3-58/5 * * * *` sur l’exécuteur. Le moteur calcule le créneau en `Europe/Paris` et vise le lundi à 03 h 13. Les passages suivants rattrapent le dernier créneau en cas d’arrêt. Une copie valide termine le créneau. Un échec peut être repris après 15 minutes, et la réservation d’un worker interrompu expire après quatre heures.
+Le workflow GitHub Actions `Vigie backups` est programmé le lundi à 03 h 13, heure de Paris. Lancer le workflow manuellement avec un domaine et le mode `preflight` pour contrôler le périmètre, ou `capture` pour reprendre le dernier créneau de ce site. Une copie valide termine le créneau. Un échec peut être repris après 15 minutes et la réservation d’un worker interrompu expire après quatre heures.
+
+GitHub Actions utilise les clés SSH dédiées et les clés d’hôte vérifiées pour Canary et Gaz. Le worker ajoute temporairement sa propre adresse IPv4 au pare-feu o2switch et retire l’exception à la fin du passage. Si le job s’arrête avant le nettoyage, le prochain passage retire les exceptions expirées qu’il a enregistrées. Les fichiers de travail restent en mémoire sans swap.
 
 Le moteur conserve par installation les cinq dernières copies complètes et la dernière copie valide de chacun des douze mois civils glissants, mois courant compris. Un ZIP qui compte pour les deux règles n’existe qu’une fois. Le worker limite la collecte à un site à la fois par compte o2switch. La suppression des copies expirées suit une capture réussie. Les erreurs sont remontées au journal de l’exécuteur.
 
