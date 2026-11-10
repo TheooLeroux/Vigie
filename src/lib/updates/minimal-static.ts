@@ -21,7 +21,7 @@ ADD --checksum=sha256:${caddyArchiveHash} https://codeload.github.com/caddyserve
 RUN mkdir /src && tar -xzf /caddy.tgz -C /src --strip-components=1
 WORKDIR /src
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
-RUN go get golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 && go build -trimpath -buildvcs=false -o /caddy ./cmd/caddy
+RUN go get golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /caddy ./cmd/caddy
 FROM node:26.13.0-bookworm-slim@sha256:51d24d08800f352afae68628d883e63db3f2c4dd807b7ddb6f805dc6b9ef8c0e AS frontend
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -69,9 +69,9 @@ async function scanBinary(directory: string, cache: string) {
   if (findings.length) throw new ApiError(`L’image minimale contient encore ${findings.length} signalement(s) Go. Candidate refusée.`, 422);
 }
 
-async function hashFile(path: string) {
+async function hashFile(path: string, artifact = "Caddy") {
   const stat = await lstat(path);
-  if (!stat.isFile() || stat.size < 1 || stat.size > 80_000_000) throw new ApiError("Artefact Caddy invalide.", 422);
+  if (!stat.isFile() || stat.size < 1 || stat.size > 80_000_000) throw new ApiError(`Artefact ${artifact} invalide (${stat.size} octets).`, 422);
   return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
@@ -164,7 +164,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     await mkdir(bundle);
     for (const file of ["caddy", "dist", "Caddyfile"]) await runCommand("docker", ["cp", `${container}:/${file}`, join(bundle, file)], { env });
     const binaryHash = await hashFile(join(bundle, "caddy"));
-    await hashFile(join(bundle, "dist", "index.html"));
+    await hashFile(join(bundle, "dist", "index.html"), "index.html");
     const candidate = join(dir, "candidate");
     await mkdir(candidate);
     await cp(join(bundle, "caddy"), join(candidate, "caddy"));
