@@ -49,7 +49,8 @@ ENTRYPOINT ["/caddy","run","--config","/Caddyfile","--adapter","caddyfile"]
 `;
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const uuid = z.string().uuid();
-const available = new Set(["caddy", "Caddyfile", "dist", "dev", "etc", "proc", "sys", "tmp", ".dockerenv", ".railway"]);
+// Railway mounts runtime directories even when the uploaded image has no base layer.
+const available = new Set(["caddy", "Caddyfile", "dist", "dev", "etc", "proc", "run", "sys", "tmp", ".dockerenv", ".railway"]);
 
 function assertMinimalListing(listing: string) {
   const entries = listing.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^(?:sftp>|Connected to )/.test(line)).map(line => line.replace(/^\/+|\/+$/g, ""));
@@ -61,7 +62,9 @@ function assertMinimalListing(listing: string) {
 
 async function scanBinary(directory: string, cache: string) {
   const report = join(directory, "trivy.json");
-  await runCommand("trivy", ["rootfs", "--scanners", "vuln", "--pkg-types", "library", "--list-all-pkgs", "--cache-dir", cache, "--quiet", "--format", "json", "--output", report, directory], { timeout: 150_000 });
+  await runCommand("trivy", ["rootfs", "--scanners", "vuln", "--pkg-types", "library", "--list-all-pkgs", "--cache-dir", cache, "--quiet", "--format", "json", "--output", report, directory], {
+    env: { NODE_ENV: "production", PATH: process.env.PATH, HOME: directory }, timeout: 150_000,
+  });
   if ((await lstat(report)).size > 16_000_000) throw new ApiError("Rapport de l’image minimale trop volumineux.", 422);
   const raw = await readFile(report, "utf8");
   const parsed = JSON.parse(raw);
@@ -196,6 +199,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
       await cp(binary, join(deployed, "caddy"));
       await scanBinary(deployed, cache);
     });
+    log(`Scan de l’image Railway ${digest} terminé : zéro signalement sur ${instances.length} instance(s).`);
     const backendId = uuid.parse(backend[0].id);
     const routes = await readRailwayProbe(witness, backendId, {
       command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + witnessProgram.replace(/'/g, "'\\''") + `' '${name}.railway.internal' '${origin}' '${nonce}'`,
