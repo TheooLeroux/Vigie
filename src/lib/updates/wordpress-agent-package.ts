@@ -10,19 +10,25 @@ export const legacyAgentHashes: Record<string, string> = {
   "bootstrap.php": "ebd337b186dde9df73ca775f1b2a5c9417ec361c1293808f71e37ad21ce0a84b",
   "php.d/10-phar.ini": "f2ca199ff9e14f1f8b5de387bd684c4fa34fdc6f06a52c60275ace70065d4ecc",
 };
+// Exact worker and generated plan from the audited 120ae9c package.
+const legacyAgentV2: Record<string, string> = {
+  "agent.php": "5ec8a854463572ceb3445b0b9fe80e74d8e74347082adc6dc3714c3d22340a6b",
+  "plan.php": "fdb815406033d479c048a9de6aee4d009ddde724d24808efb2e733bb43b5646c",
+};
 export const agentFileHash = (value: string) => createHash("sha256").update(value).digest("hex");
 const configSchema = z.object({ protocol: z.literal("vigie-local-v1"), root: z.string(), secret: z.string(), phpBinary: z.string(), wpBinary: z.string(), environment: z.enum(["production", "staging"]), workerSha256: z.string().regex(/^[a-f0-9]{64}$/), planSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 
 export function assertManagedAgentFile(name: string, current: string | null, expected: string, config: string, previous: Record<string, string> = {}, previousPhpBinary?: string) {
   if (current === null || current === expected) return;
-  const allowed = (file: string) => [legacyAgentHashes[file], previous[file], file === name ? agentFileHash(expected) : undefined].filter(Boolean);
+  const allowed = (file: string) => [legacyAgentHashes[file], legacyAgentV2[file], previous[file], file === name ? agentFileHash(expected) : undefined].filter(Boolean);
   if (name === "config.json") {
     try {
       const old = configSchema.parse(JSON.parse(current)), next = configSchema.parse(JSON.parse(config));
       const knownWorker = [legacyAgentHashes["agent.php"], previous["agent.php"], next.workerSha256].includes(old.workerSha256);
       const knownPlan = [legacyAgentHashes["plan.php"], previous["plan.php"], next.planSha256].includes(old.planSha256);
-      if (old.protocol === next.protocol && old.root === next.root && old.secret === next.secret && [next.phpBinary, previousPhpBinary].includes(old.phpBinary) && old.wpBinary === next.wpBinary && old.environment === next.environment && knownWorker && knownPlan) return;
+      const knownV2 = old.workerSha256 === legacyAgentV2["agent.php"] && old.planSha256 === legacyAgentV2["plan.php"];
+      if (old.protocol === next.protocol && old.root === next.root && old.secret === next.secret && [next.phpBinary, previousPhpBinary].includes(old.phpBinary) && old.wpBinary === next.wpBinary && old.environment === next.environment && (knownV2 || knownWorker && knownPlan)) return;
     } catch { /* Fail closed without exposing remote contents or keys. */ }
-  } else if (allowed(name).includes(agentFileHash(current))) return;
+  } else if (current.replace(/\r\n/g, "\n") === expected || allowed(name).includes(agentFileHash(current))) return;
   throw new ApiError("Un fichier d’agent différent existe déjà ; aucun écrasement. Seules les versions gérées et vérifiées peuvent être remplacées.");
 }

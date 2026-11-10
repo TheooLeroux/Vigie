@@ -101,3 +101,17 @@ test("Agent géré : migration de fichiers connus, refus d’un autre propriéta
   assert.throws(() => assertManagedAgentFile("agent.php", oldWorker + " altered", "new worker", next, hashes), /aucun écrasement/);
   assert.throws(() => assertManagedAgentFile("config.json", JSON.stringify({ ...JSON.parse(old), secret: "b".repeat(64) }), next, next, hashes), /aucun écrasement/);
 });
+
+test("Agent géré : paquet v2 publié et lanceur CRLF reconnus sans accepter de fichier altéré", () => {
+  const base = {
+    protocol: "vigie-local-v1", root: "/home/test/site", secret: "a".repeat(64),
+    phpBinary: "/opt/alt/php82/usr/bin/php", wpBinary: "/usr/local/bin/wp",
+    environment: "production", workerSha256: "b".repeat(64), planSha256: "c".repeat(64),
+  };
+  const old = { ...base, workerSha256: "5ec8a854463572ceb3445b0b9fe80e74d8e74347082adc6dc3714c3d22340a6b", planSha256: "fdb815406033d479c048a9de6aee4d009ddde724d24808efb2e733bb43b5646c" };
+  const next = JSON.stringify(base);
+  assert.doesNotThrow(() => assertManagedAgentFile("config.json", JSON.stringify(old), next, next));
+  assert.throws(() => assertManagedAgentFile("config.json", JSON.stringify({ ...old, secret: "d".repeat(64) }), next, next), /aucun écrasement/);
+  assert.doesNotThrow(() => assertManagedAgentFile("bootstrap.php", "a\r\nb\r\n", "a\nb\n", next));
+  assert.throws(() => assertManagedAgentFile("bootstrap.php", "a\r\nc\r\n", "a\nb\n", next), /aucun écrasement/);
+});

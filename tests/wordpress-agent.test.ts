@@ -25,6 +25,12 @@ test("Agent local : le paquet lie les sources, la racine et le PHP sans contenir
   assert.match(config.planSha256, /^[a-f0-9]{64}$/);
   assert.equal(bundle.files["agent.php"].includes(settings.secret), false);
 });
+test("Agent local : les réparations conservent le PHP EasyApache qualifié", async () => {
+  const oldPhp = "/opt/cpanel/ea-php81/root/usr/bin/php";
+  const bundle = await agentBundle(root, "fixture", "8.2.35", "staging", { ...settings, phpBinary: oldPhp });
+  assert.equal(JSON.parse(bundle.files["config.json"]).phpBinary, "/opt/cpanel/ea-php82/root/usr/bin/php");
+  assert.ok(bundle.previousCrons.some(cron => cron.startsWith(oldPhp + " ")));
+});
 test("Agent local : double envoi réutilisé, demande différente et résultat d’un autre site refusés", async () => {
   const runId = randomUUID(), data = new Map<string, string>(); let writes = 0;
   const files: AgentFiles = {

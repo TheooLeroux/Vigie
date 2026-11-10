@@ -126,14 +126,16 @@ export function cpanelAgentFiles(connection: HostingConnection & { secret: strin
 export async function agentBundle(root: string, username: string, webPhp: string, environment: "production" | "staging", previous?: LocalAgentSettings) {
   const match = webPhp.match(/^(8\.[1-9])\.\d+/);
   if (!match) throw new ApiError("L’agent local nécessite PHP 8.1 ou plus récent.");
-  const settings: LocalAgentSettings = previous ? { ...previous, ready: false } : { protocol: agentProtocol, directory: agentDirectory(root, username), secret: randomBytes(32).toString("hex"), phpBinary: `/opt/alt/php${match[1].replace(".", "")}/usr/bin/php`, wpBinary: "/usr/local/bin/wp", environment, ready: false };
+  const branch = match[1].replace(".", "");
+  const useCpanelPhp = /^\/opt\/cpanel\/ea-php8[1-9]\/root\/usr\/bin\/php$/.test(previous?.phpBinary || "");
+  const phpBinary = useCpanelPhp ? `/opt/cpanel/ea-php${branch}/root/usr/bin/php` : `/opt/alt/php${branch}/usr/bin/php`;
+  const settings: LocalAgentSettings = previous ? { ...previous, ready: false } : { protocol: agentProtocol, directory: agentDirectory(root, username), secret: randomBytes(32).toString("hex"), phpBinary, wpBinary: "/usr/local/bin/wp", environment, ready: false };
   if (settings.directory !== agentDirectory(root, username) || settings.environment !== environment) throw new ApiError("Le rattachement de l’agent a changé.");
-  const phpBinary = `/opt/alt/php${match[1].replace(".", "")}/usr/bin/php`;
   if (settings.phpBinary !== phpBinary) { settings.previousPhpBinary = settings.phpBinary; settings.phpBinary = phpBinary; }
   if (previous?.bundleVersion !== wordpressAgentPackageVersion) settings.previousFileHashes = previous?.fileHashes || previous?.previousFileHashes;
   settings.bundleVersion = wordpressAgentPackageVersion;
-  const worker = await readFile(join(process.cwd(), "connectors/wordpress/local-agent.php"), "utf8");
-  const bootstrap = await readFile(join(process.cwd(), "connectors/wordpress/agent-bootstrap.php"), "utf8");
+  const worker = (await readFile(join(process.cwd(), "connectors/wordpress/local-agent.php"), "utf8")).replace(/\r\n/g, "\n");
+  const bootstrap = (await readFile(join(process.cwd(), "connectors/wordpress/agent-bootstrap.php"), "utf8")).replace(/\r\n/g, "\n");
   const plan = "<?php\n" + wordpressPlanPhp() + "\n";
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
   const config = JSON.stringify({ protocol: agentProtocol, root, secret: settings.secret, phpBinary: settings.phpBinary, wpBinary: settings.wpBinary, environment, workerSha256: hash(worker), planSha256: hash(plan) });
@@ -170,13 +172,13 @@ export async function provisionLocalAgent(target: UpdateTarget, settings: LocalA
       const heartbeat = await files.read("heartbeat.json");
       if (heartbeat) {
         const value = z.object({ protocol: z.literal(agentProtocol), root: z.string(), php: z.string(), time: z.number().int() }).parse(openAgentPayload(JSON.parse(heartbeat), settings.secret));
+        if (value.time < startedAt - 2 || Math.abs(Date.now() / 1000 - value.time) > 120) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
         if (value.root !== target.root || value.php !== webPhp) throw new ApiError("Le PHP ou le rattachement de l’agent ne correspond pas au site.");
-        if (Math.abs(Date.now() / 1000 - value.time) > 120) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
         const raw = await files.read("readiness.json");
         if (!raw) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
         const inspected = z.object({ protocol: z.literal(agentProtocol), root: z.string(), php: z.string(), ready: z.boolean(), time: z.number().int(), error: z.string().regex(/^[a-z_]{1,80}$/).optional(), eligibility: z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).optional() }).parse(openAgentPayload(JSON.parse(raw), settings.secret));
-        if (inspected.root !== target.root || inspected.php !== webPhp) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
         if (inspected.time < startedAt - 2 || Math.abs(Date.now() / 1000 - inspected.time) > 300) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+        if (inspected.root !== target.root || inspected.php !== webPhp) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
         if (!inspected.ready) throw new ApiError(`L’agent est installé, mais WordPress/WP-CLI ne démarre pas correctement (${inspected.error || "wordpress_probe_failed"}).`);
         const eligibility = inspected.eligibility;
         if (!eligibility || eligibility.multisite || eligibility.fileModsDisabled || !target.url || new URL(eligibility.home).hostname.replace(/^www\./, "") !== new URL(target.url).hostname.replace(/^www\./, "")) throw new ApiError("Le contrôle initial de l’agent ne correspond pas au WordPress attendu.");
