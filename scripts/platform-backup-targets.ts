@@ -13,4 +13,4 @@ export const vigieVercel = {
 } as const;
 
 export const platformBackupTargets = [nesRailway, vigieVercel];
-export type PlatformBackupTarget = typeof platformBackupTargets[number];
+export type PlatformBackupTarget = { provider: "railway" | "vercel"; remoteId: string; projectId: string };

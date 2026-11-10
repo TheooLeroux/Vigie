@@ -23,6 +23,7 @@ type BackupRow = {
 
 export type BackupGroup = { id: string; projectId: string | null; projectName: string; backups: { id: string; createdAt: string }[] };
 type SiteBackup = { installationId: string; projectId: string | null; domain: string };
+export type LinkedPlatformBackup = { provider: "railway" | "vercel"; remoteId: string; projectId: string };
 
 const backupSchema = `CREATE TABLE IF NOT EXISTS project_backups (
   id TEXT PRIMARY KEY,
@@ -254,7 +255,7 @@ export async function verifyBackupRoundtrip(collectVerifiedZip: (folder: string,
 }
 
 export async function runBackup(
-  source: string | SiteBackup,
+  source: string | SiteBackup | LinkedPlatformBackup,
   collectVerifiedZip: (folder: string, zip: string) => Promise<void>,
   now = new Date(),
 ) {
@@ -262,8 +263,9 @@ export async function runBackup(
   if (!destination) throw new Error("Configurez un stockage de sauvegarde pour lancer la collecte.");
   const scratch = remote ? backupDirectory("VIGIE_BACKUP_SCRATCH_DIRECTORY") || join(tmpdir(), "vigie-backup-scratch") : directory!;
   const projectId = typeof source === "string" ? source : source.projectId;
-  const sourceId = typeof source === "string" ? "project:" + source : "o2switch:" + source.installationId;
-  const sourceName = typeof source === "string" ? null : source.domain;
+  const sourceId = typeof source === "string" ? "project:" + source :
+    "provider" in source ? source.provider + ":" + source.remoteId : "o2switch:" + source.installationId;
+  const sourceName = typeof source === "object" && "domain" in source ? source.domain : null;
   const project = projectId ? await get<Project>("projects", projectId, "live") : null;
   if (projectId && project?.lifecycle !== "active") {
     throw new Error("Projet actif introuvable.");

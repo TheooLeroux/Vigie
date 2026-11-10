@@ -1,39 +1,44 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { runBackup, verifyBackupRoundtrip } from "../src/lib/backups";
+import { runBackup, verifyBackupRoundtrip, type LinkedPlatformBackup } from "../src/lib/backups";
 import { runCommand } from "../src/lib/updates/process";
 import { githubBackupToken } from "./backup-github-app";
 
-type Service = { repository: string | null; commit: string | null; root: string | null };
+export type BackupService = { repository: string | null; commit: string | null; root: string | null; requirePackageJson?: boolean };
 type GitSource = {
   repository: string;
   transport: "ssh" | "https" | "github-app";
   directory?: string;
   checkout?: boolean;
 };
-type Database = {
+export type BackupDatabase = {
   file: string;
   windowsClient: number;
+  requiredTables: string[];
+} & ({
   environment: () => NodeJS.ProcessEnv;
   dumpOptions?: string[];
-  requiredTables: string[];
-};
+} | {
+  capture: (archive: string) => Promise<void>;
+  allowEmpty: boolean;
+});
 
 type Dump = { file: string; tableDataEntries: number };
 
-type Profile<T extends Service> = {
+export type BackupProfile<T extends BackupService> = {
   projectId: string;
+  linkedSource?: LinkedPlatformBackup;
   name: string;
   inventory: () => Promise<T[]>;
   assertLinked?: () => Promise<void>;
   sameInventory?: (before: T[], after: T[]) => boolean;
-  git: GitSource;
-  databases: Database[];
+  git: GitSource | GitSource[];
+  databases: BackupDatabase[];
   manifest: (services: T[], sources: Record<string, string>, dumps: Dump[]) => object;
 };
 
-export async function archiveSources(folder: string, services: Service[], source: GitSource) {
+export async function archiveSources(folder: string, services: BackupService[], source: GitSource, index = 0) {
   const commits = new Set<string>();
   for (const service of services) {
     if (!service.commit) {
@@ -47,7 +52,7 @@ export async function archiveSources(folder: string, services: Service[], source
   }
   if (!commits.size) throw new Error("Aucune source Git de production vérifiable.");
 
-  const directory = source.directory ?? join(folder, "source.git");
+  const directory = source.directory ?? join(folder, "source-" + index + ".git");
   const git = (args: string[], acceptedExitCodes?: number[], env?: NodeJS.ProcessEnv) => runCommand("git", [
     "--no-replace-objects", ...(source.checkout ? [] : ["--git-dir", directory]), ...args,
   ], { timeout: 180_000, acceptedExitCodes, env });
@@ -74,15 +79,26 @@ export async function archiveSources(folder: string, services: Service[], source
     if ((await git(["rev-parse", "--verify", commit + "^{commit}"])).trim() !== commit) {
       throw new Error("Commit de production introuvable.");
     }
-    const roots = new Set(services.filter(service => service.commit === commit).map(service => service.root ?? ""));
-    for (const root of roots) {
-      const path = [root.replace(/^\/+|\/+$/g, ""), "package.json"].filter(Boolean).join("/");
-      await git(["cat-file", "-e", commit + ":" + path]);
+    const deployed = services.filter(service => service.commit === commit);
+    for (const service of deployed) {
+      const root = (service.root ?? "").replace(/^\/+|\/+$/g, "");
+      if (/[\\\x00-\x1f]/.test(root) || root.split("/").some(part => part === ".." || part === ".")) {
+        throw new Error("Racine Git de production invalide.");
+      }
+      if (service.requirePackageJson !== false) {
+        await git(["cat-file", "-e", commit + ":" + [root, "package.json"].filter(Boolean).join("/")]);
+      } else if (root && (await git(["cat-file", "-t", commit + ":" + root])).trim() !== "tree") {
+        throw new Error("La racine du déploiement n’existe pas dans le commit.");
+      }
     }
     const modes = await git(["ls-tree", "-r", "--format=%(objectmode)", commit]);
     const lfs = await git(["grep", "-l", "-E", "^version https://git-lfs[.]github[.]com/spec/v1$", commit, "--"], [0, 1]);
     if (modes.split(/\s+/).includes("160000") || lfs.trim()) {
       throw new Error("Les sous-modules ou fichiers Git LFS demandent une collecte dédiée.");
+    }
+    if (deployed.some(service => service.requirePackageJson === false)) {
+      const transforms = await git(["grep", "-l", "-E", "export-(ignore|subst)", commit, "--", ".gitattributes", ":(glob)**/.gitattributes"], [0, 1]);
+      if (transforms.trim()) throw new Error("Le dépôt contient des règles Git qui altèrent le contenu de l’archive.");
     }
     const filename = "app-" + commit + ".tar.gz";
     await git(["archive", "--format=tar.gz", "--output=" + join(folder, filename), commit]);
@@ -91,7 +107,7 @@ export async function archiveSources(folder: string, services: Service[], source
   return archives;
 }
 
-async function captureDatabase(folder: string, database: Database, environment: NodeJS.ProcessEnv): Promise<Dump> {
+async function captureDatabase(folder: string, database: BackupDatabase, environment?: NodeJS.ProcessEnv): Promise<Dump> {
   const windows = process.platform === "win32";
   const archive = join(folder, database.file);
   const output = windows
@@ -100,19 +116,21 @@ async function captureDatabase(folder: string, database: Database, environment: 
   const postgres = (tool: string, args: string[], timeout: number, env?: NodeJS.ProcessEnv) => windows
     ? runCommand("wsl.exe", ["-d", "Debian", "--", "/usr/lib/postgresql/" + database.windowsClient + "/bin/" + tool, ...args], { env, timeout })
     : runCommand(tool, args, { env, timeout });
-  await postgres("pg_dump", [
+  if ("capture" in database) await database.capture(archive);
+  else await postgres("pg_dump", [
     "--no-password", "--format=custom", "--lock-wait-timeout=10s", ...(database.dumpOptions ?? []), "--file=" + output,
   ], 20 * 60_000, environment);
   const toc = await postgres("pg_restore", ["--list", output], 30_000);
   const tables = toc.split(/\r?\n/).filter(line => /^\d+; \d+ \d+ TABLE DATA /.test(line));
-  if (!tables.length || database.requiredTables.some(table => !tables.some(line => line.includes(" TABLE DATA " + table + " ")))) {
+  if ((!tables.length && !("allowEmpty" in database && database.allowEmpty)) ||
+      database.requiredTables.some(table => !tables.some(line => line.includes(" TABLE DATA " + table + " ")))) {
     throw new Error("Données attendues absentes du dump PostgreSQL.");
   }
   await postgres("pg_restore", ["--exit-on-error", "--file=/dev/null", output], 10 * 60_000);
   return { file: database.file, tableDataEntries: tables.length };
 }
 
-export async function runPlatformBackup<T extends Service>(profile: Profile<T>, args: string[]) {
+export async function runPlatformBackup<T extends BackupService>(profile: BackupProfile<T>, args: string[]) {
   const automatic = args.length === 1 && ["--automatic", "--automatic-verify", "--verify-r2"].includes(args[0]);
   const verify = args.length === 1 && ["--verify", "--automatic-verify"].includes(args[0]);
   const assertLinked = automatic ? profile.assertLinked : undefined;
@@ -125,12 +143,20 @@ export async function runPlatformBackup<T extends Service>(profile: Profile<T>, 
       throw new Error("Noms des dumps PostgreSQL invalides ou en double.");
     }
     const services = await profile.inventory();
-    const databases = profile.databases.map(database => ({ database, env: database.environment() }));
-    const identities = new Set(databases.map(({ env }) => JSON.stringify([
+    const databases = profile.databases.map(database => ({ database, env: "environment" in database ? database.environment() : undefined }));
+    const local = databases.flatMap(({ env }) => env ? [env] : []);
+    const identities = new Set(local.map(env => JSON.stringify([
       env.PGHOSTADDR || env.PGHOST, env.PGPORT || "5432", env.PGDATABASE,
     ])));
-    if (identities.size !== databases.length) throw new Error("Une base PostgreSQL est déclarée plusieurs fois.");
-    const sources = await archiveSources(folder, services, profile.git);
+    if (identities.size !== local.length) throw new Error("Une base PostgreSQL est déclarée plusieurs fois.");
+    const repositories = Array.isArray(profile.git) ? profile.git : [profile.git];
+    if (services.some(service => service.repository && !repositories.some(repo => repo.repository === service.repository))) {
+      throw new Error("Une source Git de production manque dans le périmètre.");
+    }
+    const sources: Record<string, string> = {};
+    for (const [index, repo] of repositories.entries()) {
+      Object.assign(sources, await archiveSources(folder, services.filter(service => service.repository === repo.repository), repo, index));
+    }
     const dumps: Dump[] = [];
     for (const { database, env } of databases) dumps.push(await captureDatabase(folder, database, env));
     if (!(profile.sameInventory ?? isDeepStrictEqual)(services, await profile.inventory())) {
@@ -160,6 +186,6 @@ export async function runPlatformBackup<T extends Service>(profile: Profile<T>, 
   }
   if (args.length && !automatic) throw new Error("Argument de sauvegarde inconnu.");
   await assertLinked?.();
-  const saved = await runBackup(profile.projectId, collect);
+  const saved = await runBackup(profile.linkedSource ?? profile.projectId, collect);
   console.log(saved ? "ZIP publié pour " + profile.name + "." : "Le créneau possède déjà un ZIP vérifié ou réservé.");
 }

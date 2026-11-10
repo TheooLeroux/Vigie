@@ -18,11 +18,20 @@ def pack(folder, destination, sources, databases):
     deployment = json.loads((folder / "deployment.json").read_text(encoding="utf8"))
     for name in sources:
         commit = name.removeprefix("app-").removesuffix(".tar.gz")
-        expected = {str(pathlib.PurePosixPath(service["root"].lstrip("/")) / "package.json")
-                    for service in deployment["services"] if service["commit"] == commit}
+        services = [service for service in deployment["services"] if service["commit"] == commit]
         with tarfile.open(folder / name, "r:gz") as source:
-            if not expected or not expected.issubset(entry.name for entry in source if entry.isfile()):
+            entries = {entry.name for entry in source if entry.isfile()}
+            if not services:
                 raise ValueError("Sources d’un service déployé absentes du ZIP")
+            for service in services:
+                root = service["root"].strip("/")
+                prefix = root + "/" if root else ""
+                if service.get("requirePackageJson", True):
+                    present = prefix + "package.json" in entries
+                else:
+                    present = any(entry.startswith(prefix) for entry in entries)
+                if not present:
+                    raise ValueError("Sources d’un service déployé absentes du ZIP")
     hashes = {}
     with zipfile.ZipFile(destination, "x") as archive:
         for name in names:

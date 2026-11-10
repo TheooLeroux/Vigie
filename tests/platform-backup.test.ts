@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { archiveSources } from "../scripts/platform-backup";
 import { githubBackupToken } from "../scripts/backup-github-app";
+import { railwayPostgresCommand } from "../scripts/backup-railway-linked";
+import { neonBackupConnection, vercelBackupVariables } from "../scripts/backup-vercel-linked";
 import { planPlatformBackups } from "../scripts/plan-platform-backups";
 import { vigieVercel } from "../scripts/platform-backup-targets";
 import { database, save } from "../src/lib/db";
@@ -92,4 +94,33 @@ test("L’application GitHub émet un jeton en lecture pour le seul dépôt dema
   };
   assert.equal(await githubBackupToken("team/demo", transport), "fixture");
   assert.deepEqual(calls, ["/repos/team/demo/installation", "/app/installations/456/access_tokens"]);
+});
+
+test("Vercel : le collecteur refuse un changement de configuration depuis le déploiement", () => {
+  const url = { id: "env_demo", key: "DATABASE_URL", type: "encrypted", target: ["production"], createdAt: 10, updatedAt: 15 };
+  assert.deepEqual(vercelBackupVariables(["VERCEL_ENV", "DATABASE_URL"], [url], 20), [url]);
+  assert.throws(() => vercelBackupVariables(["DATABASE_URL"], [{ ...url, updatedAt: 21 }], 20), /déploiement actif/);
+  assert.throws(() => vercelBackupVariables(["DATABASE_URL"], [{ ...url, type: "sensitive" }], 20), /lisible/);
+  assert.throws(() => vercelBackupVariables(["DATABASE_URL", "BLOB_READ_WRITE_TOKEN"], [url], 20), /autre collecteur/);
+  assert.throws(() => vercelBackupVariables(["DATABASE_URL"], [url, url], 20), /déploiement actif/);
+
+  const connection = neonBackupConnection("postgresql://example:secret@ep-example-pooler.eu.neon.tech/example?sslmode=require");
+  assert.equal(connection.identity, "ep-example.eu.neon.tech/example");
+  assert.equal(connection.environment().PGSSLMODE, "verify-full");
+  assert.match(connection.environment().PGOPTIONS!, /default_transaction_read_only=on/);
+  assert.throws(() => neonBackupConnection("postgresql://example:secret@neon.tech.example.test/example"), /non reconnue/);
+  assert.throws(() => neonBackupConnection("postgresql://example:secret@ep-example.eu.neon.tech/example?options=unsafe"), /non reconnue/);
+});
+
+test("Railway : la commande de dump vérifie la cible et n’accepte que des noms PostgreSQL simples", () => {
+  const target = {
+    serviceId: "1ba0b139-d137-4366-aa50-0046c55f19e0",
+    environmentId: "27da4ad0-21f1-433f-b292-ff0d77cab66c",
+    deploymentId: "b83ce81c-2d8d-44be-9227-9ae0793b184b",
+  };
+  const command = railwayPostgresCommand(target, "example");
+  for (const value of Object.values(target)) assert.ok(command.includes(value));
+  assert.match(command, /pg_dump --no-password --format=custom/);
+  assert.throws(() => railwayPostgresCommand(target, "host=external.example"), /non pris en charge/);
+  assert.throws(() => railwayPostgresCommand({ ...target, deploymentId: "bad" }, "example"));
 });

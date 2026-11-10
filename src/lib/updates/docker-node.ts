@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ApiError } from "../http";
-import { railwayUpdateRequest } from "./providers";
+import { railwayConnectionRequest, railwayUpdateRequest } from "./providers";
 import { runCommand } from "./process";
 import type { UpdateTarget } from "./types";
 
@@ -101,7 +101,14 @@ export async function readRailwayStaticImage(target: UpdateTarget, deploymentId:
   });
 }
 
-async function withRailwayInstances<T extends object>(target: UpdateTarget, deploymentId: string, limit: number, inspect: (id: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }) => Promise<T>, dependencies = { request: railwayUpdateRequest, execute: runCommand }): Promise<({ id: string } & T)[]> {
+export async function withRailwayInstances<T extends object, Target extends Pick<UpdateTarget, "provider" | "connectionId">>(
+  target: Target, deploymentId: string, limit: number,
+  inspect: (id: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }) => Promise<T>,
+  dependencies: { request: (target: Target, query: string, variables: unknown) => ReturnType<typeof railwayUpdateRequest>; execute: typeof runCommand } = {
+    request: (value, query, variables) => railwayConnectionRequest(value.connectionId, query, variables), execute: runCommand,
+  },
+  trustedHost?: string,
+): Promise<({ id: string } & T)[]> {
   identifier.parse(deploymentId);
   if (target.provider !== "railway") throw new ApiError("Sonde réservée aux conteneurs Railway.", 422);
   const maxInstances = z.number().int().min(1).max(32).parse(limit);
@@ -144,6 +151,7 @@ async function withRailwayInstances<T extends object>(target: UpdateTarget, depl
   }
   try {
     await writeFile(config, "", { mode: 0o600 });
+    if (trustedHost) await writeFile(known, trustedHost + "\n", { mode: 0o600 });
     await dependencies.execute("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", identity, "-C", "vigie-node-proof"], { cwd: temporary, env: environment, timeout: 10_000 });
     publicKey = (await readFile(identity + ".pub", "utf8")).trim();
     if (!/^ssh-ed25519 [A-Za-z0-9+/=]+ vigie-node-proof$/.test(publicKey)) throw new ApiError("La clé éphémère de la sonde est invalide.", 422);
@@ -154,7 +162,7 @@ async function withRailwayInstances<T extends object>(target: UpdateTarget, depl
     if (!key.success) throw new ApiError("Railway n’a pas confirmé la clé temporaire de vérification.", 422);
     keyId = key.data.sshPublicKeyCreate.id;
     const results: ({ id: string } & T)[] = [];
-    const args = ["-F", config, "-i", identity, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${known}`, "-o", `GlobalKnownHostsFile=${known}`, "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"];
+    const args = ["-F", config, "-i", identity, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", trustedHost ? "StrictHostKeyChecking=yes" : "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${known}`, "-o", `GlobalKnownHostsFile=${known}`, "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"];
     for (const id of before) {
       results.push({ id, ...await inspect(id, args, { cwd: temporary, env: environment, timeout: 20_000 }) });
     }

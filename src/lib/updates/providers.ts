@@ -21,8 +21,11 @@ export async function vercelUpdateRequest(target: UpdateTarget, path: string, me
     return response.json();
   });
 }
-export async function railwayUpdateRequest(target: UpdateTarget, query: string, variables: unknown, transport: typeof fetch = fetch) {
-  return withRailwayCredentials(target.connectionId, async token => {
+export function railwayUpdateRequest(target: UpdateTarget, query: string, variables: unknown, transport: typeof fetch = fetch) {
+  return railwayConnectionRequest(target.connectionId, query, variables, transport);
+}
+export async function railwayConnectionRequest(connectionId: string, query: string, variables: unknown, transport: typeof fetch = fetch) {
+  return withRailwayCredentials(connectionId, async token => {
     const response = await transport("https://backboard.railway.com/graphql/v2", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }), redirect: "error", signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new ApiError(`Railway refuse l’opération (${response.status}). Vérifiez l’accès au service.`, 502);
     const data = await response.json();

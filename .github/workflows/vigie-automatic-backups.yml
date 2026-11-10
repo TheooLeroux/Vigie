@@ -6,8 +6,11 @@ on:
       mode:
         description: Lister les projets ou vérifier les collectes Railway et Vercel
         type: choice
-        options: [plan, verify, verify-r2]
+        options: [plan, verify, verify-r2, linked-verify, linked-capture]
         default: plan
+      project:
+        description: Identifiant Vigie à vérifier avec le collecteur commun
+        type: string
       site:
         description: Site o2switch lié à vérifier sur R2
         type: string
@@ -68,3 +71,70 @@ jobs:
     with:
       mode: ${{ github.event_name == 'schedule' && 'automatic' || (inputs.mode == 'verify-r2' && 'verify-r2' || 'automatic-verify') }}
     secrets: inherit
+
+  linked-platforms:
+    if: github.ref_name == github.event.repository.default_branch && ((github.event_name == 'schedule' && vars.VIGIE_BACKUP_AUTOMATIC == '1') || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'plan' || inputs.mode == 'linked-verify' || inputs.mode == 'linked-capture')))
+    environment: vigie-nes-backups
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Préparer PostgreSQL 18
+        if: github.event_name == 'schedule' || inputs.mode != 'plan'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/lib/postgresql/18/bin/pg_restore ]]; then
+            if ! apt-cache show postgresql-client-18 >/dev/null 2>&1; then
+              sudo install -d /usr/share/postgresql-common/pgdg
+              curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+              printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/vigie-pgdg.list >/dev/null
+              sudo apt-get update -qq
+            fi
+            sudo apt-get install -y --no-install-recommends postgresql-client-18
+          fi
+          printf '%s\n' /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      - name: Relire les liens et sauvegarder les projets couverts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_LINKED_BACKUP_DATABASE_URL }}
+          VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_LINKED_BACKUP_CONNECTOR_KEY }}
+          VIGIE_BACKUP_INVENTORY_DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
+          VIGIE_BACKUP_GITHUB_APP_ID: ${{ vars.VIGIE_BACKUP_GITHUB_APP_ID }}
+          VIGIE_BACKUP_GITHUB_APP_KEY: ${{ secrets.VIGIE_BACKUP_GITHUB_APP_KEY }}
+          VIGIE_BACKUP_RAILWAY_KNOWN_HOST: ${{ vars.VIGIE_BACKUP_RAILWAY_KNOWN_HOST }}
+          VIGIE_BACKUP_S3_BUCKET: ${{ secrets.VIGIE_BACKUP_S3_BUCKET }}
+          VIGIE_BACKUP_S3_ENDPOINT: ${{ secrets.VIGIE_BACKUP_S3_ENDPOINT }}
+          VIGIE_BACKUP_S3_KEY_ID: ${{ secrets.VIGIE_BACKUP_S3_KEY_ID }}
+          VIGIE_BACKUP_S3_REGION: ${{ secrets.VIGIE_BACKUP_S3_REGION }}
+          VIGIE_BACKUP_S3_SECRET: ${{ secrets.VIGIE_BACKUP_S3_SECRET }}
+          EVENT: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
+          PROJECT: ${{ inputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$EVENT:$MODE" in
+            schedule:|workflow_dispatch:linked-capture) mode=capture ;;
+            workflow_dispatch:linked-verify) [[ -n "$PROJECT" ]]; mode=verify-r2 ;;
+            workflow_dispatch:plan) mode=plan ;;
+            *) exit 1 ;;
+          esac
+          args=(--mode "$mode")
+          if [[ -n "$PROJECT" ]]; then args+=(--project "$PROJECT"); fi
+          if [[ "$mode" == plan ]]; then
+            node --import tsx scripts/backup-linked-platforms.ts "${args[@]}"
+            exit
+          fi
+          umask 077
+          private=$(mktemp -d)
+          trap 'if mountpoint -q "$private"; then sudo umount "$private"; fi; rmdir "$private"' EXIT
+          sudo mount -t tmpfs -o "noswap,nodev,nosuid,noexec,mode=0700,uid=$(id -u),gid=$(id -g),size=6G" tmpfs "$private"
+          export VIGIE_BACKUP_SCRATCH_DIRECTORY="$private"
+          node --import tsx scripts/backup-linked-platforms.ts "${args[@]}"
