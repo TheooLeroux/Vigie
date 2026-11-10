@@ -1,4 +1,4 @@
-import { useState, type Ref } from "react";
+import type { Ref } from "react";
 import { CircleAlert, CircleHelp, ShieldAlert, ShieldCheck } from "lucide-react";
 import { projectRemediation, type RemediationReason } from "@/lib/project-remediation";
 import { coverageLabels, projectSecurity, type ProjectVulnerability } from "@/lib/project-security";
@@ -50,31 +50,19 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
   })}</ul>;
 }
 
-function MoreFindings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
-  const [opened, setOpened] = useState(false);
-  return <details className="health-details security-more" onToggle={event => { if (event.currentTarget.open) setOpened(true); }}>
-    <summary>{items.length === 1 ? "Voir l’autre signalement" : `Voir les ${items.length} autres signalements`}</summary>
-    {(items.length <= 20 || opened) && <FindingRows items={items} explain={explain} />}
-  </details>;
-}
-
 function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
   const blocks = new Map<string, ProjectVulnerability[]>();
-  const visibleKeys = new Set(items.slice(0, 5).map(item => item.key));
   for (const item of items) {
     const entries = blocks.get(item.targetId) || [];
     entries.push(item);
     blocks.set(item.targetId, entries);
   }
-  return <div className={explain ? "security-findings-group security-current-findings" : "security-findings-group"}>{[...blocks].map(([targetId, entries]) => {
-    const visible = entries.filter(item => visibleKeys.has(item.key));
-    const remaining = entries.filter(item => !visibleKeys.has(item.key));
-    return <details className="security-findings-block" open={visible.length > 0} key={targetId}>
+  return <div className={explain ? "security-findings-group security-current-findings" : "security-findings-group"}>{[...blocks].map(([targetId, entries]) =>
+    <details className="security-findings-block" open key={targetId}>
       <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
-      {visible.length > 0 && <FindingRows items={visible} explain={explain} />}
-      {remaining.length > 0 && <MoreFindings items={remaining} explain={explain} />}
-    </details>;
-  })}</div>;
+      <FindingRows items={entries} explain={explain} />
+    </details>
+  )}</div>;
 }
 
 export function ProjectSecurityPanel({ detail, updates, health, unavailable = false, updateActionRef }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean; updateActionRef?: Ref<HTMLDivElement> }) {

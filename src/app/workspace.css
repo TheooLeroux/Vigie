@@ -139,15 +139,12 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
   border-bottom: 1px solid var(--line);
   border-radius: 9px 9px 0 0;
 }
-.security-current-findings > .security-findings-block > :is(.security-findings, .security-more) { padding-inline: 14px; }
-.security-current-findings .security-more { margin: 0; }
-.security-current-findings .security-more > summary { padding-block: 10px; }
+.security-current-findings > .security-findings-block > .security-findings { padding-inline: 14px; }
 .project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
 .project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
 .project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }
 .security-current-findings .security-findings > li:first-child { border-top: 0; }
-.security-current-findings .security-findings-block > .security-findings:last-child > li:last-child,
-.security-current-findings .security-more > .security-findings > li:last-child { border-bottom: 0; }
+.security-current-findings .security-findings-block > .security-findings > li:last-child { border-bottom: 0; }
 .security-finding > summary { display: flex; align-items: center; gap: 12px; padding: 11px 0; list-style: none; cursor: pointer; }
 .security-finding > summary::-webkit-details-marker { display: none; }
 .security-finding > summary::after { content: "›"; color: var(--muted); font-size: 20px; }
@@ -193,7 +190,6 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 .project-health-card .security-secondary { margin-top: 0; border-top: 1px solid var(--line); padding-top: 6px; }
 .security-history { width: 100%; }
 .security-history > p + small, .security-history > small + p { display: block; margin-top: 6px; }
-.security-more { margin-top: 8px; }
 .project-maintenance-details { display: grid; gap: 12px; margin-top: 10px; }
 #project-updates, #project-technical { scroll-margin-top: 88px; }
 @media (max-width: 760px) {

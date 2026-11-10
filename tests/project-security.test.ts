@@ -111,7 +111,7 @@ test("Signalements : fusion transitive des alias par composant, version et servi
   assert.deepEqual(entries[0].aliases, ["CVE-2026-0001", "CVE-2026-0002", "GHSA-ONE", "GHSA-TWO"]);
 });
 
-test("Fiche : intitulé et correction du signalement conservés, failles les plus graves visibles en premier", () => {
+test("Fiche : toutes les failles sont visibles, les plus graves en premier", () => {
   const base = healthCheck().findings[0];
   const { detail, state } = fixture([
     ...Array.from({ length: 6 }, (_, index) => ({ ...base, id: `GHSA-low-${index}`, aliases: [], severity: "low" as const, package: `library-${index}` })),
@@ -126,8 +126,8 @@ test("Fiche : intitulé et correction du signalement conservés, failles les plu
   assert.match(html, /1\.2\.3/);
   assert.match(html, /href="https:\/\/example.test\/advisory"/);
   assert.ok(html.indexOf("Exécution de code à distance") < html.indexOf("library-0"));
-  assert.ok(html.indexOf("library-0") < html.indexOf("Voir les 2 autres signalements"));
-  assert.ok(html.indexOf("Voir les 2 autres signalements") < html.indexOf("library-5"));
+  assert.equal(html.match(/<details class="security-finding">/g)?.length, 7);
+  assert.doesNotMatch(html, /autres signalements/);
   assert.match(html, /<details class="security-findings-block" open="">/);
   assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
