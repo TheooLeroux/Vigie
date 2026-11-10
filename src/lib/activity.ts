@@ -1,7 +1,8 @@
 import { ApiError } from "./http";
 import { z } from "zod";
 import { activityDetail, database, readActivity, requireProject, visibleActivity } from "./db";
-import { activityCategories, activityKinds, activityViews, assessmentChangeActivity, automaticControlActivity, inventoryActivity } from "./activity-model";
+import { activityCategories, activityKinds, activityViews, assessmentChangeActivity, automaticControlActivity, inventoryActivity, repeatableActivityFailures } from "./activity-model";
+import { isPostgres } from "./storage";
 import type { Workspace } from "./types";
 
 const filtersSchema = z.object({
@@ -20,6 +21,17 @@ const collectionKey = `COALESCE(
   CASE WHEN ${actionCode}='${inventoryActivity}' THEN 'collection:' || NULLIF(json_extract(data,'$.collectionId'),'') END,
   'event:' || id
 )`;
+
+function incidentEntryKey() {
+  const postgres = isPostgres();
+  const day = postgres ? `to_char(CAST(${createdAt} AS timestamptz) AT TIME ZONE 'Europe/Paris', 'YYYY-MM-DD')` : `activity_paris_day(${createdAt})`;
+  const detail = `CASE WHEN ${actionCode} <> '${automaticControlActivity}' THEN ${activityDetail} END`;
+  const key = postgres
+    ? `CAST(jsonb_build_array(${day}, ${actionCode}, project_id, ${detail}) AS text)`
+    : `json_array(${day}, ${actionCode}, project_id, ${detail})`;
+  const repeatable = [automaticControlActivity, ...repeatableActivityFailures].map(action => `'${action}'`).join(", ");
+  return `CASE WHEN ${actionCode} IN (${repeatable}) THEN ${key} ELSE 'event:' || id END`;
+}
 
 export async function activityPage(raw: unknown, workspace: Workspace) {
   const filters = filtersSchema.parse(raw), where = ["workspace=?", visibleActivity], args: (string | number)[] = [workspace];
@@ -52,16 +64,16 @@ export async function activityPage(raw: unknown, workspace: Workspace) {
     where.push(`${createdAt}>=?`); args.push(new Date(date.getTime() - hour * 3_600_000).toISOString());
   }
   const clause = where.join(" AND ");
-  const grouped = filters.view === "complete";
+  const entryKey = filters.view === "focus" ? incidentEntryKey() : filters.view === "complete" ? collectionKey : null;
   const db = database();
-  const count = await db.prepare(`SELECT COUNT(${grouped ? `DISTINCT ${collectionKey}` : "*"}) AS total FROM activity WHERE ${clause}`)
+  const count = await db.prepare(`SELECT COUNT(${entryKey ? `DISTINCT ${entryKey}` : "*"}) AS total FROM activity WHERE ${clause}`)
     .get(...args) as { total: string | number };
   const total = Number(count.total);
   const page = Math.min(filters.page, Math.max(0, Math.ceil(total / pageSize) - 1));
-  // Apply filters first, then paginate entries so a collection stays on one page.
-  const pageSql = grouped ? `
+  // Apply filters first, then paginate entries so each group stays on one page.
+  const pageSql = entryKey ? `
     WITH filtered AS (
-      SELECT id, data, ${activityDetail} AS detail, ${createdAt} AS created_at, ${collectionKey} AS entry_key
+      SELECT id, data, ${activityDetail} AS detail, ${createdAt} AS created_at, ${entryKey} AS entry_key
       FROM activity WHERE ${clause}
     ), entries AS (
       SELECT entry_key, MAX(created_at) AS latest_at FROM filtered

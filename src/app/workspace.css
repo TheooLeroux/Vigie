@@ -480,10 +480,16 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   display: none;
 }
 
+.activity-panel {
+  width: 100%;
+  max-width: 1120px;
+  min-width: 0;
+}
 .activity-view-header {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
   padding: 16px 24px 0;
   color: var(--text);
   font-size: 13px;
@@ -643,27 +649,29 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   padding-top: 2px;
 }
 .activity-event-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
+  line-height: 1.55;
+}
+.activity-event-title .activity-event-tag {
+  display: inline-block;
+  margin-inline-start: 8px;
 }
 .activity-event-title > strong {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.45;
-  max-width: 76ch;
   overflow-wrap: anywhere;
 }
 .activity-event--routine .activity-event-title > strong {
   color: var(--text);
   font-weight: 400;
 }
-.activity-event-body p {
+.activity-event-body p,
+.activity-event-description {
+  display: block;
   font-size: 13px;
   color: var(--text);
   margin: 4px 0;
-  max-width: 76ch;
+  max-width: 96ch;
   overflow-wrap: anywhere;
 }
 .activity-event time {
@@ -680,6 +688,9 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   margin-top: 3px;
   font-size: 12px;
   color: var(--text);
+}
+.activity-event-meta:empty {
+  display: none;
 }
 .activity-event-meta a {
   color: var(--ink);
@@ -702,7 +713,7 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-block: 4px;
+  padding-block: 1px;
 }
 .activity-collection[open] > summary .activity-collection-label svg {
   transform: rotate(180deg);
@@ -964,9 +975,6 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
     gap: 8px;
     padding-inline: 6px;
   }
-  .activity-event-body p {
-    font-size: 12px;
-  }
   .activity-event-icon {
     height: 24px;
   }
@@ -1063,7 +1071,3 @@ html[data-theme="dark"] .security-severity.moderate { color: var(--warning); bac
 .connection-settings .connection-meta { margin: 0 0 12px; }
 .connection-settings-actions { margin-bottom: 10px; }
 .connection-project-group .railway-projects { margin-top: 0; }
-.activity-event { padding: 12px 0; }
-.activity-event-body p { margin: 4px 0; }
-.activity-event-meta { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--muted); }
-.activity-event-meta a { color: var(--green); text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }

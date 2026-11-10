@@ -94,6 +94,36 @@ test("À suivre : les échecs et propositions sont recherchés dans tout le jour
   }
 });
 
+test("À suivre : regroupement des répétitions par journée de Paris, projet et motif", async () => {
+  const p = await project("Incidents groupés");
+  const second = await project("Autre projet en échec");
+  const reason = "incidents-groupes : connecteur indisponible";
+  const samples = [
+    [p, "hosting.inventory_failed", reason, "2025-07-01T21:59:00Z"],
+    [p, "hosting.inventory_failed", reason, "2025-07-01T22:00:00Z"],
+    [p, "hosting.inventory_failed", reason, "2025-07-02T14:00:00Z"],
+    [p, "hosting.inventory_failed", "incidents-groupes : accès refusé", "2025-07-02T14:01:00Z"],
+    [second, "hosting.inventory_failed", reason, "2025-07-02T14:02:00Z"],
+    [null, "hosting.automatic_control", "incidents-groupes, 1 échec(s), 0 différé(s).", "2025-07-02T14:03:00Z"],
+    [null, "hosting.automatic_control", "incidents-groupes, 2 échec(s), 0 différé(s).", "2025-07-02T14:04:00Z"],
+  ] as const;
+  for (const [target, action, detail, createdAt] of samples) {
+    await save("activity", "live", {
+      id: randomUUID(), projectId: target?.id ?? null, projectName: target?.name ?? "Espace de travail",
+      action, detail, createdAt,
+    }, target?.id);
+  }
+  const filters = { query: "incidents-groupes", since: "2025-07-02" };
+  const result = await activityPage({ ...filters, view: "focus" }, "live");
+  assert.equal(result.total, 4);
+  const entries = activityEntries(result.items, "focus");
+  assert.deepEqual(entries.map(entry => entry.events.length), [2, 1, 1, 2]);
+  assert.equal(entries[3].events.at(-1)?.createdAt, "2025-07-01T22:00:00Z");
+  assert.equal((await activityPage({ ...filters, view: "focus", projectId: p.id }, "live")).total, 2);
+  assert.equal((await activityPage({ ...filters, view: "complete" }, "live")).total, 6);
+  assert.equal((await activityPage({ query: filters.query, view: "focus" }, "live")).total, 5);
+});
+
 test("Journal complet : une collecte ne se coupe pas à la pagination et respecte les filtres", async () => {
   const first = await project("Collection premier projet");
   const second = await project("Collection second projet");
@@ -111,7 +141,7 @@ test("Journal complet : une collecte ne se coupe pas à la pagination et respect
   const filters = { view: "complete", query: "pagination-inventaire" };
   const firstPage = await activityPage(filters, "live");
   assert.equal(firstPage.total, 26);
-  const entries = activityEntries(firstPage.items, true);
+  const entries = activityEntries(firstPage.items, "complete");
   assert.equal(entries.length, 25);
   assert.equal(entries[0].events.length, 30);
   assert.equal(entries[0].latest.projectId, second.id);
@@ -119,7 +149,7 @@ test("Journal complet : une collecte ne se coupe pas à la pagination et respect
   const lastPage = await activityPage({ ...filters, page: 1 }, "live");
   assert.deepEqual(lastPage.items.map(item => item.detail), ["pagination-inventaire 0"]);
   const scoped = await activityPage({ ...filters, projectId: first.id }, "live");
-  assert.equal(activityEntries(scoped.items, true)[0].events.length, 29);
+  assert.equal(activityEntries(scoped.items, "complete")[0].events.length, 29);
   const search = await activityPage({ ...filters, query: "pagination-inventaire 55" }, "live");
   assert.deepEqual(search.items.map(item => item.projectId), [second.id]);
 });

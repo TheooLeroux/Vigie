@@ -2,11 +2,21 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { activityDay } from "./activity-model";
 import { clientSchema } from "./validation";
 import type { Client, Project } from "./types";
 const globalDb = globalThis as unknown as { vigieDb?: DatabaseSync };
+const activityDayRegistered = new WeakSet<DatabaseSync>();
+
+function registerActivityDay(db: DatabaseSync) {
+  if (activityDayRegistered.has(db)) return;
+  db.function("activity_paris_day", { deterministic: true }, date => typeof date === "string" ? activityDay(date) : null);
+  activityDayRegistered.add(db);
+}
+
 export function sqliteDatabase() {
   if (globalDb.vigieDb) {
+    registerActivityDay(globalDb.vigieDb);
     migrateClients(globalDb.vigieDb);
     return globalDb.vigieDb;
   }
@@ -14,6 +24,7 @@ export function sqliteDatabase() {
     process.env.VIGIE_DB_PATH || join(process.cwd(), ".data", "vigie.sqlite");
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
+  registerActivityDay(db);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);

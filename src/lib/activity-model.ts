@@ -3,8 +3,19 @@ import type { Activity } from "./types";
 export const inventoryActivity = "hosting.inventory";
 export const assessmentChangeActivity = "updates.assessment_changed";
 export const automaticControlActivity = "hosting.automatic_control";
+export const repeatableActivityFailures = ["hosting.inventory_failed", "hosting.agent_failed"] as const;
 export const activityViews = ["focus", "complete"] as const;
 export type ActivityView = (typeof activityViews)[number];
+const parisDay = new Intl.DateTimeFormat("fr-CA", {
+  timeZone: "Europe/Paris",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+export function activityDay(value: string) {
+  return parisDay.format(new Date(value));
+}
 
 export const activityCategories = {
   "Bilans automatiques": ["updates.assess"],
@@ -29,6 +40,7 @@ const activityTitles: Record<string, string> = {
   "updates.closed": "Mise à jour clôturée",
   "updates.source_configured": "Accès de mise à jour configuré",
   "hosting.inventory_failed": "Collecte WordPress en échec",
+  "hosting.agent_failed": "Agent WordPress en échec",
   "Vercel synchronisé": "Synchronisation Vercel terminée",
   "Railway synchronisé": "Synchronisation Railway terminée",
 };
@@ -47,12 +59,25 @@ export function activityOutcome({ action, detail }: Activity) {
   if (code === assessmentChangeActivity) return "change";
 }
 
-export function activityEntries(items: Activity[], groupCollections: boolean) {
+function activityEntryKey(item: Activity, view: ActivityView) {
+  if (view === "complete" && item.action === inventoryActivity && item.collectionId) {
+    return `collection:${item.collectionId}`;
+  }
+  if (view === "focus") {
+    if (item.action === automaticControlActivity) {
+      return JSON.stringify([activityDay(item.createdAt), item.action, item.projectId, null]);
+    }
+    if (repeatableActivityFailures.some(action => action === item.action)) {
+      return JSON.stringify([activityDay(item.createdAt), item.action, item.projectId, item.detail]);
+    }
+  }
+  return `event:${item.id}`;
+}
+
+export function activityEntries(items: Activity[], view: ActivityView) {
   const entries = new Map<string, Activity[]>();
   for (const item of items) {
-    const key = groupCollections && item.action === inventoryActivity && item.collectionId
-      ? `collection:${item.collectionId}`
-      : `event:${item.id}`;
+    const key = activityEntryKey(item, view);
     const entry = entries.get(key);
     if (entry) entry.push(item);
     else entries.set(key, [item]);

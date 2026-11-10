@@ -40,6 +40,12 @@ test("PostgreSQL isolé : historique complet filtré et catalogue des sauvegarde
     assert.deepEqual(complete.items.map(item => item.collectionId), [undefined, collectionId, collectionId]);
     const focus = await activityPage({ projectId: p.id, query: "PG collection", view: "focus" }, "live");
     assert.deepEqual(focus.items.map(item => item.action), ["hosting.inventory_failed"]);
+    await save("activity", "live", {
+      ...focus.items[0], id: randomUUID(), createdAt: "2025-01-01T23:00:00.000Z",
+    }, p.id);
+    const repeated = await activityPage({ projectId: p.id, query: "PG collection", view: "focus" }, "live");
+    assert.equal(repeated.total, 1);
+    assert.equal(repeated.items.length, 2);
     const writeFixture = (_folder: string, zip: string) => writeFile(zip, "fixture");
     assert.equal(await runBackup(p.id, writeFixture), true);
     assert.equal(await runBackup(p.id, writeFixture), false);

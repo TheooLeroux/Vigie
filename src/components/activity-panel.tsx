@@ -19,18 +19,14 @@ import { EmptyState, formatDate } from "./ui";
 
 import {
   activityCategory as category,
+  activityDay,
   activityEntries,
   activityKinds,
   activityOutcome,
   activityTitle,
+  automaticControlActivity,
   type ActivityView,
 } from "@/lib/activity-model";
-const dayKeyFormat = new Intl.DateTimeFormat("fr-CA", {
-  timeZone: "Europe/Paris",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
 const dayFormat = new Intl.DateTimeFormat("fr-FR", {
   dateStyle: "full",
   timeZone: "Europe/Paris",
@@ -41,7 +37,6 @@ const timeFormat = new Intl.DateTimeFormat("fr-FR", {
   timeZone: "Europe/Paris",
 });
 const countFormat = new Intl.NumberFormat("fr-FR");
-const dayKey = (value: string) => dayKeyFormat.format(new Date(value));
 const pageSize = 25;
 
 function ActivityTime({ date }: { date: string }) {
@@ -53,9 +48,11 @@ function ActivityTime({ date }: { date: string }) {
 }
 
 function ActivityEvent({ item, onProject }: { item: Activity; onProject: (id: string) => void }) {
-  const title = activityTitle(item.action);
   const itemCategory = category(item.action);
   const outcome = activityOutcome(item);
+  const title = outcome === "failure" && item.action === automaticControlActivity
+    ? "Échec lors d’un contrôle automatique"
+    : activityTitle(item.action);
   const routine = itemCategory === "Connexions & relevés" || item.action === "hosting.discovered";
   const tone = outcome || (routine ? "routine" : "default");
   const Icon = outcome === "failure" ? CircleAlert : outcome === "change" ? PackagePlus : routine ? ClipboardList : ActivityIcon;
@@ -77,13 +74,49 @@ function ActivityEvent({ item, onProject }: { item: Activity; onProject: (id: st
             >
               {item.projectName}
             </RecordLink>
-          ) : (
-            <span>{item.projectName || "Parc web"}</span>
-          )}
+          ) : item.projectName && item.projectName !== "Espace de travail" ? <span>{item.projectName}</span> : null}
           {item.actorName && <span>{item.actorName}</span>}
         </div>
       </div>
     </article>
+  );
+}
+
+function ActivityGroup({ events, view, expanded, onProject }: {
+  events: Activity[];
+  view: ActivityView;
+  expanded: boolean;
+  onProject: (id: string) => void;
+}) {
+  const latest = events[0];
+  const incident = view === "focus";
+  const automatic = latest.action === automaticControlActivity;
+  const Icon = incident ? CircleAlert : ClipboardList;
+  const count = countFormat.format(events.length);
+  const title = automatic
+    ? "Échecs lors des contrôles automatiques"
+    : activityTitle(latest.action);
+  return (
+    <details className="activity-collection" open={expanded || undefined}>
+      <summary className={`activity-event activity-event--${incident ? "failure" : "routine"}`}>
+        <ActivityTime date={latest.createdAt} />
+        <span className="activity-event-icon" aria-hidden="true"><Icon size={16} /></span>
+        <span className="activity-event-body">
+          <span className="activity-collection-label">
+            <span className="activity-event-title">
+              <strong>{incident ? title : `${count} inventaires WordPress relevés`}</strong>
+              {incident && <span className="activity-event-tag">{count} {automatic ? "passages" : "tentatives"}</span>}
+            </span>
+            <ChevronDown size={15} aria-hidden="true" />
+          </span>
+          {incident && !automatic && <span className="activity-event-description">{latest.detail}</span>}
+          {incident && latest.projectId && <span className="activity-event-meta">{latest.projectName}</span>}
+        </span>
+      </summary>
+      <ul className="activity-collection-items">
+        {events.map(item => <li key={item.id}><ActivityEvent item={item} onProject={onProject} /></li>)}
+      </ul>
+    </details>
   );
 }
 
@@ -121,7 +154,7 @@ export function ActivityPanel({
         (view === "complete" || activityOutcome(item)) &&
         (!(projectId || project) || item.projectId === (projectId || project)) &&
         (!kind || category(item.action) === kind) &&
-        (!since || dayKey(item.createdAt) >= since) &&
+        (!since || activityDay(item.createdAt) >= since) &&
         `${item.projectName} ${item.detail} ${item.actorName || ""} ${item.action}`
           .toLocaleLowerCase("fr")
           .includes(query.trim().toLocaleLowerCase("fr")),
@@ -153,12 +186,12 @@ export function ActivityPanel({
     }, 250);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [request, queryKey, attempt]);
-  const localEntries = activityEntries(filtered, view === "complete");
+  const localEntries = activityEntries(filtered, view);
   const total = request ? remote?.total || 0 : localEntries.length;
   const currentPage = request ? remote?.page ?? page : Math.min(page, Math.max(0, Math.ceil(total / pageSize) - 1));
-  const visible = request ? activityEntries(remote?.items || [], view === "complete") : localEntries.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  const visible = request ? activityEntries(remote?.items || [], view) : localEntries.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const pending = !!request && (loading || (!remote && !error));
-  const resultLabel = view === "complete" ? (total === 1 ? "entrée" : "entrées") : (total === 1 ? "événement" : "événements");
+  const resultLabel = total === 1 ? "entrée" : "entrées";
   const hasFilters = !!(query || project || kind || since);
   function reset() {
     setQuery("");
@@ -299,25 +332,13 @@ export function ActivityPanel({
         <ol className="activity-timeline">
           {visible.map(({ key, events, latest }, index) => (
             <li key={key}>
-              {(index === 0 || dayKey(visible[index - 1].latest.createdAt) !== dayKey(latest.createdAt)) && (
+              {(index === 0 || activityDay(visible[index - 1].latest.createdAt) !== activityDay(latest.createdAt)) && (
                 <h2 className="activity-day">{dayFormat.format(new Date(latest.createdAt))}</h2>
               )}
               {events.length === 1 ? (
                 <ActivityEvent item={latest} onProject={onProject} />
               ) : (
-                <details className="activity-collection" open={query.trim() ? true : undefined}>
-                  <summary className="activity-event activity-event--routine">
-                    <ActivityTime date={latest.createdAt} />
-                    <span className="activity-event-icon" aria-hidden="true"><ClipboardList size={16} /></span>
-                    <span className="activity-collection-label">
-                      <strong>{countFormat.format(events.length)} inventaires WordPress relevés</strong>
-                      <ChevronDown size={15} aria-hidden="true" />
-                    </span>
-                  </summary>
-                  <ul className="activity-collection-items">
-                    {events.map(item => <li key={item.id}><ActivityEvent item={item} onProject={onProject} /></li>)}
-                  </ul>
-                </details>
+                <ActivityGroup events={events} view={view} expanded={!!query.trim()} onProject={onProject} />
               )}
             </li>
           ))}
