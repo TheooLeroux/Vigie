@@ -36,19 +36,19 @@ export async function activeMinimalStaticImage(target: UpdateTarget, deploymentI
 
 export async function migrateMinimalStatic(target: UpdateTarget, witness: UpdateTarget, result: UpdateResult, getSources: SourceReader, progress: Progress) {
   const repository = target.repository, branch = target.branch;
-  if (minimalStaticWitnessId(target) !== witness.remoteId || !repository || !branch || !repositoryAllowed(repository)) return;
+  if (minimalStaticWitnessId(target) !== witness.remoteId || !repository || !branch || !repositoryAllowed(repository)) return false;
   const { serviceInstance } = await readRailwayInstance(target);
   const [deployment] = serviceInstance.activeDeployments || [];
   const evidence = deploymentEvidence(deployment?.meta);
   const caddy = railpackCaddyVersion(evidence), imageDigest = normalizeImageDigest(evidence?.imageDigest);
-  if (serviceInstance.activeDeployments?.length !== 1 || deployment.status !== "SUCCESS" || !evidence?.commit || !imageDigest || !caddy) return;
+  if (serviceInstance.activeDeployments?.length !== 1 || deployment.status !== "SUCCESS" || !evidence?.commit || !imageDigest || !caddy) return false;
   const commit = evidence.commit;
   const identity = { targetId: target.id, projectId: target.projectId, deploymentId: deployment.id as string, imageDigest, commit, caddy };
   const cached = await readRailpackScan(target.id);
   const report = cached?.report && !cached.error && sameRailpackImage(cached, identity) && Date.now() - Date.parse(cached.report.check.checkedAt) < 15 * 60_000
     ? cached.report.check : (await scanRailpackImage(target, identity, await cachedRailpackInventory(identity))).check;
   const removable = report.findings.filter(item => item.packageManager === "apt" && !item.fixedVersions?.length);
-  if (!removable.length || report.status === "blocked") return;
+  if (!removable.length || report.status === "blocked") return false;
 
   const path = target.root + "/Dockerfile";
   await checkPublicMinimalStatic(target);
@@ -102,6 +102,7 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     result.stage = "completed";
     result.message = check.message;
     await progress("verifying", check.message);
+    return true;
   } catch (error) {
     result.stage = "attention";
     let recovered = false;

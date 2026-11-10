@@ -823,17 +823,21 @@ export async function executeUpdate(id: string, executeGroup = nodeGroup, execut
           if (targets[0].mode === "wordpress") await executeWordPress(run, targets[0], results[0], progress);
           else if (targets[0].mode === "image") await executeImage(run, targets[0], results[0], progress);
           else {
-            await executeGroup(run, targets, results, progress);
-            if (!run.purpose) {
-              for (const [index, target] of targets.entries()) {
-                const witnessId = minimalStaticWitnessId(target);
-                const witness = witnessId && current.find(item => item.remoteId === witnessId && item.environmentId === target.environmentId);
-                if (!witness) continue;
-                await migrateMinimalStatic(target, witness, results[index], async (repository, commit, archive, folder) => {
-                  await downloadGitArchive(repository, commit, archive);
-                  return extractArchive(archive, folder, true);
-                }, progress);
-              }
+            async function migrate(target: UpdateTarget, index: number) {
+              if (run!.purpose) return false;
+              const witnessId = minimalStaticWitnessId(target);
+              const witness = witnessId && current.find(item => item.remoteId === witnessId && item.environmentId === target.environmentId);
+              if (!witness) return false;
+              return migrateMinimalStatic(target, witness, results[index], async (repository, commit, archive, folder) => {
+                await downloadGitArchive(repository, commit, archive);
+                return extractArchive(archive, folder, true);
+              }, progress);
+            }
+            // A single-service migration qualifies the exact deployed code. A
+            // multi-service update first finishes its shared Git publication.
+            if (targets.length !== 1 || !await migrate(targets[0], 0)) {
+              await executeGroup(run, targets, results, progress);
+              if (targets.length > 1) for (const [index, target] of targets.entries()) await migrate(target, index);
             }
           }
           if (run.purpose === "assessment") {
