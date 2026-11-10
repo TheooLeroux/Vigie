@@ -17,7 +17,7 @@ Les fichiers et la base sont lus à des instants différents. Un site qui reçoi
 
 ## Planification et rétention
 
-Le workflow GitHub Actions `Vigie backups` est programmé le lundi à 03 h 13, heure de Paris. Lancer le workflow manuellement avec un domaine et le mode `preflight` pour contrôler le périmètre, ou `capture` pour reprendre le dernier créneau de ce site. Une copie valide termine le créneau. Un échec peut être repris après 15 minutes et la réservation d’un worker interrompu expire après quatre heures.
+La planification des sauvegardes est suspendue. Lancer le workflow GitHub Actions `Vigie backups` manuellement avec un domaine et le mode `preflight` pour contrôler le périmètre, ou `capture` pour reprendre le dernier créneau de ce site. Une copie valide termine le créneau. Un échec peut être repris après 15 minutes et la réservation d’un worker interrompu expire après quatre heures.
 
 GitHub Actions utilise les clés SSH dédiées et les clés d’hôte vérifiées pour Canary et Gaz. Le worker ajoute temporairement sa propre adresse IPv4 au pare-feu o2switch et retire l’exception à la fin du passage. Si le job s’arrête avant le nettoyage, le prochain passage retire les exceptions expirées qu’il a enregistrées. Les fichiers de travail restent en mémoire sans swap.
 
@@ -27,12 +27,12 @@ Le worker relit le ZIP dans R2 et vérifie son empreinte avant de le publier. L�
 
 ## NES App sur Railway
 
-Le workflow dédié passe le lundi à 03 h 13, heure de Paris. Il archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il vérifie que le backend utilise la base sauvegardée. Un changement de périmètre, l’apparition d’un volume ou un déploiement qui change pendant la collecte bloque la publication. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
+Le workflow dédié archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il vérifie que le backend utilise la base sauvegardée. Un changement de périmètre, l’apparition d’un volume ou un déploiement qui change pendant la collecte bloque la publication. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
 
 Le dump PostgreSQL de Supabase contient les schémas `public`, `auth`, `storage` et `supabase_migrations`, avec les données. Il est lu intégralement pour vérification sans connexion à une cible. Les objets binaires Supabase Storage et les buckets R2 de NES App sont distincts de ce dump. Les variables secrètes Railway restent dans Railway.
 
 ## Vigie sur Vercel
 
-Le workflow passe le lundi à 03 h 13, heure de Paris. Le ZIP contient les sources du commit réellement servi en production et un export logique de la base PostgreSQL Neon. La sonde Vercel signée confirme le déploiement et l’identité de la base avant et après la collecte. Le worker lit le dump en entier sans connexion à une cible avant de publier le ZIP dans R2.
+Le ZIP contient les sources du commit réellement servi en production et un export logique de la base PostgreSQL Neon. La sonde Vercel signée confirme le déploiement et l’identité de la base avant et après la collecte. Le worker lit le dump en entier sans connexion à une cible avant de publier le ZIP dans R2.
 
 L’archive comprend les données et le schéma de la base, dont le catalogue des sauvegardes. Les ZIP référencés dans ce catalogue restent des objets séparés dans R2. Les variables Vercel et les fonctions compilées ne font pas partie de l’archive.

@@ -1,9 +1,6 @@
 name: Vigie backups
 
 on:
-  schedule:
-    - cron: '13 3 * * 1'
-      timezone: Europe/Paris
   workflow_dispatch:
     inputs:
       site:
