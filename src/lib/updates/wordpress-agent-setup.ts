@@ -15,6 +15,7 @@ import { refreshWordPressWeb } from "./wordpress-web-check";
 import { wordpressLoadFailureMessage } from "../connectors/wordpress-load-failure";
 
 type Installation = NonNullable<SourceSettings["agentInstallation"]>;
+type AgentFailure = { site: HostingInstallationView; preparationError?: string };
 async function lockSource(targetId: string, projectId: string) {
   if (isPostgres()) {
     const db = await updateStorage();
@@ -25,6 +26,23 @@ async function lockSource(targetId: string, projectId: string) {
 }
 function eligible(site: HostingInstallationView) {
   return site.kind === "wordpress" && !!site.project && site.project.lifecycle === "active" && !site.ignored && !site.missingSince;
+}
+async function claimAgentFailureAlerts(failures: AgentFailure[], requestId?: string) {
+  return transaction(async () => {
+    let newFailures = 0;
+    // Match the installation lock so a fleet check and a targeted run cannot both claim an alert.
+    for (const { site, preparationError } of failures) {
+      const targetId = `wordpress:${site.id}`, projectId = site.project!.id;
+      await lockSource(targetId, projectId);
+      const current = await readUpdateSource(targetId), setup = current?.settings.agentInstallation;
+      if (requestId && setup?.requestId !== requestId) continue;
+      const reason = preparationError ?? (setup?.state === "failed" ? setup.error || "Installation à vérifier." : undefined);
+      if (!reason || current?.settings.agentReportedFailure === reason) continue;
+      await writeUpdateSource(targetId, projectId, { ...current?.settings, agentReportedFailure: reason });
+      newFailures++;
+    }
+    return newFailures;
+  });
 }
 function activeLease(setup?: Installation) {
   return setup?.state === "installing" && !!setup.leaseUntil && Date.parse(setup.leaseUntil) > Date.now();
@@ -117,7 +135,7 @@ export async function processAgentInstallation(id: string, requestId?: string, d
       await lockSource(targetId, site.project!.id);
       const current = await readUpdateSource(targetId);
       if (current?.settings.agentInstallation?.requestId !== claimed.requestId || current.settings.localAgent?.secret !== bundle.settings.secret) throw new ApiError("La configuration de l’agent vient de changer.", 409);
-      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, localAgent: { ...bundle.settings, ready: true, lastVerifiedAt: new Date().toISOString(), previousFileHashes: undefined, previousPhpBinary: undefined }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
+      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentReportedFailure: undefined, localAgent: { ...bundle.settings, ready: true, lastVerifiedAt: new Date().toISOString(), previousFileHashes: undefined, previousPhpBinary: undefined }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
       await log("live", "hosting.agent_installed", `Agent local installé et vérifié sur ${site.domains[0]}, sans mise à jour du site.`, site.project!.id);
     });
     return true;
@@ -132,6 +150,12 @@ export async function processAgentInstallation(id: string, requestId?: string, d
     });
     return false;
   }
+}
+export async function checkRequestedAgentInstallation(id: string, requestId?: string) {
+  const ready = await processAgentInstallation(id, requestId);
+  if (ready) return { ready, newFailures: 0 };
+  const site = await hostingInstallation(id);
+  return { ready, newFailures: eligible(site) ? await claimAgentFailureAlerts([{ site }], requestId) : 0 };
 }
 export async function requestLinkedAgents(connectionId: string, dispatch = dispatchAgentInstallation) {
   const sites = (await hostingDiscovery(connectionId)).installations.filter(eligible);
@@ -160,8 +184,13 @@ async function agentHeartbeatHealthy(site: HostingInstallationView, settings: Lo
   } catch { return false; }
 }
 export async function reconcileAgentInstallations(dependencies: { healthy?: typeof agentHeartbeatHealthy; prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}) {
-  let ready = 0, failed = 0;
+  let ready = 0;
+  const failures: AgentFailure[] = [];
   const pending: { site: HostingInstallationView; attempts: number }[] = [];
+  async function recordPreparationFailure(site: HostingInstallationView, error: unknown) {
+    failures.push({ site, preparationError: error instanceof ApiError ? error.message : "La préparation de l’agent a échoué." });
+    await log("live", "hosting.agent_failed", `La préparation de l’agent sur ${site.domains[0]} sera réessayée au prochain contrôle.`, site.project!.id);
+  }
   for (const connection of (await hostingConnections()).filter(connection => connection.configured)) {
     const sites = (await hostingDiscovery(connection.id)).installations.filter(eligible);
     for (const site of sites) {
@@ -178,7 +207,7 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
               await lockSource(`wordpress:${site.id}`, site.project!.id);
               const current = await readUpdateSource(`wordpress:${site.id}`);
               if (current?.settings.localAgent?.ready && current.settings.localAgent.secret === previous.localAgent!.secret && (!current.settings.agentInstallation || current.settings.agentInstallation.state === "ready")) {
-                await writeUpdateSource(`wordpress:${site.id}`, site.project!.id, { ...current.settings, localAgent: { ...current.settings.localAgent, lastVerifiedAt: new Date().toISOString() } });
+                await writeUpdateSource(`wordpress:${site.id}`, site.project!.id, { ...current.settings, agentReportedFailure: undefined, localAgent: { ...current.settings.localAgent, lastVerifiedAt: new Date().toISOString() } });
               }
             });
             ready++; continue;
@@ -189,9 +218,8 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
         const settings = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
         if (settings?.localAgent?.ready && (!settings.agentInstallation || settings.agentInstallation.state === "ready")) { ready++; continue; }
         pending.push({ site, attempts: settings?.agentInstallation?.attempts || 0 });
-      } catch {
-        failed++;
-        await log("live", "hosting.agent_failed", `La préparation de l’agent sur ${site.domains[0]} sera réessayée au prochain contrôle.`, site.project!.id);
+      } catch (error) {
+        await recordPreparationFailure(site, error);
       }
     }
   }
@@ -200,11 +228,11 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
   for (const { site } of pending.sort((a, b) => a.attempts - b.attempts)) {
     try {
       if (await processAgentInstallation(site.id, undefined, dependencies)) ready++;
-      else if ((await readUpdateSource(`wordpress:${site.id}`))?.settings.agentInstallation?.state === "failed") failed++;
-    } catch {
-      failed++;
-      await log("live", "hosting.agent_failed", `La préparation de l’agent sur ${site.domains[0]} sera réessayée au prochain contrôle.`, site.project!.id);
+      else if ((await readUpdateSource(`wordpress:${site.id}`))?.settings.agentInstallation?.state === "failed") failures.push({ site });
+    } catch (error) {
+      await recordPreparationFailure(site, error);
     }
   }
-  return { ready, failed };
+  const newFailures = failures.length ? await claimAgentFailureAlerts(failures) : 0;
+  return { ready, failed: failures.length, newFailures };
 }

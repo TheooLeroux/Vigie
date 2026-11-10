@@ -8,7 +8,7 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
 import { applyDiscoverySnapshot, hostingDiscovery, hostingInstallation } from "../src/lib/hosting-discovery";
 import { hostingStorage } from "../src/lib/hosting-storage";
-import { processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations, agentControlHealthy } from "../src/lib/updates/wordpress-agent-setup";
+import { checkRequestedAgentInstallation, processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations, agentControlHealthy } from "../src/lib/updates/wordpress-agent-setup";
 import { signAgentPayload } from "../src/lib/updates/wordpress-agent";
 import { updateTargets } from "../src/lib/updates/targets";
 import { readUpdateSource, writeUpdateSource, updateStorage } from "../src/lib/updates/storage";
@@ -190,4 +190,41 @@ test("Contrôle du parc : les agents sains sont vérifiés avant d’attendre un
   });
   assert.deepEqual(events, ["healthy checked", "broken repaired"]);
   assert.ok((await readUpdateSource(healthy.targetId))!.settings.localAgent!.lastVerifiedAt);
+});
+
+test("Alertes agent : un échec répété reste visible, une autre cause ou une rechute déclenche une alerte", async () => {
+  const first = await fixture(), second = await fixture();
+  const errors = new Map([[first.site.id, "Contrôle web indisponible."]]);
+  const deps = {
+    prepare: hostingInstallation,
+    healthy: async (site: typeof first.site) => !errors.has(site.id),
+    provision: async (target: { remoteId: string }) => {
+      const error = errors.get(target.remoteId);
+      if (error) throw new ApiError(error);
+    },
+  };
+  const retry = (site: typeof first.site) => requestAgentInstallation(site.id, async () => {}, true);
+
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 1);
+  const repeated = await reconcileAgentInstallations(deps);
+  assert.ok(repeated.failed > 0);
+  assert.equal((await readUpdateSource(first.targetId))!.settings.agentInstallation!.state, "failed");
+  assert.equal(repeated.newFailures, 0);
+  const requestId = (await readUpdateSource(first.targetId))!.settings.agentInstallation!.requestId;
+  assert.deepEqual(await checkRequestedAgentInstallation(first.site.id, requestId), { ready: false, newFailures: 0 });
+  await retry(first.site);
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 0);
+
+  errors.set(second.site.id, "Contrôle web indisponible.");
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 1);
+  errors.set(first.site.id, "Version PHP incompatible.");
+  await retry(first.site);
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 1);
+
+  errors.delete(first.site.id);
+  await retry(first.site);
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 0);
+  assert.equal((await readUpdateSource(first.targetId))!.settings.agentReportedFailure, undefined);
+  errors.set(first.site.id, "Version PHP incompatible.");
+  assert.equal((await reconcileAgentInstallations(deps)).newFailures, 1);
 });

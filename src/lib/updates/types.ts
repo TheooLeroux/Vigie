@@ -117,6 +117,7 @@ export type UpdateState = {
   runs: UpdateRun[];
 };
 export type SourceSettings = {
+  agentReportedFailure?: string;
   wordpressAutoRemoval?: { projectId: string; root: string; slugs: string[] };
   agentInstallation?: {
     requestId: string;
