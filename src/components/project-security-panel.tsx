@@ -12,10 +12,9 @@ const date = (value: string) => new Date(value).toLocaleString("fr-FR", { timeZo
 
 type ExplainRemediation = (item: ProjectVulnerability) => RemediationReason | undefined;
 
-function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
-  return <ul className="security-findings">{items.map(item => {
-    const reason = explain?.(item);
-    return <li key={item.key}>
+function FindingRows({ rows }: { rows: { item: ProjectVulnerability; reason?: RemediationReason }[] }) {
+  return <ul className="security-findings">
+    {rows.map(({ item, reason }) => <li key={item.key}>
       <details className="security-finding">
         <summary>
           <span className={`security-severity ${item.severity}`}>{severityLabels[item.severity]}</span>
@@ -28,7 +27,7 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
               </span>}
             </strong>
             <span>
-              {item.package} <span className="security-version">{item.version}</span>
+              <span className="security-version">{item.version}</span>
               {reason?.manual && <span className="security-finding-reason">
                 <CircleAlert size={13} aria-hidden="true" /> {reason.label}
               </span>}
@@ -46,8 +45,8 @@ function FindingRows({ items, explain }: { items: ProjectVulnerability[]; explai
           {item.url && /^https?:\/\//i.test(item.url) && <a href={item.url} target="_blank" rel="noreferrer">Consulter le signalement ↗</a>}
         </div>
       </details>
-    </li>;
-  })}</ul>;
+    </li>)}
+  </ul>;
 }
 
 function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?: ExplainRemediation }) {
@@ -57,12 +56,33 @@ function Findings({ items, explain }: { items: ProjectVulnerability[]; explain?:
     entries.push(item);
     blocks.set(item.targetId, entries);
   }
-  return <div className={explain ? "security-findings-group security-current-findings" : "security-findings-group"}>{[...blocks].map(([targetId, entries]) =>
-    <details className="security-findings-block" open key={targetId}>
-      <summary className="security-block-heading"><span className="security-block-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
-      <FindingRows items={entries} explain={explain} />
-    </details>
-  )}</div>;
+  return <div className={explain ? "security-findings-group security-current-findings" : "security-findings-group"}>{[...blocks].map(([targetId, entries]) => {
+    const packages = new Map<string, ProjectVulnerability[]>();
+    for (const item of entries) {
+      const findings = packages.get(item.package) || [];
+      findings.push(item);
+      packages.set(item.package, findings);
+    }
+    return <details className="security-findings-block" open key={targetId}>
+      <summary className="security-group-heading"><span className="security-group-name">Bloc : <strong>{entries[0].service}</strong></span><small>{entries.length} signalement{entries.length > 1 ? "s" : ""}</small></summary>
+      {[...packages].map(([name, findings]) => {
+        const severity = findings[0].severity; // Les signalements sont déjà triés par gravité.
+        const rows = findings.map(item => ({ item, reason: explain?.(item) }));
+        const needsManualAction = rows.some(({ reason }) => reason?.manual);
+        return <details className="security-findings-package" key={name}>
+          <summary className="security-group-heading">
+            <strong className="security-group-name">{name}</strong>
+            <span className="security-package-meta">
+              {needsManualAction && <span className="badge warning">Intervention manuelle requise</span>}
+              <span className={`security-severity ${severity}`}><span className="sr-only">Gravité maximale : </span>{severityLabels[severity]}</span>
+              <small>{findings.length} signalement{findings.length > 1 ? "s" : ""}</small>
+            </span>
+          </summary>
+          <FindingRows rows={rows} />
+        </details>;
+      })}
+    </details>;
+  })}</div>;
 }
 
 export function ProjectSecurityPanel({ detail, updates, health, unavailable = false, updateActionRef }: { detail: ProjectDetail; updates?: UpdateState | null; health: ProjectHealth; unavailable?: boolean; updateActionRef?: Ref<HTMLDivElement> }) {

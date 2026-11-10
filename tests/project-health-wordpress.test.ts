@@ -94,6 +94,8 @@ test("WordPress : contrôle actuel remplace le faux positif historique, y compri
   state.currentSecurity[0].check!.checkedAt = observedAt;
   state.currentSecurity[0].manualUpdates = [{ package: "plugins/private-pro", version: "3.0.103", reason: "Catalogue privé.", action: "Consulter l’éditeur." }];
   const html = renderToStaticMarkup(createElement(ProjectHealthSummary, { detail, updates: state }));
+  const packageSummary = html.split('<details class="security-findings-package">')[1]?.split("</summary>")[0] || "";
+  assert.match(packageSummary, /plugins\/private-pro.*Intervention manuelle requise.*Élevée.*1 signalement/);
   const rowSummary = html.split('<details class="security-finding"><summary>')[1]?.split("</summary>")[0] || "";
   assert.match(rowSummary, /Intervention manuelle/);
   inventory.plugins[0].version = "3.0.124";

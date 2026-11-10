@@ -111,10 +111,11 @@ test("Signalements : fusion transitive des alias par composant, version et servi
   assert.deepEqual(entries[0].aliases, ["CVE-2026-0001", "CVE-2026-0002", "GHSA-ONE", "GHSA-TWO"]);
 });
 
-test("Fiche : toutes les failles sont visibles, les plus graves en premier", () => {
+test("Fiche : les failles sont regroupées par composant, les groupes les plus graves en premier", () => {
   const base = healthCheck().findings[0];
   const { detail, state } = fixture([
-    ...Array.from({ length: 6 }, (_, index) => ({ ...base, id: `GHSA-low-${index}`, aliases: [], severity: "low" as const, package: `library-${index}` })),
+    ...Array.from({ length: 5 }, (_, index) => ({ ...base, id: `GHSA-low-${index}`, aliases: [], severity: "low" as const, package: `library-${index}` })),
+    { ...base, id: "GHSA-other-version", aliases: [], severity: "low", version: "1.1.0" },
     { ...base, id: "GHSA-critical", aliases: [], severity: "critical", title: "Exécution de code à distance", fixedVersions: ["1.2.3"], url: "https://example.test/advisory" },
   ]);
   const security = projectSecurity(detail, state);
@@ -129,6 +130,13 @@ test("Fiche : toutes les failles sont visibles, les plus graves en premier", () 
   assert.equal(html.match(/<details class="security-finding">/g)?.length, 7);
   assert.doesNotMatch(html, /autres signalements/);
   assert.match(html, /<details class="security-findings-block" open="">/);
+  const packages = html.split('<details class="security-findings-package">').slice(1);
+  assert.equal(packages.length, 6);
+  const firstPackageSummary = packages[0].split("</summary>")[0];
+  assert.match(firstPackageSummary, /<strong class="security-group-name">library<\/strong>/);
+  assert.match(firstPackageSummary, /<span class="security-severity critical">.*Critique<\/span><small>2 signalements<\/small>/);
+  assert.doesNotMatch(firstPackageSummary, /Intervention manuelle|Faible/);
+  assert.match(packages[0], /GHSA-CRITICAL.*GHSA-OTHER-VERSION/);
   assert.doesNotMatch(html, /<details class="security-finding"[^>]*open/);
 });
 
@@ -151,6 +159,7 @@ test("Fiche : le pictogramme annonce un motif lié au déploiement analysé, vis
   const blockedSummary = summaries.find(summary => summary.includes("security-finding-reason"));
   assert.match(blockedSummary || "", /Motif disponible/);
   assert.doesNotMatch(blockedSummary || "", /La dépendance parente impose encore cette version/);
+  assert.doesNotMatch(html, /Intervention manuelle requise/);
   assert.match(html, /<div class="security-finding-body">.*La faille bloque la proposition de mise à jour.*La dépendance parente impose encore cette version/);
   assert.equal(summaries.filter(summary => summary.includes("security-finding-reason")).length, 1);
 
@@ -221,6 +230,7 @@ test("Compteur projet : une seule faille, de gravité maximale, même dans plusi
   for (const block of [backend, tailscale]) {
     assert.match(block, /CVE-2026-12345/);
     assert.match(block, /1 signalement/);
+    assert.match(block, /<details class="security-findings-package">.*<strong class="security-group-name">library<\/strong>/);
   }
   detail.railway![0].observedAt = new Date(0).toISOString();
   const historical = summarizeProject(detail.project, detail, state);

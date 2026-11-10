@@ -113,38 +113,43 @@ html[data-theme="dark"] .project-health-card.danger .project-health-title > svg 
 .project-security-card .security-coverage-note { color: var(--muted); font-size: 11px; }
 .security-findings-group { width: 100%; min-width: 0; }
 .security-findings-block + .security-findings-block { margin-top: 14px; }
-.security-block-heading { display: flex; align-items: baseline; gap: 10px; padding: 9px 10px; border-radius: 5px; background: var(--soft); cursor: pointer; list-style: none; }
-.security-block-heading::-webkit-details-marker { display: none; }
-.security-block-heading::before { content: "›"; color: var(--muted); font-size: 16px; line-height: 1; }
-.security-findings-block[open] > .security-block-heading { margin-bottom: 4px; }
-.security-findings-block[open] > .security-block-heading::before { transform: rotate(90deg); }
-.security-block-heading:hover { background: var(--line); }
-.security-block-heading:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
-.security-block-name { min-width: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
-.security-block-name > strong { color: var(--ink); }
-.security-block-heading > small { margin-left: auto; flex-shrink: 0; }
+.security-group-heading { display: flex; align-items: baseline; gap: 10px; padding: 9px 10px; border-radius: 5px; cursor: pointer; list-style: none; }
+.security-group-heading::-webkit-details-marker { display: none; }
+.security-group-heading::before { content: "›"; color: var(--muted); font-size: 16px; line-height: 1; }
+:where(.security-findings-block) > .security-group-heading { background: var(--soft); }
+.security-findings-block[open] > .security-group-heading { margin-bottom: 4px; }
+details[open] > .security-group-heading::before { transform: rotate(90deg); }
+.security-group-heading:hover { background: var(--line); }
+.security-group-heading:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+.security-group-name { min-width: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.security-group-name > strong, strong.security-group-name { color: var(--ink); }
+.security-group-heading > small { margin-left: auto; flex-shrink: 0; }
+.security-findings-package { margin-inline: 10px; }
+.security-findings-package + .security-findings-package { border-top: 1px solid var(--line); }
+.security-findings-package > .security-group-heading { flex-wrap: wrap; gap: 4px 10px; }
+.security-findings-package > .security-group-heading > .security-group-name { flex: 1 1 12ch; }
+.security-package-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 8px; min-width: 0; margin-inline-start: auto; }
 .security-current-findings > .security-findings-block {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--bg);
 }
 .security-current-findings > .security-findings-block + .security-findings-block { margin-top: 18px; }
-.security-current-findings > .security-findings-block > .security-block-heading {
+.security-current-findings > .security-findings-block > .security-group-heading {
   padding: 12px 14px;
   border-radius: 9px;
   margin-bottom: 0;
 }
-.security-current-findings .security-block-name > strong { font-size: 13px; }
-.security-current-findings > .security-findings-block[open] > .security-block-heading {
+.security-current-findings > .security-findings-block > .security-group-heading .security-group-name > strong { font-size: 13px; }
+.security-current-findings > .security-findings-block[open] > .security-group-heading {
   border-bottom: 1px solid var(--line);
   border-radius: 9px 9px 0 0;
 }
-.security-current-findings > .security-findings-block > .security-findings { padding-inline: 14px; }
 .project-health-card .security-findings { display: grid; gap: 0; list-style: none; padding: 0; margin: 0; }
+.project-health-card .security-findings-package > .security-findings { padding-inline-start: 10px; }
 .project-health-card .security-findings > li { margin: 0; border-bottom: 1px solid var(--line); }
 .project-health-card .security-findings > li:first-child { border-top: 1px solid var(--line); }
-.security-current-findings .security-findings > li:first-child { border-top: 0; }
-.security-current-findings .security-findings-block > .security-findings > li:last-child { border-bottom: 0; }
+.security-findings-package > .security-findings > li:last-child { border-bottom: 0; }
 .security-finding > summary { display: flex; align-items: center; gap: 12px; padding: 11px 0; list-style: none; cursor: pointer; }
 .security-finding > summary::-webkit-details-marker { display: none; }
 .security-finding > summary::after { content: "›"; color: var(--muted); font-size: 20px; }
