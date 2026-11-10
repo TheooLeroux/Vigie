@@ -13,20 +13,20 @@
     "backups:tick": "tsx --env-file-if-exists=.env.local scripts/backup-worker.ts"
   },
   "engines": {
-    "node": "24.21.0"
+    "node": "24.22.2"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1164.0",
-    "@aws-sdk/lib-storage": "3.1164.0",
-    "@aws-sdk/s3-request-presigner": "3.1164.0",
-    "@neon/realtime": "0.1.2",
-    "better-auth": "1.7.14",
-    "lucide-react": "1.63.0",
-    "next": "16.4.3",
+    "@aws-sdk/client-s3": "3.1165.0",
+    "@aws-sdk/lib-storage": "3.1165.0",
+    "@aws-sdk/s3-request-presigner": "3.1165.0",
+    "@neon/realtime": "0.2.1",
+    "better-auth": "1.7.19",
+    "lucide-react": "1.71.0",
+    "next": "16.4.6",
     "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "semver": "7.8.5",
+    "semver": "7.8.6",
     "yaml": "2.9.1",
     "zod": "4.6.7"
   },
