@@ -16,7 +16,7 @@ on:
         required: false
         type: string
       security_only:
-        description: Renouveler les relevés et analyses sans préparer les agents WordPress
+        description: Lancer le cycle de surveillance et le contrôle des agents WordPress
         default: false
         type: boolean
   push:
@@ -27,8 +27,7 @@ on:
 permissions:
   contents: read
 jobs:
-  install:
-    needs: wordpress-observations
+  agents:
     concurrency:
       group: wordpress-agent-${{ inputs.installation_id || 'reconcile' }}
       cancel-in-progress: false
@@ -45,9 +44,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-        id: dependencies
-      - name: Installer et vérifier les agents sans mettre à jour les sites
-        if: ${{ !inputs.security_only }}
+      - name: Vérifier et réparer les agents WordPress
         run: node --import tsx scripts/wordpress-agent-worker.ts
         env:
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
@@ -55,12 +52,28 @@ jobs:
           VIGIE_AGENT_INSTALLATION_ID: ${{ inputs.installation_id }}
           VIGIE_AGENT_REQUEST_ID: ${{ inputs.request_id }}
           VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app
-      - name: Signaler une découverte incomplète après avoir contrôlé les agents connus
-        if: always() && steps.discovery.outcome == 'failure'
-        run: exit 1
+  wordpress-security:
+    needs: wordpress-observations
+    concurrency:
+      group: wordpress-security-scan
+      cancel-in-progress: false
+    if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        id: dependencies
       - name: Identifier les analyses WordPress et o2switch à renouveler
         id: plan
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: node --import tsx scripts/automatic-control-worker.ts --plan
         env:
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
@@ -71,7 +84,7 @@ jobs:
         if: ${{ !cancelled() && steps.plan.outputs.needed == 'true' }}
         run: node --import tsx scripts/install-update-scanners.ts
       - name: Analyser automatiquement les failles WordPress et les sources hébergées
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && inputs.installation_id == '' && steps.plan.outputs.needed != 'false' }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.plan.outputs.needed != 'false' }}
         run: node --import tsx scripts/automatic-control-worker.ts
         env:
           DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
