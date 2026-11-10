@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { officialNodeImageDigest, unchangedNodeCatalogs, type NodeCatalogEntry } from "./node-catalog-state";
 import { runCommand } from "./process";
+import type { MinimalStaticProfile } from "./minimal-static-profile";
 import type { SourceFile } from "./node";
 import type { SecurityFinding, UpdateCheck, UpdateResult, UpdateTarget } from "./types";
 
@@ -32,7 +33,13 @@ const receiptSchema = z.object({
 export type NodeValidationReceipt = z.infer<typeof receiptSchema>;
 export type NodeCurrentKey = Pick<NodeValidationReceipt, "sourceHash" | "targetsHash" | "policyHash" | "nodeVersion">;
 export function nodeSourceHash(files: SourceFile[]) { return hash([...files].sort((a, b) => a.path.localeCompare(b.path))); }
-export function nodeTargetsHash(targets: UpdateTarget[]) { return hash([...targets].sort((a, b) => a.id.localeCompare(b.id))); }
+export function nodeTargetsHash(targets: UpdateTarget[], staticProfiles?: ReadonlyMap<string, MinimalStaticProfile>) {
+  const ordered = [...targets].sort((a, b) => a.id.localeCompare(b.id));
+  return hash(ordered.map(target => {
+    const profile = staticProfiles?.get(target.id);
+    return profile ? { target, profile } : target;
+  }));
+}
 export function nodeSecurityHash(findings: SecurityFinding[]) {
   return hash(findings.map(finding => ({ ...finding, aliases: [...finding.aliases].sort(), fixedVersions: [...(finding.fixedVersions || [])].sort() })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }

@@ -127,6 +127,29 @@ Sur la fiche projet, le scan OSV du verrou et le scan Trivy de l’image Railpac
 
 Le contrôle automatique renouvelle les avis Trivy des images Railpack statiques avec Caddy sur la cadence horaire. À la première analyse d’un déploiement, Vigie lit les paquets Debian et l’empreinte du processus Caddy sur Railway. Il génère l’inventaire Go à partir du binaire officiel dont l’empreinte correspond. Les analyses suivantes réutilisent ces inventaires tant que le déploiement et l’image correspondent. Elles interrogent la base de vulnérabilités sans reconstruire l’image ni relancer les tests applicatifs. Une erreur conserve la date et les alertes du dernier rapport.
 
+### Configuration des projets compatibles
+
+Les tests Node utilisent les scripts du dépôt. Si un service a besoin de valeurs factices pour ses tests, ajoutez `vigie.testEnv` à son `package.json`, par exemple `"vigie": { "testEnv": { "SEARCH_URL": "http://127.0.0.1:9", "SEARCH_TOKEN": "local-fixture" } }`. Le conteneur de validation reçoit ces chaînes explicites. Les variables de production restent dans l’hébergeur. Un changement de ces valeurs invalide la validation des anciennes sources.
+
+Le parcours de l’image minimale concerne un frontend Vite/npm sur Railway qui possède un verrou npm, des scripts `test` et `build`, une version Node exacte et un `Caddyfile`. Il faut un service Node témoin dans le même dépôt, projet et environnement. Ajoutez `projetVigie:environnementRailway:serviceFrontendRailway:serviceTemoinRailway` à `VIGIE_MINIMAL_STATIC_SERVICES` dans les variables GitHub Actions de Vigie. Dans `VIGIE_MINIMAL_STATIC_PROFILES`, déclarez un objet JSON par triplet projet, environnement et frontend.
+
+```json
+{
+  "projetVigie:environnementRailway:serviceFrontendRailway": {
+    "http": [
+      { "path": "/v1/availability", "status": 200, "contentType": "application/json", "contains": "\"ready\":true" }
+    ],
+    "websocket": ["/live-stock"],
+    "publicBuild": { "VITE_THEME": "night" },
+    "upstreamVariables": ["CATALOGUE_URL"]
+  }
+}
+```
+
+Un profil `{}` vérifie uniquement l’accueil HTTP 200 et le type HTML. Les sondes supplémentaires utilisent des chemins relatifs et s’exécutent sans session. Une sonde WebSocket vérifie la négociation HTTP 101. `publicBuild` reçoit uniquement des valeurs publiques qui doivent correspondre exactement aux variables Railway. Les variables listées dans `upstreamVariables` sont recopiées vers le service candidat après validation de leur adresse interne Railway. Le profil et les garde-fous d’image s’appliquent aux recettes déjà déployées.
+
+Avant d’activer cette version de Vigie sur un service qui utilisait les anciens réglages intégrés, renseignez ses sondes et ses variables publiques dans ce profil, ses valeurs de test factices dans le dépôt si nécessaire, et son témoin réseau s’il utilise le [parcours Tailscale](railway-image-maintenance.md).
+
 ## Applications sans Git
 
 Dans **Services, configuration et détails**, fournir une archive ZIP des sources complètes, avec `package.json`, le verrouillage et le bon répertoire de construction. Limite initiale : **2 Mo compressés**, sans `node_modules`, `.git`, fichiers `.env` réels, clés privées ni identifiants npm. Le plafond évite les limites de corps des fonctions Vercel ; les gros projets nécessitent une autre source de stockage avant de pouvoir être pris en charge. Les archives chiffrées, chemins traversants, liens et fichiers spéciaux sont refusés ; l’extraction est plafonnée à 150 Mo.

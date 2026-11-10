@@ -4,7 +4,7 @@ import { compatibleVersions, verifiedPeerConflicts, type PackageVersion } from "
 import { npmPeerConflicts, PeerResolutionError, runCommand } from "../src/lib/updates/process";
 import { dockerBaseAlternatives, dockerPackages, repairAlpineDockerfile, rewriteDockerfile, validatedDockerfileChange, versionOnlyDockerfile } from "../src/lib/updates/dockerfile";
 import { prepareNodeSources } from "../src/lib/updates/node";
-import { nodeTestProfile } from "../src/lib/updates/node-test-profile";
+import { nodeTestEnvironment } from "../src/lib/updates/node-test-profile";
 
 function registry(packages: Record<string, PackageVersion[]>) {
   const requests: string[] = [];
@@ -138,18 +138,13 @@ test("Docker : alternatives Debian officielles, étapes coordonnées et instruct
   assert.ok(!versionOnlyDockerfile(portable, alpine + "RUN npm run changed\n"));
 });
 
-test("Profil de test NesAppli : valeurs factices locales uniquement, aucune récupération des secrets du worker", () => {
-  const manifest = { name: "backend", dependencies: { "@supabase/supabase-js": "2.0.0" } };
-  const schema = "JWT_REFRESH_SECRET SUPABASE_JWT_SECRET ADMIN_BOOTSTRAP_SECRET PI_API_SECRET";
-  const profile = nodeTestProfile(manifest, schema)!;
-  assert.equal(profile.environment.SUPABASE_URL, "http://127.0.0.1:9");
-  assert.equal(profile.environment.SMTP_HOST, "127.0.0.1");
-  assert.equal(profile.environment.SMTP_PORT, "9");
-  assert.match(profile.environment.SUPABASE_SERVICE_ROLE_KEY, /^vigie-test-only/);
-  assert.ok(profile.environment.JWT_SECRET.length >= 32);
-  assert.ok(!("DATABASE_URL" in profile.environment) && !("GITHUB_TOKEN" in profile.environment) && !("VIGIE_CONNECTOR_ENCRYPTION_KEY" in profile.environment));
-  assert.equal(nodeTestProfile(manifest, "unrelated schema"), null);
-  assert.equal(nodeTestProfile({ name: "other" }, schema), null);
+test("Profil de test Node : valeurs explicites et indépendantes du nom et des dépendances du site", () => {
+  const manifest = { name: "catalogue", vigie: { testEnv: { SEARCH_URL: "http://127.0.0.1:9", FIXTURE_TOKEN: "local-fixture" } } };
+  assert.deepEqual(nodeTestEnvironment(manifest), manifest.vigie.testEnv);
+  assert.deepEqual(nodeTestEnvironment({}), {});
+  for (const testEnv of [{ PATH: "/tmp" }, { NODE_OPTIONS: "--import=./test.js" }, { NPM_CONFIG_IGNORE_SCRIPTS: "true" }, { PORT: 8080 }]) {
+    assert.throws(() => nodeTestEnvironment({ vigie: { testEnv } }), /vigie.testEnv/);
+  }
 });
 test("Docker Alpine : correction bornée au dernier stage et réutilisable lors d’un nouveau correctif", () => {
   const base = "FROM node:26.13.0-alpine AS build\r\nFROM node:26.13.0-alpine AS runner\r\nUSER node\r\n";

@@ -6,7 +6,7 @@ import { ApiError } from "../http";
 import { runCommand, DependencyValidationError, IndirectValidationError, PeerResolutionError } from "./process";
 import { compatibleVersions, CompatibilitySelectionError, verifiedPeerConflicts } from "./versions";
 import { dockerPackages, rewriteDockerfile, validateDockerfile, type AlpineRepair, type DockerNodeBase } from "./dockerfile";
-import { nodeTestProfile } from "./node-test-profile";
+import { nodeTestEnvironment } from "./node-test-profile";
 import { SecurityPolicyError } from "./security";
 import type { SecurityFinding } from "./types";
 import { createNodeRemediator, npmChangedIndirectPackages, npmGraph, npmIndirectVersionsChanged, RemediationUnavailableError, seedNpmIndirectVersions, validateNpmProposal } from "./remediation";
@@ -198,8 +198,7 @@ async function validatePreparedSources(folder: string, roots: string[], names: s
     const manifest = JSON.parse(await readFile(join(folder, prefix + "package.json"), "utf8"));
     if (manifest.engines?.node !== nodeVersion || !manifest.scripts?.test && !manifest.scripts?.build) throw new ApiError("Proposition assemblée non validable : version Node exacte et scripts obligatoires.", 422);
     const manager = managerCommands(manifest, names.filter(name => name.startsWith(prefix)).map(name => name.slice(prefix.length)));
-    const schema = prefix + "src/config/env.ts";
-    const environment = nodeTestProfile(manifest, names.includes(schema) ? await readFile(join(folder, schema), "utf8") : "")?.environment || {};
+    const environment = nodeTestEnvironment(manifest);
     const files = await snapshotSources(folder, [...names].sort());
     const key = createHash("sha256").update(JSON.stringify([nodeVersion, root, manager.validate, environment, files, await runtime.image()])).digest("hex");
     if (validations.has(key)) await security.reused?.(`${root || "racine"} : validation déjà réussie pour les sources assemblées exactes ; résultat de cette exécution réutilisé.`);
@@ -329,10 +328,8 @@ async function prepareSources(folder: string, roots: string[], names: string[], 
       const name = prefix + versionFile;
       if (names.includes(name)) { await remember(name); await writeFile(join(folder, name), nodeVersion + "\n"); allowed.add(name); }
     }
-    const schemaName = prefix + "src/config/env.ts";
-    const profile = nodeTestProfile(manifest, names.includes(schemaName) ? await readFile(join(folder, schemaName), "utf8") : "");
-    if (profile) warnings.push(profile.message);
-    checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, selection: upgraded.versions, environment: profile?.environment || {} });
+    const environment = nodeTestEnvironment(manifest);
+    checks.push({ root, lock: prefix + manager.lock, resolve: manager.resolve, validate: manager.validate, verify: "verify" in manager ? manager.verify : undefined, balance: "balance" in manager ? manager.balance : undefined, docker, original: manifest, selection: upgraded.versions, environment });
   }
   const isolated = nodeSandbox(folder, retry.runtime!);
   function rejectCombination(check: typeof checks[number]) {

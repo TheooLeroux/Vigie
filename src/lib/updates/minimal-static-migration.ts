@@ -3,7 +3,8 @@ import { deploymentEvidence } from "../connectors/railway-evidence";
 import { caddyCatalog } from "../connectors/software-releases";
 import { normalizeImageDigest } from "../image-reference";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
-import { checkPublicMinimalStatic, minimalStaticCaddyCandidate, minimalStaticDockerfile, MinimalStaticCandidateVulnerable, scanMinimalStaticImage, testMinimalStaticRailway } from "./minimal-static";
+import { checkPublicMinimalStatic, minimalStaticCaddyCandidate, MinimalStaticCandidateVulnerable, scanMinimalStaticImage, testMinimalStaticRailway } from "./minimal-static";
+import { minimalStaticProfile } from "./minimal-static-profile";
 import { readRailwayInstance, waitForDeployment } from "./providers";
 import { railpackCaddyVersion } from "./railpack-caddy";
 import { cachedRailpackInventory, readRailpackScan, readRecentCaddyRefusal, saveCaddyRefusal, saveMinimalStaticScan } from "./railpack-image-control";
@@ -75,14 +76,15 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     await progress("updating", `${target.name} : qualification de Caddy ${change.version} pour l’image minimale.`);
   }
 
-  await checkPublicMinimalStatic(target);
+  const profile = minimalStaticProfile(target);
+  await checkPublicMinimalStatic(target, profile);
   await assertSourceImpact([target], [path]);
   let candidate;
   try {
     candidate = await testMinimalStaticRailway(target, witness, commit, getSources, async message => {
       console.log(message);
       await progress("updating", message);
-    }, change);
+    }, change, profile);
   } catch (error) {
     if (!change || !(error instanceof MinimalStaticCandidateVulnerable)) throw error;
     const summary = error.findings.slice(0, 6).map(finding => `${finding.package} ${finding.version} (${finding.id})`).join(", ");
@@ -92,17 +94,18 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     await progress("verifying", reason);
     const active = await activeMinimalStaticImage(target, deployment.id, commit);
     const scan = await scanMinimalStaticImage(target, deployment.id);
-    await checkPublicMinimalStatic(target);
+    await checkPublicMinimalStatic(target, profile);
     if (!sameRailpackImage(active, await activeMinimalStaticImage(target, deployment.id, commit))) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
     const check = securityCheck("Trivy", "before", "Image statique minimale conservée sur Railway", scan.findings);
-    check.message = `Image active ${active.imageDigest} : ${scan.findings.length} signalement(s). Site et santé HTTP 200, API HTTP 401 attendue sans session, ouverture WebSocket HTTP 101.`;
+    check.message = `Image active ${active.imageDigest} : ${scan.findings.length} signalement(s). Les sondes configurées ont réussi.`;
     await saveMinimalStaticScan(active, check);
     (result.checks ||= []).push(check);
     await progress("verifying", check.message);
     return !!qualificationCommit;
   }
   result.checks ||= [];
-  result.checks.push({ ...securityCheck("Trivy", "candidate", "Image statique minimale", []), message: "Image candidate qualifiée sur Railway. Site, API et ouverture WebSocket vérifiés." });
+  const proof = `${candidate.http} contrôle(s) HTTP et ${candidate.websocket} ouverture(s) WebSocket vérifiés.`;
+  result.checks.push({ ...securityCheck("Trivy", "candidate", "Image statique minimale", []), message: "Image candidate qualifiée sur Railway. " + proof });
   if (qualificationCommit) return true;
 
   const current = async (service: UpdateTarget, id: string) => {
@@ -121,7 +124,7 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     (await githubRequest(`${api}/commits`, token, "POST", { message, tree, parents: [parent] })).sha as string;
   if (await head() !== commit) throw new ApiError("La branche a changé pendant la qualification.", 409);
   const originalTree = (await githubRequest(`${api}/commits/${commit}`, token)).tree.sha;
-  const tree = await githubRequest(`${api}/trees`, token, "POST", { base_tree: originalTree, tree: [{ path, mode: "100644", type: "blob", content: change?.recipe || minimalStaticDockerfile }] });
+  const tree = await githubRequest(`${api}/trees`, token, "POST", { base_tree: originalTree, tree: [{ path, mode: "100644", type: "blob", content: candidate.recipe }] });
   const published = await createCommit(change ? `chore: mettre à jour Caddy vers ${change.version} via Vigie` : "fix: déployer le frontend dans une image minimale via Vigie", tree.sha, commit);
 
   result.stage = "publishing";
@@ -140,10 +143,10 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
     const active = await activeMinimalStaticImage(target, deploymentId, published);
     const scan = await scanMinimalStaticImage(target, deploymentId, candidate.binaryHash);
     if (scan.findings.length) throw new ApiError("Le scan du déploiement minimal actif signale encore des vulnérabilités.", 422);
-    await checkPublicMinimalStatic(target);
+    await checkPublicMinimalStatic(target, profile);
     if (!sameRailpackImage(active, await activeMinimalStaticImage(target, deploymentId, published))) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
     const check = { ...securityCheck("Trivy", "after", "Image statique minimale déployée sur Railway", scan.findings),
-      message: `${change ? `Caddy ${change.version} confirmé. ` : ""}Image ${active.imageDigest} : aucun signalement sur ${scan.instances} instance(s). ${removed ? `Les ${removed} signalements de l’image précédente sont absents. ` : ""}Site et santé HTTP 200, API HTTP 401 attendue sans session, ouverture WebSocket HTTP 101.` };
+      message: `${change ? `Caddy ${change.version} confirmé. ` : ""}Image ${active.imageDigest} : aucun signalement sur ${scan.instances} instance(s). ${removed ? `Les ${removed} signalements de l’image précédente sont absents. ` : ""}${proof}` };
     await saveMinimalStaticScan(active, check);
     result.checks.push(check);
     result.stage = "completed";
@@ -163,7 +166,7 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
           const { serviceInstance: restoredInstance } = await readRailwayInstance(target);
           if (!railpackCaddyVersion(deploymentEvidence(restoredInstance.activeDeployments?.[0]?.meta))) throw new ApiError("Retour à Railpack non attesté.", 502);
         }
-        await checkPublicMinimalStatic(target);
+        await checkPublicMinimalStatic(target, profile);
         recovered = true;
         result.warnings.push(`Retour à la recette précédente vérifié sur Railway (${restored}).`);
       }

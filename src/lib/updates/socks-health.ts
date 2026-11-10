@@ -4,10 +4,14 @@ import { ApiError } from "../http";
 import { railwayUpdateRequest } from "./providers";
 import { updateTargets } from "./targets";
 import { readRailwayProbe } from "./docker-node";
+import { probePath } from "./probe-path";
 import { tailnetIPv4 } from "./tailscale-probe";
 import type { UpdateTarget } from "./types";
 
-export type SocksHealthPlan = { target: UpdateTarget; deploymentId: string; proxyHost: string; proxyPort: number; peer: string; port: number };
+const variableName = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/);
+const socksProfile = z.strictObject({ proxyUrlVariable: variableName, peerVariable: variableName, portVariable: variableName.optional(), path: probePath.default("/health") });
+type SocksEndpoint = { proxyHost: string; proxyPort: number; peer: string; port: number; settings: z.output<typeof socksProfile>; profile: string };
+export type SocksHealthPlan = SocksEndpoint & { target: UpdateTarget; deploymentId: string };
 export type SocksHealthProof = { serviceId: string; deploymentId: string; status: 200; checkedAt: string };
 const ids = (target: UpdateTarget) => ({ s: target.remoteId, e: target.environmentId });
 const deploymentQuery = `query SocksConsumer($s:String!,$e:String!){serviceInstance(serviceId:$s,environmentId:$e){latestDeployment{id status} activeDeployments{id status}}}`;
@@ -17,13 +21,22 @@ function oneDeployment(raw: unknown) {
   if (!parsed.success || parsed.data.serviceInstance.latestDeployment.id !== parsed.data.serviceInstance.activeDeployments[0].id) throw new ApiError("Le service consommateur du proxy doit avoir un seul déploiement stable pour vérifier son réseau.", 422);
   return parsed.data.serviceInstance.latestDeployment.id;
 }
-export function qualifySocksHealth(target: UpdateTarget, deploymentId: string, variables: Record<string, string>, domain: string, proxyPort: number): SocksHealthPlan | null {
-  if (!variables.PI_PROXY_URL) return null;
-  let proxy: URL; try { proxy = new URL(variables.PI_PROXY_URL); } catch { throw new ApiError("La configuration du consommateur SOCKS n’est pas vérifiable.", 422); }
+export function qualifySocksHealth(variables: Record<string, string>, domain: string, proxyPort: number): SocksEndpoint | null {
+  const profile = variables.VIGIE_SOCKS_HEALTH;
+  if (profile === undefined) return null;
+  let raw: unknown;
+  if (profile.length <= 1024) {
+    try { raw = JSON.parse(profile); } catch { /* Invalid configuration is refused below. */ }
+  }
+  const parsed = socksProfile.safeParse(raw);
+  if (!parsed.success) throw new ApiError("Configuration VIGIE_SOCKS_HEALTH invalide sur le consommateur SOCKS.", 422);
+  const settings = parsed.data;
+  let proxy: URL; try { proxy = new URL(variables[settings.proxyUrlVariable]); } catch { throw new ApiError("La configuration du consommateur SOCKS n’est pas vérifiable.", 422); }
   if (proxy.hostname !== domain) return null;
-  const port = Number(variables.PI_WEBHOOK_PORT || "80");
-  if (!["socks5:", "socks:"].includes(proxy.protocol) || proxy.username || proxy.password || Number(proxy.port || "1080") !== proxyPort || !tailnetIPv4(variables.PI_IP || "") || !Number.isInteger(port) || port < 1 || port > 65535) throw new ApiError("Le témoin SOCKS exige un proxy interne et le point HTTP de santé d’un pair Tailscale déjà configuré.", 422);
-  return { target, deploymentId, proxyHost: domain, proxyPort, peer: variables.PI_IP, port };
+  const peer = variables[settings.peerVariable];
+  const port = settings.portVariable ? Number(variables[settings.portVariable] || "80") : 80;
+  if (!["socks5:", "socks:"].includes(proxy.protocol) || proxy.username || proxy.password || Number(proxy.port || "1080") !== proxyPort || !tailnetIPv4(peer || "") || !Number.isInteger(port) || port < 1 || port > 65535) throw new ApiError("Le témoin SOCKS exige un proxy interne et le point HTTP de santé d’un pair Tailscale déjà configuré.", 422);
+  return { proxyHost: domain, proxyPort, peer, port, settings, profile };
 }
 export async function prepareSocksHealth(image: UpdateTarget, projectId: string, variables: Record<string, string>, proxyPort: number, dependencies = { targets: updateTargets, request: railwayUpdateRequest }): Promise<SocksHealthPlan[]> {
   const domain = variables.RAILWAY_PRIVATE_DOMAIN;
@@ -33,22 +46,25 @@ export async function prepareSocksHealth(image: UpdateTarget, projectId: string,
   for (const target of consumers) {
     const raw = await dependencies.request(target, variablesQuery, { p: projectId, ...ids(target) });
     const values = z.record(z.string(), z.string()).parse(raw.variables);
-    if (!values.PI_PROXY_URL) continue;
+    const endpoint = qualifySocksHealth(values, domain, proxyPort);
+    if (!endpoint) continue;
     const deploymentId = oneDeployment(await dependencies.request(target, deploymentQuery, ids(target)));
-    const plan = qualifySocksHealth(target, deploymentId, values, domain, proxyPort);
-    if (plan) plans.push(plan);
+    plans.push({ ...endpoint, target, deploymentId });
   }
   if (!plans.length) throw new ApiError("Aucun témoin HTTP qualifié n’est configuré sur un consommateur de ce proxy. Aucune image remplacée.", 422);
   return plans;
 }
-function configuration(plan: SocksHealthPlan) { return { serviceId: plan.target.remoteId, environmentId: plan.target.environmentId, deploymentId: plan.deploymentId, proxyHost: plan.proxyHost, proxyPort: plan.proxyPort, peer: plan.peer, port: plan.port }; }
+function configuration({ target, ...endpoint }: SocksHealthPlan) {
+  return { serviceId: target.remoteId, environmentId: target.environmentId, ...endpoint };
+}
 const configurationHash = (plan: SocksHealthPlan) => createHash("sha256").update(JSON.stringify(configuration(plan))).digest("hex");
 export function socksHealthScript(plan: SocksHealthPlan, nonce: string) {
   if (!z.uuid().safeParse(nonce).success || !tailnetIPv4(plan.peer) || !/^[a-z0-9-]+\.railway\.internal$/.test(plan.proxyHost) || [plan.port, plan.proxyPort].some(port => !Number.isInteger(port) || port < 1 || port > 65535)) throw new ApiError("Paramètres du contrôle HTTP SOCKS invalides.", 422);
   return String.raw`const cfg=${JSON.stringify(configuration(plan))},nonce=${JSON.stringify(nonce)};
 const net=require('node:net'),http=require('node:http'),crypto=require('node:crypto');
-let proxy;try{proxy=new URL(process.env.PI_PROXY_URL)}catch{process.exit(2)}
-if(process.env.RAILWAY_DEPLOYMENT_ID!==cfg.deploymentId||process.env.RAILWAY_SERVICE_ID!==cfg.serviceId||process.env.RAILWAY_ENVIRONMENT_ID!==cfg.environmentId||proxy.hostname!==cfg.proxyHost||Number(proxy.port||1080)!==cfg.proxyPort||!['socks:','socks5:'].includes(proxy.protocol)||proxy.username||proxy.password||process.env.PI_IP!==cfg.peer||Number(process.env.PI_WEBHOOK_PORT||80)!==cfg.port)process.exit(2);
+let proxy;try{proxy=new URL(process.env[cfg.settings.proxyUrlVariable])}catch{process.exit(2)}
+const port=cfg.settings.portVariable?Number(process.env[cfg.settings.portVariable]||80):80;
+if(process.env.RAILWAY_DEPLOYMENT_ID!==cfg.deploymentId||process.env.RAILWAY_SERVICE_ID!==cfg.serviceId||process.env.RAILWAY_ENVIRONMENT_ID!==cfg.environmentId||process.env.VIGIE_SOCKS_HEALTH!==cfg.profile||proxy.hostname!==cfg.proxyHost||Number(proxy.port||1080)!==cfg.proxyPort||!['socks:','socks5:'].includes(proxy.protocol)||proxy.username||proxy.password||process.env[cfg.settings.peerVariable]!==cfg.peer||port!==cfg.port)process.exit(2);
 let stage=0,buffer=Buffer.alloc(0),done=false,agent;
 const socket=net.connect({host:cfg.proxyHost,port:cfg.proxyPort});
 const timer=setTimeout(()=>finish(false),8000);
@@ -61,7 +77,7 @@ if(buffer[0]!==5||buffer[1]!==0||buffer[2]!==0)return finish(false);
 const size=buffer[3]===1?10:buffer[3]===4?22:buffer[3]===3?7+buffer[4]:0;
 if(!size)return finish(false);if(buffer.length<size)return;if(buffer.length!==size)return finish(false);
 stage=2;socket.pause();socket.removeListener('data',receive);agent=new http.Agent({keepAlive:false});agent.createConnection=()=>socket;
-const request=http.request({hostname:cfg.peer,port:cfg.port,path:'/health',method:'GET',agent,headers:{Connection:'close',Accept:'application/json'}},response=>{let bytes=0,chunks=[];response.on('error',()=>finish(false));response.on('data',chunk=>{bytes+=chunk.length;if(bytes>65536){response.destroy();finish(false)}else chunks.push(chunk)});response.on('end',()=>{if(response.statusCode!==200)return finish(false);try{const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));finish(!!body&&typeof body==='object'&&!Array.isArray(body)&&Object.keys(body).length>0&&!['unhealthy','error','failed'].includes(body.status))}catch{finish(false)}})});
+const request=http.request({hostname:cfg.peer,port:cfg.port,path:cfg.settings.path,method:'GET',agent,headers:{Connection:'close',Accept:'application/json'}},response=>{let bytes=0,chunks=[];response.on('error',()=>finish(false));response.on('data',chunk=>{bytes+=chunk.length;if(bytes>65536){response.destroy();finish(false)}else chunks.push(chunk)});response.on('end',()=>{if(response.statusCode!==200)return finish(false);try{const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));finish(!!body&&typeof body==='object'&&!Array.isArray(body)&&Object.keys(body).length>0&&!['unhealthy','error','failed'].includes(body.status))}catch{finish(false)}})});
 request.on('error',()=>finish(false));request.end();socket.resume();}
 socket.on('data',receive);socket.on('end',()=>{if(stage<2)finish(false)});`;
 }

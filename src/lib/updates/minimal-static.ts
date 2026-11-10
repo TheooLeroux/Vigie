@@ -9,6 +9,8 @@ import { deploymentEvidence } from "../connectors/railway-evidence";
 import { normalizeImageDigest } from "../image-reference";
 import { readRailwayProbe, readRailwayStaticImage } from "./docker-node";
 import { githubRequest, githubUpdateToken, repositoryAllowed } from "./github";
+import { minimalStaticProfile, publicBuildName, type MinimalStaticProfile } from "./minimal-static-profile";
+import { officialNodeImageDigest } from "./node-catalog-state";
 import { deployRailwayArchive, railwayUpdateRequest, readRailwayInstance, waitForDeployment } from "./providers";
 import { railpackCaddyVersion } from "./railpack-caddy";
 import { runCommand } from "./process";
@@ -28,9 +30,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY . .
-ARG VITE_API_URL
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
 RUN npm test && npm run build
 FROM scratch
 COPY --from=caddy /caddy /caddy
@@ -43,9 +42,10 @@ ENTRYPOINT ["/caddy","run","--config","/Caddyfile","--adapter","caddyfile"]
 const nodeStage = /^FROM node:(\d+\.\d+\.\d+)-bookworm-slim@(sha256:[0-9a-f]{64}) AS frontend$/m;
 const caddyAssetLine = /^ADD --checksum=(sha256:[0-9a-f]{64}) https:\/\/github\.com\/caddyserver\/caddy\/releases\/download\/v(\d+\.\d+\.\d+)\/caddy_\2_linux_amd64\.tar\.gz \/caddy\.tgz$/m;
 type CaddyAsset = { version: string; digest: string };
-
-export function minimalStaticRecipe(node: string, digest: string, caddy?: CaddyAsset) {
-  const recipe = minimalStaticDockerfile.replace(nodeStage, `FROM node:${node}-bookworm-slim@${digest} AS frontend`);
+const buildArgLines = /^ARG [A-Z_0-9]+\n/gm;
+export function minimalStaticRecipe(node: string, digest: string, caddy?: CaddyAsset, buildArguments: string[] = []) {
+  const recipe = minimalStaticDockerfile.replace(nodeStage, `FROM node:${node}-bookworm-slim@${digest} AS frontend`)
+    .replace(/^RUN npm test && npm run build$/m, command => buildArguments.map(name => `ARG ${name}\n`).join("") + command);
   if (!caddy) return recipe;
   return recipe.replace(/^ADD --checksum=[\s\S]*?(?=^FROM node:)/m,
     `ADD --checksum=${caddy.digest} https://github.com/caddyserver/caddy/releases/download/v${caddy.version}/caddy_${caddy.version}_linux_amd64.tar.gz /caddy.tgz\nRUN tar -xzf /caddy.tgz -C / caddy && chmod 0755 /caddy\n`);
@@ -54,7 +54,9 @@ export function minimalStaticRecipe(node: string, digest: string, caddy?: CaddyA
 export function minimalStaticPins(source: string) {
   const node = source.match(nodeStage), asset = source.match(caddyAssetLine);
   const caddy = asset ? { version: asset[2], digest: asset[1] } : undefined;
-  if (node && source === minimalStaticRecipe(node[1], node[2], caddy)) return { node: node[1], digest: node[2], caddy };
+  const buildArguments = [...source.matchAll(buildArgLines)].map(([line]) => line.trim().slice(4));
+  if (node && buildArguments.length <= 16 && new Set(buildArguments).size === buildArguments.length && buildArguments.every(name => publicBuildName.test(name)) &&
+    source === minimalStaticRecipe(node[1], node[2], caddy, buildArguments)) return { node: node[1], digest: node[2], caddy, buildArguments };
 }
 
 export function minimalStaticBuildNode(source: string) {
@@ -69,7 +71,7 @@ export function minimalStaticCaddyCandidate(source: string, release: { version: 
   const newer = pins.caddy ? gt(release.version, pins.caddy.version) : gte(release.version, "2.11.9");
   if (!newer || release.version.split(".")[0] !== "2") return;
   const caddy = { version: release.version, digest: release.linuxAmd64Digest };
-  return { ...caddy, recipe: minimalStaticRecipe(pins.node, pins.digest, caddy) };
+  return { ...caddy, recipe: minimalStaticRecipe(pins.node, pins.digest, caddy, pins.buildArguments) };
 }
 
 const bundleDockerfile = `FROM scratch
@@ -137,59 +139,77 @@ async function hashFile(path: string, artifact = "Caddy") {
   return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
-function publicBuildVariables(vars: Record<string, string>) {
-  const result: Record<string, string> = {};
-  if (vars.VITE_API_URL) {
-    if (vars.VITE_API_URL !== "/api") throw new ApiError("URL API de construction à qualifier pour l’image minimale.", 422);
-    result.VITE_API_URL = vars.VITE_API_URL;
+export function staticBuildVariables(profile: MinimalStaticProfile, variables: Record<string, string>, declared?: string[]) {
+  const entries = Object.entries(profile.publicBuild);
+  if (entries.some(([name, value]) => variables[name] !== value || declared && !declared.includes(name)) ||
+    declared?.some(name => variables[name] !== undefined && !Object.hasOwn(profile.publicBuild, name))) {
+    throw new ApiError("Les valeurs publiques déclarées ne correspondent pas au build Railway ou à sa recette.", 422);
   }
-  if (vars.VITE_SUPABASE_URL || vars.VITE_SUPABASE_ANON_KEY) {
-    if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(vars.VITE_SUPABASE_URL || "")) throw new ApiError("URL publique Supabase non qualifiée.", 422);
-    const key = vars.VITE_SUPABASE_ANON_KEY || "";
-    let role: unknown;
-    if (/^eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$/.test(key)) {
-      try { role = JSON.parse(Buffer.from(key.split(".")[1], "base64url").toString()).role; } catch { /* Denied below. */ }
-    }
-    if (role !== "anon" && !/^sb_publishable_[a-zA-Z0-9_-]{10,250}$/.test(key)) throw new ApiError("Seule une clé publique Supabase peut entrer dans le build du frontend.", 422);
-    result.VITE_SUPABASE_URL = vars.VITE_SUPABASE_URL;
-    result.VITE_SUPABASE_ANON_KEY = key;
-  }
-  return result;
+  return profile.publicBuild;
 }
 
-const witnessProgram = String.raw`
+export const minimalStaticProbeProgram = String.raw`
 const http=require("node:http"), crypto=require("node:crypto");
-const [base,origin,nonce]=process.argv.slice(1);
-async function probe() {
- const transport=base.startsWith("https:")?require("node:https"):http;
- const options={redirect:"error",signal:AbortSignal.timeout(9000)};
- const [health,home,api]=await Promise.all([fetch(base+"/health",options),fetch(base+"/",options),fetch(base+"/api/auth/me",{...options,headers:{Origin:origin}})]);
- const [html,auth]=await Promise.all([home.text(),api.json()]);
- if(health.status!==200||home.status!==200||!home.headers.get("content-type")?.includes("text/html")||!html.includes("/assets/")||api.status!==401||auth.success!==false||typeof auth.error!=="string")throw Error("HTTP");
+const [base,origin,nonce,encoded]=process.argv.slice(1);
+const {httpChecks,websockets}=JSON.parse(Buffer.from(encoded,"base64url").toString());
+const transport=base.startsWith("https:")?require("node:https"):http;
+async function httpProbe({path,status,contentType,contains}) {
+ const response=await fetch(base+path,{redirect:"error",signal:AbortSignal.timeout(9000),headers:{Origin:origin}});
+ try {
+   if(response.status!==status||contentType&&response.headers.get("content-type")?.split(";")[0].trim().toLowerCase()!==contentType)throw Error("Contrôle HTTP "+path+" (statut "+response.status+")");
+   if(contains){
+     if(!response.body)throw Error("Corps HTTP absent "+path);
+     const reader=response.body.getReader();
+     let bytes=0, chunks=[];
+     try {
+       for(;;){
+         const {done,value}=await reader.read();
+         if(done)break;
+         bytes+=value.length;
+         if(bytes>262144)throw Error("Corps HTTP trop grand "+path);
+         chunks.push(value);
+       }
+       if(!Buffer.concat(chunks).toString().includes(contains))throw Error("Contenu HTTP inattendu "+path);
+     } finally {reader.releaseLock();}
+   }
+ } finally {await response.body?.cancel();}
+}
+function websocketProbe(path) {
  const key=crypto.randomBytes(16).toString("base64"), accept=crypto.createHash("sha1").update(key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
- const upgrade=await new Promise((resolve,reject)=>{
-   const req=transport.get(base+"/ws/terminal",{headers:{Connection:"Upgrade",Upgrade:"websocket","Sec-WebSocket-Version":"13","Sec-WebSocket-Key":key,Origin:origin},timeout:9000});
+ return new Promise((resolve,reject)=>{
+   const req=transport.get(base+path,{headers:{Connection:"Upgrade",Upgrade:"websocket","Sec-WebSocket-Version":"13","Sec-WebSocket-Key":key,Origin:origin},signal:AbortSignal.timeout(9000)});
    req.on("upgrade",(res,socket)=>{socket.destroy();if(res.statusCode===101&&res.headers["sec-websocket-accept"]===accept)resolve(101);else reject(Error("Upgrade"))});
-   req.on("response",res=>{res.resume();reject(Error("WebSocket "+res.statusCode))});
-   req.on("timeout",()=>req.destroy(Error("WebSocket timeout")));
+   req.on("response",res=>{res.destroy();reject(Error("WebSocket "+path+" (statut "+res.statusCode+")"))});
    req.on("error",reject);
  });
- console.log(JSON.stringify({nonce, deployment:process.env.RAILWAY_DEPLOYMENT_ID, service:process.env.RAILWAY_SERVICE_ID, environment:process.env.RAILWAY_ENVIRONMENT_ID, health:health.status, site:home.status, api:api.status, websocket:upgrade}));
 }
-probe().catch(e=>{console.error(e.message);process.exitCode=1});
+Promise.all([...httpChecks.map(httpProbe),...websockets.map(websocketProbe)]).then(()=>{
+ console.log(JSON.stringify({nonce,deployment:process.env.RAILWAY_DEPLOYMENT_ID,service:process.env.RAILWAY_SERVICE_ID,environment:process.env.RAILWAY_ENVIRONMENT_ID,http:httpChecks.length,websocket:websockets.length}));
+}).catch(e=>{console.error(e.message);process.exitCode=1});
 `;
 
-export async function checkPublicMinimalStatic(target: UpdateTarget) {
+export function minimalStaticProbeConfig(profile: MinimalStaticProfile) {
+  return Buffer.from(JSON.stringify({
+    httpChecks: [{ path: "/", status: 200, contentType: "text/html" }, ...profile.http],
+    websockets: profile.websocket,
+  })).toString("base64url");
+}
+
+function probeProof(nonce: string, profile: MinimalStaticProfile) {
+  return z.object({ nonce: z.literal(nonce), http: z.literal(1 + profile.http.length), websocket: z.literal(profile.websocket.length) });
+}
+
+export async function checkPublicMinimalStatic(target: UpdateTarget, profile = minimalStaticProfile(target)) {
   const origin = new URL(target.url!).origin;
   if (origin !== target.url?.replace(/\/$/, "") || !/^https:\/\/[a-z0-9-]+\.up\.railway\.app$/.test(origin)) throw new ApiError("Domaine public Railway non qualifié.", 422);
   const nonce = randomUUID();
-  const output = await runCommand(process.execPath, ["-e", witnessProgram, origin, origin, nonce], {
+  const output = await runCommand(process.execPath, ["-e", minimalStaticProbeProgram, origin, origin, nonce, minimalStaticProbeConfig(profile)], {
     env: { NODE_ENV: "production", PATH: process.env.PATH }, timeout: 30_000,
   });
-  return z.object({ nonce: z.literal(nonce), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output));
+  return probeProof(nonce, profile).parse(JSON.parse(output));
 }
 
-export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log: (message: string) => void | Promise<void> = console.log, change?: { previousRecipe: string; recipe: string }) {
+export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log: (message: string) => void | Promise<void> = console.log, change?: { previousRecipe: string; recipe: string }, profile = minimalStaticProfile(target)) {
   sha.parse(commit);
   if (target.provider !== "railway" || target.mode !== "git" || !target.repository || !repositoryAllowed(target.repository) || !target.branch || !target.url ||
     !target.root || target.projectId !== witness.projectId || target.connectionId !== witness.connectionId || target.environmentId !== witness.environmentId ||
@@ -208,9 +228,12 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
   const head = await githubRequest(`/repos/${target.repository}/git/ref/heads/${encodeURIComponent(target.branch)}`, token);
   if (head.object.sha !== commit) throw new ApiError("Le commit du frontend n’est plus la tête de la branche.", 409);
   const { variables } = await railwayUpdateRequest(target, "query PreviewVariables($projectId:String!,$serviceId:String!,$environmentId:String!){variables(projectId:$projectId,serviceId:$serviceId,environmentId:$environmentId)}", { projectId, serviceId: target.remoteId, environmentId });
-  const buildVars = publicBuildVariables(variables);
-  const upstream = variables.BACKEND_INTERNAL_URL;
-  if (upstream && !/^http:\/\/[a-z0-9-]+\.railway\.internal:\d{2,5}\/?$/.test(upstream)) throw new ApiError("Adresse interne du backend à qualifier.", 422);
+  const upstreams = Object.fromEntries(profile.upstreamVariables.map(name => {
+    const upstream = variables[name];
+    const match = upstream?.match(/^http:\/\/[a-z0-9-]+\.railway\.internal:(\d{1,5})\/?$/);
+    if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535) throw new ApiError("Adresse interne Railway à qualifier pour " + name + ".", 422);
+    return [name, upstream];
+  }));
   const dir = await mkdtemp(join(tmpdir(), "vigie-minimal-"));
   const image = `vigie-validation:${randomUUID()}`;
   const name = `vigie-minimal-${randomUUID().slice(0, 12)}`;
@@ -224,13 +247,17 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     const pins = change && minimalStaticPins(change.recipe);
     if (change && (!pins || await readFile(join(sources, path), "utf8") !== change.previousRecipe)) throw new ApiError("La recette statique attendue a changé.", 409);
     const manifest = JSON.parse(await readFile(join(sources, target.root, "package.json"), "utf8"));
-    if (manifest.engines?.node !== (pins ? pins.node : "26.13.0") || !manifest.devDependencies?.vite || !manifest.scripts?.test || !manifest.scripts?.build || manifest.workspaces) throw new ApiError("Le profil de construction du frontend ne correspond pas au parcours validé.", 422);
+    const node = manifest.engines?.node;
+    if (typeof node !== "string" || !/^\d+\.\d+\.\d+$/.test(node) || !valid(node) || pins && node !== pins.node ||
+      !manifest.devDependencies?.vite || !manifest.scripts?.test || !manifest.scripts?.build || manifest.workspaces) throw new ApiError("Le profil de construction du frontend ne correspond pas au parcours validé.", 422);
+    const buildVars = staticBuildVariables(profile, variables, pins ? pins.buildArguments : undefined);
+    const recipe = change?.recipe || minimalStaticRecipe(node, await officialNodeImageDigest("node:" + node + "-bookworm-slim"), undefined, Object.keys(buildVars).sort());
     for (const file of names.filter(file => file.startsWith(prefix))) {
       const output = join(context, file.slice(prefix.length));
       await mkdir(dirname(output), { recursive: true });
       await cp(join(sources, file), output);
     }
-    await writeFile(join(context, "Dockerfile"), change?.recipe || minimalStaticDockerfile);
+    await writeFile(join(context, "Dockerfile"), recipe);
     const env = { NODE_ENV: "production" as const, PATH: process.env.PATH, HOME: dir, DOCKER_CONFIG: join(dir, ".docker"), ...buildVars };
     await mkdir(env.DOCKER_CONFIG);
     const candidate = join(dir, "candidate"), cache = join(dir, "trivy-cache");
@@ -263,7 +290,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     await cp(join(bundle, "caddy"), join(candidate, "caddy"));
     await scanBinary(candidate, cache);
     await writeFile(join(bundle, "Dockerfile"), bundleDockerfile);
-    const create = await railwayUpdateRequest(target, "mutation StaticPreview($input:ServiceCreateInput!){serviceCreate(input:$input){id name projectId}}", { input: { projectId, environmentId, name, variables: { PORT: "8080", ...(upstream ? { BACKEND_INTERNAL_URL: upstream } : {}) } } });
+    const create = await railwayUpdateRequest(target, "mutation StaticPreview($input:ServiceCreateInput!){serviceCreate(input:$input){id name projectId}}", { input: { projectId, environmentId, name, variables: { PORT: "8080", ...upstreams } } });
     const created = z.object({ id: uuid, name: z.literal(name), projectId: z.literal(projectId) }).parse(create.serviceCreate);
     preview = { ...target, remoteId: created.id, id: created.id, name, mode: "archive", root: "", repository: null, branch: null };
     await log(`Service de test Railway créé (${name}).`);
@@ -290,11 +317,11 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     await log(`Scan de l’image Railway ${digest} terminé : zéro signalement sur ${instances.length} instance(s).`);
     const backendId = uuid.parse(backend[0].id);
     const routes = await readRailwayProbe(witness, backendId, {
-      command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + witnessProgram.replace(/'/g, "'\\''") + `' 'http://${name}.railway.internal:8080' '${origin}' '${nonce}'`,
-      parse: (output, nonce) => z.object({ nonce: z.literal(nonce), deployment: z.literal(backendId), service: z.literal(witness.remoteId), environment: z.literal(environmentId), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output)),
+      command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + minimalStaticProbeProgram.replace(/'/g, "'\\''") + `' 'http://${name}.railway.internal:8080' '${origin}' '${nonce}' '${minimalStaticProbeConfig(profile)}'`,
+      parse: (output, nonce) => probeProof(nonce, profile).extend({ deployment: z.literal(backendId), service: z.literal(witness.remoteId), environment: z.literal(environmentId) }).parse(JSON.parse(output)),
     });
     if (await active() !== digest) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
-    return { commit, caddyCommit, binaryHash, previousDeploymentId: current[0].id as string, witnessDeploymentId: backendId, deploymentId, digest, scannedInstances: instances.length, witnesses: routes.length, imageFindings: 0, health: 200, site: 200, api: 401, websocket: 101 };
+    return { commit, caddyCommit, recipe, binaryHash, previousDeploymentId: current[0].id as string, witnessDeploymentId: backendId, deploymentId, digest, scannedInstances: instances.length, witnesses: routes.length, imageFindings: 0, http: 1 + profile.http.length, websocket: profile.websocket.length };
   } finally {
     try {
       if (preview) {

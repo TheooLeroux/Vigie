@@ -26,7 +26,7 @@ async function main() {
     console.log(JSON.stringify({ checks: result.checks, warnings: result.warnings }));
     return;
   }
-  const result = await testMinimalStaticRailway(front[0], back[0], commit, readSources);
+  const { recipe: _recipe, ...result } = await testMinimalStaticRailway(front[0], back[0], commit, readSources);
   console.log(JSON.stringify(result));
 }
 

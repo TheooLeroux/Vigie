@@ -48,6 +48,7 @@ import { cachedRailpackInventory } from "./railpack-image-control";
 import { scanRailpackImage } from "./railpack-image-scan";
 import { activeMinimalStaticImage, minimalStaticWitnessId, migrateMinimalStatic } from "./minimal-static-migration";
 import { checkPublicMinimalStatic, minimalStaticBuildNode, minimalStaticPins, minimalStaticRecipe, scanMinimalStaticImage } from "./minimal-static";
+import { minimalStaticProfile } from "./minimal-static-profile";
 import { officialNodeImageDigest } from "./node-catalog-state";
 import { saveMinimalStaticScan } from "./railpack-image-control";
 import { deploymentEvidence } from "../connectors/railway-evidence";
@@ -126,7 +127,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
   const latestLts = await latestNode();
   const runtimeChecks: (UpdateCheck | null)[] = [];
   const staticFrameworks = new Map<string, string>();
-  const minimalStaticTargets = new Set<string>();
+  const minimalStaticTargets = new Map<string, ReturnType<typeof minimalStaticProfile>>();
   const caddyDeployments = new Map<string, { current: string; commit: string | null; imageDigest: string | null }>();
   for (const [index, target] of targets.entries()) {
     results[index].previousDeploymentId = await providerPreflight(target, latestLts, undefined, evidence => {
@@ -152,7 +153,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const file = await githubRequest(`/repos/${target.repository}/contents/${path}?ref=${commit}`, githubUpdateToken(target.repository)).catch(() => null);
         if (file?.type === "file" && file.encoding === "base64" && typeof file.content === "string" && minimalStaticBuildNode(Buffer.from(file.content, "base64").toString("utf8"))) {
           await activeMinimalStaticImage(target, active.id, commit);
-          minimalStaticTargets.add(target.id);
+          minimalStaticTargets.set(target.id, minimalStaticProfile(target));
         }
       }
     }
@@ -273,7 +274,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
     }
     const catalogs = nodeCatalogState(fetch, Date.parse(run.purpose === "assessment" ? run.startedAt || run.createdAt : run.createdAt));
     const policyHash = await nodePolicyHash();
-    const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets), policyHash, nodeVersion: version };
+    const key = { sourceHash: nodeSourceHash(before), targetsHash: nodeTargetsHash(targets, minimalStaticTargets), policyHash, nodeVersion: version };
     await progress("checking", "Recherche d’une validation récente de la configuration actuelle.");
     const previous = run.purpose === "assessment" || caddyCandidates.size ? [] : await nodeRunsWithReceipts(run.projectId, [key.sourceHash, key.targetsHash, key.policyHash]);
     let receipt = previous.flatMap(prior => (prior.nodeReceipts || []).flatMap(raw => {
@@ -551,7 +552,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
       const pins = minimalStaticPins(await readFile(join(sourceFolder, path), "utf8"));
       if (!pins) throw new ApiError("Recette minimale inconnue après les tests.", 422);
       if (pins.node === version) continue;
-      const recipe = minimalStaticRecipe(version, await officialNodeImageDigest(`node:${version}-bookworm-slim`), pins.caddy);
+      const recipe = minimalStaticRecipe(version, await officialNodeImageDigest(`node:${version}-bookworm-slim`), pins.caddy, pins.buildArguments);
       await writeFile(join(sourceFolder, path), recipe);
       prepared.allowed.add(path);
       staticRecipes.set(path, recipe);
@@ -604,7 +605,7 @@ async function nodeGroup(run: UpdateRun, targets: UpdateTarget[], results: Updat
         const image = await activeMinimalStaticImage(target, deploymentId, commit);
         const scan = await scanMinimalStaticImage(target, deploymentId);
         const check = securityCheck("Trivy", "after", "Image statique minimale sur Railway", scan.findings);
-        await checkPublicMinimalStatic(target);
+        await checkPublicMinimalStatic(target, minimalStaticTargets.get(target.id));
         const current = await activeMinimalStaticImage(target, deploymentId, commit);
         if (current.imageDigest !== image.imageDigest) throw new ApiError("L’image active a changé pendant les contrôles.", 409);
         await saveMinimalStaticScan(image, check);
