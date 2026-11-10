@@ -54,7 +54,10 @@ export async function migrateMinimalStatic(target: UpdateTarget, witness: Update
   await checkPublicMinimalStatic(target);
   await assertSourceImpact([target], [path]);
   await progress("updating", `${target.name} : ${removable.length} signalement(s) Debian sans correctif renseigné ; qualification d’une image statique minimale.`);
-  const candidate = await testMinimalStaticRailway(target, witness, commit, getSources);
+  const candidate = await testMinimalStaticRailway(target, witness, commit, getSources, async message => {
+    console.log(message);
+    await progress("updating", message);
+  });
   result.checks ||= [];
   result.checks.push({ ...securityCheck("Trivy", "candidate", "Image statique minimale", []), message: "Image candidate qualifiée sur Railway. Site, API et ouverture WebSocket vérifiés." });
 

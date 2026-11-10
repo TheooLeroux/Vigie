@@ -74,9 +74,28 @@ export async function readRailwayProbe<T extends object>(target: UpdateTarget, d
 export async function readRailwayStaticImage(target: UpdateTarget, deploymentId: string, inspect: (binary: string, listing: string) => Promise<void>) {
   return withRailwayInstances(target, deploymentId, 8, async (id, args, options) => {
     const binary = join(options.cwd, id + "-caddy");
-    const sftp = (input: string) => runCommand("sftp", ["-b", "-", ...args, `${id}@ssh.railway.com`], { ...options, timeout: 60_000, input });
-    const listing = await sftp("@ls -1a /\n");
-    await sftp(`@get /caddy ${id}-caddy\n`);
+    const unavailable = "Connexion SFTP Railway indisponible.";
+    async function sftp(input: string, operation: string) {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await runCommand("sftp", ["-b", "-", ...args, `${id}@ssh.railway.com`], {
+            ...options, timeout: 30_000, input,
+            errorPatterns: [
+              { pattern: /HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i, message: "L’identité de l’hôte SFTP Railway ne correspond plus à la première connexion." },
+              { pattern: /No such file|not found|remote open.*Permission denied/i, message: `SFTP Railway : ${operation} refusée dans le conteneur.` },
+              { pattern: /Permission denied \(publickey\)|Connection (?:closed|reset|timed out)|Connection refused|subsystem request failed|Broken pipe|kex_exchange_identification/i, message: unavailable },
+            ],
+          });
+        } catch (error) {
+          const retryable = error instanceof ApiError && (error.status === 504 || error.message === unavailable || /^L’étape sftp a échoué\./.test(error.message));
+          if (!retryable) throw error;
+          if (attempt === 3) throw new ApiError(`${unavailable} Échec de l’opération « ${operation} » après quatre tentatives.`, 502);
+          await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 5_000));
+        }
+      }
+    }
+    const listing = await sftp("@ls -1a /\n", "inventaire");
+    await sftp(`@get /caddy ${id}-caddy\n`, "lecture du binaire");
     await inspect(binary, listing);
     return {};
   });

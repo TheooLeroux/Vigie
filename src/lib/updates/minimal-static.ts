@@ -160,7 +160,7 @@ export async function checkPublicMinimalStatic(target: UpdateTarget) {
   return z.object({ nonce: z.literal(nonce), health: z.literal(200), site: z.literal(200), api: z.literal(401), websocket: z.literal(101) }).parse(JSON.parse(output));
 }
 
-export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log = console.log) {
+export async function testMinimalStaticRailway(target: UpdateTarget, witness: UpdateTarget, commit: string, getSources: (repository: string, commit: string, archive: string, folder: string) => Promise<string[]>, log: (message: string) => void | Promise<void> = console.log) {
   sha.parse(commit);
   if (target.provider !== "railway" || target.mode !== "git" || !target.repository || !repositoryAllowed(target.repository) || !target.branch || !target.url ||
     !target.root || target.projectId !== witness.projectId || target.connectionId !== witness.connectionId || target.environmentId !== witness.environmentId ||
@@ -201,7 +201,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     await writeFile(join(context, "Dockerfile"), minimalStaticDockerfile);
     const env = { NODE_ENV: "production" as const, PATH: process.env.PATH, HOME: dir, DOCKER_CONFIG: join(dir, ".docker"), ...buildVars };
     await mkdir(env.DOCKER_CONFIG);
-    log("Construction isolée de la candidate et exécution des tests frontend.");
+    await log("Construction isolée de la candidate et exécution des tests frontend.");
     await runCommand("docker", ["build", "--platform=linux/amd64", "--tag", image, ...Object.keys(buildVars).flatMap(key => ["--build-arg", key]), context], { env, timeout: 900_000 });
     container = (await runCommand("docker", ["create", image], { env })).trim();
     if (!/^[a-f0-9]{64}$/.test(container)) throw new ApiError("Conteneur candidat non identifiable.", 422);
@@ -218,10 +218,10 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
     const create = await railwayUpdateRequest(target, "mutation StaticPreview($input:ServiceCreateInput!){serviceCreate(input:$input){id name projectId}}", { input: { projectId, environmentId, name, variables: { PORT: "8080", ...(upstream ? { BACKEND_INTERNAL_URL: upstream } : {}) } } });
     const created = z.object({ id: uuid, name: z.literal(name), projectId: z.literal(projectId) }).parse(create.serviceCreate);
     preview = { ...target, remoteId: created.id, id: created.id, name, mode: "archive", root: "", repository: null, branch: null };
-    log(`Service de test Railway créé (${name}).`);
+    await log(`Service de test Railway créé (${name}).`);
     // Railway detects the Dockerfile at the root of an uploaded bundle.
     const deploymentId = await deployRailwayArchive(preview, bundle, randomUUID());
-    log(`Image minimale envoyée à Railway (${deploymentId}).`);
+    await log(`Image minimale envoyée à Railway (${deploymentId}).`);
     await waitForDeployment(preview, { deploymentId, runId: deploymentId }, async () => {});
     const active = async () => {
       const instance = (await readRailwayInstance(preview!)).serviceInstance;
@@ -239,7 +239,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
       await cp(binary, join(deployed, "caddy"));
       await scanBinary(deployed, cache);
     });
-    log(`Scan de l’image Railway ${digest} terminé : zéro signalement sur ${instances.length} instance(s).`);
+    await log(`Scan de l’image Railway ${digest} terminé : zéro signalement sur ${instances.length} instance(s).`);
     const backendId = uuid.parse(backend[0].id);
     const routes = await readRailwayProbe(witness, backendId, {
       command: nonce => "env -u NODE_OPTIONS -u NODE_PATH node -e '" + witnessProgram.replace(/'/g, "'\\''") + `' 'http://${name}.railway.internal:8080' '${origin}' '${nonce}'`,
@@ -252,7 +252,7 @@ export async function testMinimalStaticRailway(target: UpdateTarget, witness: Up
       if (preview) {
         const removed = await railwayUpdateRequest(preview, "mutation StaticPreviewCleanup($id:String!){serviceDelete(id:$id)}", { id: preview.remoteId });
         if (removed.serviceDelete !== true) throw new ApiError(`Suppression du service de test à vérifier (${name}).`, 502);
-        log(`Service de test Railway supprimé (${name}).`);
+        await log(`Service de test Railway supprimé (${name}).`);
       }
     } finally {
       if (container) await runCommand("docker", ["rm", "--force", container]).catch(() => {});
