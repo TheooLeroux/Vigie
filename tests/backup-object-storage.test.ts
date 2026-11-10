@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { GET } from "../src/app/api/[...path]/route";
-import { cleanupAbandonedBackupUploads, runBackup } from "../src/lib/backups";
+import { cleanupAbandonedBackupUploads, runBackup, verifyBackupRoundtrip } from "../src/lib/backups";
 import { sqliteDatabase } from "../src/lib/db-sqlite";
 
 type Stored = { body: Buffer; hash: string; disposition: string };
@@ -106,6 +106,12 @@ test("Stockage objet : multipart, contrôle avant publication, téléchargement 
     const downloaded = await fetch(signed);
     assert.match(downloaded.headers.get("content-disposition")!, /site-example-test-2026-11-09\.zip/);
     assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), archive);
+
+    const fixture = Buffer.from("temporary ZIP");
+    assert.equal(await verifyBackupRoundtrip((_folder, output) => writeFile(output, fixture)), fixture.length);
+    assert.equal(objects.size, 1);
+    assert.equal(sqliteDatabase().prepare("SELECT count(*) AS count FROM backup_pending_uploads").get()?.count, 0);
+    assert.equal((await (await get(["backups"])).json())[0].backups.length, 1);
 
     corrupt = true;
     const following = new Date("2026-11-16T02:13:00Z");

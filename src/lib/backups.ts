@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -203,6 +203,53 @@ export async function cleanupAbandonedBackupUploads(now = new Date()) {
   for (const row of candidates) {
     await remote.remove(row.owner);
     await db.prepare("DELETE FROM backup_pending_uploads WHERE owner=?").run(row.owner);
+  }
+}
+
+export async function verifyBackupRoundtrip(collectVerifiedZip: (folder: string, zip: string) => Promise<void>) {
+  const { remote } = backupStores();
+  const scratch = backupDirectory("VIGIE_BACKUP_SCRATCH_DIRECTORY");
+  if (!remote || !scratch) throw new Error("La vérification R2 exige un espace de travail privé et le stockage distant.");
+  const dir = await lstat(scratch);
+  if (!dir.isDirectory() || (process.platform !== "win32" && (dir.mode & 0o077))) {
+    throw new Error("Le répertoire temporaire doit être privé.");
+  }
+  const db = backupDatabase();
+  const folder = await mkdtemp(join(scratch, ".r2-verify-"));
+  const zip = join(folder, "verification.zip");
+  const owner = randomUUID();
+  try {
+    await collectVerifiedZip(folder, zip);
+    const info = await lstat(zip);
+    if (!info.isFile() || info.size === 0) throw new Error("ZIP de vérification absent ou vide.");
+    await db.prepare("INSERT INTO backup_pending_uploads(owner,storage_id,discard_after) VALUES(?,?,?)")
+      .run(owner, remote.id, new Date(Date.now() + 2 * backupLeaseMs).toISOString());
+    try {
+      const sha256 = await remote.publish(zip, owner, info.size, "verification.zip");
+      const signed = sha256 && await remote.download({ owner, bytes: info.size, sha256 }, "verification.zip");
+      const url = signed && signed.headers.get("Location");
+      if (!url) throw new Error("Lien de téléchargement R2 indisponible.");
+      const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10 * 60_000) }).catch(() => null);
+      if (!response?.ok || !response.body) throw new Error("Téléchargement R2 de vérification en échec.");
+      const digest = createHash("sha256");
+      let bytes = 0;
+      try {
+        for await (const chunk of response.body) {
+          bytes += chunk.byteLength;
+          if (bytes > info.size) throw new Error();
+          digest.update(chunk);
+        }
+      } catch {
+        throw new Error("Lecture du ZIP R2 de vérification interrompue.");
+      }
+      if (bytes !== info.size || digest.digest("hex") !== sha256) throw new Error("Empreinte du ZIP téléchargé incohérente.");
+      return bytes;
+    } finally {
+      await remote.remove(owner);
+      await db.prepare("DELETE FROM backup_pending_uploads WHERE owner=?").run(owner);
+    }
+  } finally {
+    await rm(folder, { recursive: true, force: true });
   }
 }
 

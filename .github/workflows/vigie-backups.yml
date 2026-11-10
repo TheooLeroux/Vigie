@@ -6,6 +6,8 @@ on:
       mode:
         type: string
         required: true
+      site:
+        type: string
   workflow_dispatch:
     inputs:
       site:
@@ -86,10 +88,11 @@ jobs:
           args=()
           case "$MODE" in
             automatic) args+=(--linked) ;;
-            preflight|capture)
+            preflight|capture|verify-r2)
               [[ -n "$SITE" ]]
               args+=(--site "$SITE")
               if [[ "$MODE" == preflight ]]; then args+=(--preflight); fi
+              if [[ "$MODE" == verify-r2 ]]; then args+=(--verify-r2); fi
               ;;
             *) exit 1 ;;
           esac

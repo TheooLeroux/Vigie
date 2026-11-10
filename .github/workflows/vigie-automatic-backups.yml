@@ -6,8 +6,12 @@ on:
       mode:
         description: Lister les projets ou vérifier les collectes Railway et Vercel
         type: choice
-        options: [plan, verify]
+        options: [plan, verify, verify-r2]
         default: plan
+      site:
+        description: Site o2switch lié à vérifier sur R2
+        type: string
+        default: nes-proworking.fr
   schedule:
     - cron: '13 3 * * 1'
       timezone: Europe/Paris
@@ -42,24 +46,25 @@ jobs:
           DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
 
   o2switch:
-    if: github.ref_name == github.event.repository.default_branch && github.event_name == 'schedule' && vars.VIGIE_BACKUP_AUTOMATIC == '1'
+    if: github.ref_name == github.event.repository.default_branch && ((github.event_name == 'schedule' && vars.VIGIE_BACKUP_AUTOMATIC == '1') || inputs.mode == 'verify-r2')
     uses: ./.github/workflows/vigie-backups.yml
     with:
-      mode: automatic
+      mode: ${{ github.event_name == 'schedule' && 'automatic' || 'verify-r2' }}
+      site: ${{ inputs.site }}
     secrets: inherit
 
   railway:
     needs: plan
-    if: (github.event_name == 'schedule' || inputs.mode == 'verify') && needs.plan.outputs.railway == 'true'
+    if: (github.event_name == 'schedule' || inputs.mode == 'verify' || inputs.mode == 'verify-r2') && needs.plan.outputs.railway == 'true'
     uses: ./.github/workflows/vigie-nes-backups.yml
     with:
-      mode: ${{ github.event_name == 'schedule' && 'automatic' || 'automatic-verify' }}
+      mode: ${{ github.event_name == 'schedule' && 'automatic' || (inputs.mode == 'verify-r2' && 'verify-r2' || 'automatic-verify') }}
     secrets: inherit
 
   vercel:
     needs: plan
-    if: (github.event_name == 'schedule' || inputs.mode == 'verify') && needs.plan.outputs.vercel == 'true'
+    if: (github.event_name == 'schedule' || inputs.mode == 'verify' || inputs.mode == 'verify-r2') && needs.plan.outputs.vercel == 'true'
     uses: ./.github/workflows/vigie-self-backups.yml
     with:
-      mode: ${{ github.event_name == 'schedule' && 'automatic' || 'automatic-verify' }}
+      mode: ${{ github.event_name == 'schedule' && 'automatic' || (inputs.mode == 'verify-r2' && 'verify-r2' || 'automatic-verify') }}
     secrets: inherit

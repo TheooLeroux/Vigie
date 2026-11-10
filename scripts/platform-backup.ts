@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { runBackup } from "../src/lib/backups";
+import { runBackup, verifyBackupRoundtrip } from "../src/lib/backups";
 import { runCommand } from "../src/lib/updates/process";
 import { githubBackupToken } from "./backup-github-app";
 
@@ -113,7 +113,7 @@ async function captureDatabase(folder: string, database: Database, environment: 
 }
 
 export async function runPlatformBackup<T extends Service>(profile: Profile<T>, args: string[]) {
-  const automatic = args.length === 1 && ["--automatic", "--automatic-verify"].includes(args[0]);
+  const automatic = args.length === 1 && ["--automatic", "--automatic-verify", "--verify-r2"].includes(args[0]);
   const verify = args.length === 1 && ["--verify", "--automatic-verify"].includes(args[0]);
   const assertLinked = automatic ? profile.assertLinked : undefined;
   if (automatic && !assertLinked) throw new Error("Contrôle du lien automatique manquant.");
@@ -146,6 +146,10 @@ export async function runPlatformBackup<T extends Service>(profile: Profile<T>, 
     console.log("ZIP contrôlé pour " + profile.name + " : " + summary + ".");
   }
 
+  if (args.length === 1 && args[0] === "--verify-r2") {
+    console.log("Téléchargement R2 vérifié pour " + profile.name + " (" + await verifyBackupRoundtrip(collect) + " octets).");
+    return;
+  }
   if (verify) {
     const scratch = process.env.VIGIE_BACKUP_SCRATCH_DIRECTORY;
     if (!scratch) throw new Error("Répertoire temporaire de vérification manquant.");

@@ -55,6 +55,8 @@ jobs:
           DATABASE_URL: ${{ secrets.VIGIE_SELF_CATALOG_DATABASE_URL }}
           VIGIE_SELF_SOURCE_DATABASE_URL: ${{ secrets.VIGIE_SELF_SOURCE_DATABASE_URL }}
           VIGIE_BACKUP_INVENTORY_DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
+          VIGIE_BACKUP_GITHUB_APP_ID: ${{ vars.VIGIE_BACKUP_GITHUB_APP_ID }}
+          VIGIE_BACKUP_GITHUB_APP_KEY: ${{ secrets.VIGIE_BACKUP_GITHUB_APP_KEY }}
           VIGIE_RUNTIME_PROBE_KEY: ${{ secrets.VIGIE_RUNTIME_PROBE_KEY }}
           VIGIE_BACKUP_S3_BUCKET: ${{ secrets.VIGIE_BACKUP_S3_BUCKET }}
           VIGIE_BACKUP_S3_ENDPOINT: ${{ secrets.VIGIE_BACKUP_S3_ENDPOINT }}
@@ -76,6 +78,7 @@ jobs:
             capture) ;;
             automatic) args+=(--automatic) ;;
             automatic-verify) args+=(--automatic-verify) ;;
+            verify-r2) args+=(--verify-r2) ;;
             *) exit 1 ;;
           esac
           node --import tsx scripts/backup-vigie-vercel.ts "${args[@]}"

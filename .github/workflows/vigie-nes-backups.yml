@@ -61,6 +61,8 @@ jobs:
           VIGIE_NES_DATABASE_PASSWORD: ${{ secrets.VIGIE_NES_DATABASE_PASSWORD }}
           VIGIE_NES_RAILWAY_TOKEN: ${{ secrets.VIGIE_NES_RAILWAY_TOKEN }}
           VIGIE_BACKUP_INVENTORY_DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
+          VIGIE_BACKUP_GITHUB_APP_ID: ${{ vars.VIGIE_BACKUP_GITHUB_APP_ID }}
+          VIGIE_BACKUP_GITHUB_APP_KEY: ${{ secrets.VIGIE_BACKUP_GITHUB_APP_KEY }}
           SOURCE_KEY: ${{ secrets.VIGIE_NES_GITHUB_KEY }}
           SOURCE_HOSTS: ${{ vars.VIGIE_NES_GITHUB_KNOWN_HOSTS }}
           SUPABASE_CA: ${{ vars.VIGIE_NES_SUPABASE_CA }}
@@ -86,6 +88,7 @@ jobs:
             capture) ;;
             automatic) args+=(--automatic) ;;
             automatic-verify) args+=(--automatic-verify) ;;
+            verify-r2) args+=(--verify-r2) ;;
             *) exit 1 ;;
           esac
           node --import tsx scripts/backup-nes-railway.ts "${args[@]}"

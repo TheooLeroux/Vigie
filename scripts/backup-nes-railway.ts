@@ -9,6 +9,7 @@ const { remoteId: projectId, projectId: vigieProjectId } = nesRailway;
 const environmentId = "b3ca01d9-0295-4dab-ac62-7860ba87df95";
 const backendId = "0bcc758c-7650-4500-9388-54b5fecbe170";
 const repository = "TheooLeroux/NesAppli";
+const githubApp = Boolean(process.env.VIGIE_BACKUP_GITHUB_APP_ID || process.env.VIGIE_BACKUP_GITHUB_APP_KEY);
 const supabaseRef = "yaakyyvqcdsizchkiozq";
 const roots = ["/backend", "/docs-site", "/frontend"];
 const digest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
@@ -105,7 +106,7 @@ runPlatformBackup({
   name: "NES App",
   inventory,
   assertLinked: () => assertPlatformBackupLink(nesRailway),
-  git: { repository, transport: "ssh", directory: process.env.VIGIE_NES_GIT_DIRECTORY },
+  git: { repository, transport: githubApp ? "github-app" : "ssh", directory: githubApp ? undefined : process.env.VIGIE_NES_GIT_DIRECTORY },
   databases: [{
     file: "database.dump",
     windowsClient: 17,

@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { z } from "zod";
 import { backupHostingInstallations } from "../src/lib/hosting-discovery";
 import { hostingConnections } from "../src/lib/hosting-connections";
-import { claimBackupAccount, cleanupAbandonedBackupUploads, runBackup } from "../src/lib/backups";
+import { claimBackupAccount, cleanupAbandonedBackupUploads, runBackup, verifyBackupRoundtrip } from "../src/lib/backups";
 import { runCommand } from "../src/lib/updates/process";
 import { shellQuote } from "../src/lib/updates/wordpress";
 import { allowBackupSsh } from "./backup-o2switch-firewall";
@@ -169,15 +169,19 @@ async function inspectSite(account: SshAccount, script: string) {
 async function main(args: string[]) {
   const { values } = parseArgs({ args, options: {
     preflight: { type: "boolean" }, plan: { type: "boolean" }, site: { type: "string" }, linked: { type: "boolean" },
+    "verify-r2": { type: "boolean" },
   } });
   const { preflight, plan } = values;
+  const verifyR2 = values["verify-r2"];
+  const linked = values.linked || verifyR2;
   if (preflight && plan) throw new Error("Choisissez --preflight ou --plan.");
   const requestedDomain = values.site === undefined ? null : z.hostname().parse(values.site).toLowerCase();
+  if (verifyR2 && (!requestedDomain || preflight || plan)) throw new Error("La vérification R2 exige un seul domaine lié.");
   const [installations, connections] = await Promise.all([backupHostingInstallations(), hostingConnections()]);
   const accounts = new Map(connections.filter(account => account.configured).map(account => [account.id, account]));
   const eligible = (site: typeof installations[number]) => accounts.has(site.connectionId) && !site.missingSince &&
     !site.ignored && site.projectActive && site.suggestedEnvironment === "production" &&
-    (!values.linked || site.projectId) &&
+    (!linked || site.projectId) &&
     !["empty", "technical"].includes(site.kind);
   const targets = installations.filter(site => eligible(site) &&
     (!requestedDomain || [...site.domains, ...site.aliases].some(name => name.toLowerCase() === requestedDomain)));
@@ -236,8 +240,11 @@ async function main(args: string[]) {
           continue;
         }
         release = await claimBackupAccount(account.id);
-        if (!release) continue;
-        const saved = await runBackup({ installationId: site.id, projectId: site.projectId, domain }, async (folder, zip) => {
+        if (!release) {
+          if (verifyR2) throw new Error("Le compte est déjà utilisé par une autre sauvegarde.");
+          continue;
+        }
+        const collect = async (folder: string, zip: string) => {
           const files = join(folder, "files.tar.gz");
           const database = wordpress ? join(folder, "database.sql") : "-";
           const download = (script: string, path: string, limit: number) => transferOverSsh(ssh, script,
@@ -247,14 +254,19 @@ async function main(args: string[]) {
             files, maxCaptureBytes - sqlBytes);
           await runCommand(process.env.VIGIE_BACKUP_PYTHON || (process.platform === "win32" ? "python" : "python3"),
             ["scripts/pack-site-backup.py", files, database, zip, site.projectId || "-", domain], { timeout: 30 * 60_000 });
-          if (values.linked) {
+          if (linked) {
             const current = (await backupHostingInstallations()).find(installation => installation.id === site.id);
             if (!current || !eligible(current) || current.projectId !== site.projectId ||
                 current.connectionId !== site.connectionId || current.documentRoot !== root || current.kind !== site.kind) {
               throw new Error("Le lien de production a changé pendant la sauvegarde.");
             }
           }
-        });
+        };
+        if (verifyR2) {
+          console.log("Téléchargement R2 vérifié pour " + domain + " (" + await verifyBackupRoundtrip(collect) + " octets).");
+          continue;
+        }
+        const saved = await runBackup({ installationId: site.id, projectId: site.projectId, domain }, collect);
         if (saved) console.log("ZIP vérifié pour " + domain + ".");
       } catch (error) {
         console.error("Sauvegarde " + label + " en échec.", error instanceof Error ? error.message : "");

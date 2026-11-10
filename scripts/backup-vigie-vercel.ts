@@ -9,6 +9,7 @@ import {
 const { remoteId: vercelProjectId, projectId: vigieProjectId } = vigieVercel;
 const origin = "https://vigie-azure.vercel.app";
 const repository = "TheooLeroux/Vigie";
+const githubApp = Boolean(process.env.VIGIE_BACKUP_GITHUB_APP_ID || process.env.VIGIE_BACKUP_GITHUB_APP_KEY);
 const serviceRoot = "/";
 
 async function productionDeployment() {
@@ -71,7 +72,7 @@ runPlatformBackup({
   inventory: async () => [await productionDeployment()],
   assertLinked: () => assertPlatformBackupLink(vigieVercel),
   sameInventory: ([before], [after]) => before.deploymentId === after.deploymentId && before.commit === after.commit,
-  git: { repository, transport: "https", checkout: true },
+  git: { repository, transport: githubApp ? "github-app" : "https", checkout: !githubApp },
   databases: [{
     file: "database.dump",
     windowsClient: 18,
