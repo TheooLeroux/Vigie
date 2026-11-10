@@ -168,16 +168,18 @@ async function inspectSite(account: SshAccount, script: string) {
 
 async function main(args: string[]) {
   const { values } = parseArgs({ args, options: {
-    preflight: { type: "boolean" }, plan: { type: "boolean" }, site: { type: "string" },
+    preflight: { type: "boolean" }, plan: { type: "boolean" }, site: { type: "string" }, linked: { type: "boolean" },
   } });
   const { preflight, plan } = values;
   if (preflight && plan) throw new Error("Choisissez --preflight ou --plan.");
   const requestedDomain = values.site === undefined ? null : z.hostname().parse(values.site).toLowerCase();
   const [installations, connections] = await Promise.all([backupHostingInstallations(), hostingConnections()]);
   const accounts = new Map(connections.filter(account => account.configured).map(account => [account.id, account]));
-  const targets = installations.filter(site => accounts.has(site.connectionId) && !site.missingSince &&
+  const eligible = (site: typeof installations[number]) => accounts.has(site.connectionId) && !site.missingSince &&
     !site.ignored && site.projectActive && site.suggestedEnvironment === "production" &&
-    !["empty", "technical"].includes(site.kind) &&
+    (!values.linked || site.projectId) &&
+    !["empty", "technical"].includes(site.kind);
+  const targets = installations.filter(site => eligible(site) &&
     (!requestedDomain || [...site.domains, ...site.aliases].some(name => name.toLowerCase() === requestedDomain)));
   if (requestedDomain && targets.length !== 1) throw new Error("Le domaine demandé doit correspondre à un seul site éligible de l’inventaire.");
   if (!preflight && !plan && !requestedDomain) {
@@ -245,6 +247,13 @@ async function main(args: string[]) {
             files, maxCaptureBytes - sqlBytes);
           await runCommand(process.env.VIGIE_BACKUP_PYTHON || (process.platform === "win32" ? "python" : "python3"),
             ["scripts/pack-site-backup.py", files, database, zip, site.projectId || "-", domain], { timeout: 30 * 60_000 });
+          if (values.linked) {
+            const current = (await backupHostingInstallations()).find(installation => installation.id === site.id);
+            if (!current || !eligible(current) || current.projectId !== site.projectId ||
+                current.connectionId !== site.connectionId || current.documentRoot !== root || current.kind !== site.kind) {
+              throw new Error("Le lien de production a changé pendant la sauvegarde.");
+            }
+          }
         });
         if (saved) console.log("ZIP vérifié pour " + domain + ".");
       } catch (error) {

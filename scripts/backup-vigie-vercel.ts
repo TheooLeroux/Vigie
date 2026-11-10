@@ -1,14 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { runBackup } from "../src/lib/backups";
-import { runCommand } from "../src/lib/updates/process";
+import { runPlatformBackup } from "./platform-backup";
+import { vigieVercel } from "./platform-backup-targets";
+import { assertPlatformBackupLink } from "./check-platform-backup-link";
 import {
   neonDatabaseFingerprint, runtimeProofSchema, runtimeSignature, vercelRuntimePath, verifyRuntimeSignature,
 } from "../src/lib/updates/vercel-runtime-protocol";
 
-const vigieProjectId = "8f19124d-6da3-466b-9c44-ac385bf060a7";
-const vercelProjectId = "prj_r43pgnpxl2UeE9yrz8l8Y6OuEdXo";
+const { remoteId: vercelProjectId, projectId: vigieProjectId } = vigieVercel;
 const origin = "https://vigie-azure.vercel.app";
 const repository = "TheooLeroux/Vigie";
 const serviceRoot = "/";
@@ -67,69 +65,25 @@ function postgresEnvironment() {
   return env;
 }
 
-async function captureDatabase(folder: string) {
-  const windows = process.platform === "win32";
-  const archive = join(folder, "database.dump");
-  const output = windows
-    ? (await runCommand("wsl.exe", ["-d", "Debian", "--", "wslpath", "-a", archive.replaceAll("\\", "/")], { timeout: 10_000 })).trim()
-    : archive;
-  const postgres = (tool: string, args: string[], timeout: number, env?: NodeJS.ProcessEnv) => windows
-    ? runCommand("wsl.exe", ["-d", "Debian", "--", "/usr/lib/postgresql/18/bin/" + tool, ...args], { env, timeout })
-    : runCommand(tool, args, { env, timeout });
-  await postgres("pg_dump", ["--no-password", "--format=custom", "--lock-wait-timeout=10s", "--file=" + output],
-    20 * 60_000, postgresEnvironment());
-  const toc = await postgres("pg_restore", ["--list", output], 30_000);
-  for (const table of ["projects", "project_backups", "session", "hosting_connections", "vercel_connections"]) {
-    if (!toc.includes("TABLE DATA public " + table + " ")) throw new Error("Données attendues absentes du dump Neon.");
-  }
-  await postgres("pg_restore", ["--exit-on-error", "--file=/dev/null", output], 10 * 60_000);
-  return toc.split("\n").filter(line => line.includes(" TABLE DATA ")).length;
-}
-
-async function collect(folder: string, output: string) {
-  const deployment = await productionDeployment();
-  const commit = deployment.commit;
-  const git = (args: string[], acceptedExitCodes?: number[]) =>
-    runCommand("git", args, { timeout: 180_000, acceptedExitCodes });
-  if (!(await git(["rev-parse", "--verify", "--quiet", commit + "^{commit}"], [0, 1])).trim()) {
-    await git(["fetch", "--quiet", "--no-tags", "--depth=1", "https://github.com/" + repository + ".git", commit]);
-  }
-  const modes = await git(["ls-tree", "-r", "--format=%(objectmode)", commit]);
-  if (modes.split(/\s+/).includes("160000")) throw new Error("Un sous-module Git requiert une collecte dédiée.");
-  const lfs = await git(["grep", "-l", "-E", "^version https://git-lfs.github.com/spec/v1$", commit, "--"], [0, 1]);
-  if (lfs.trim()) throw new Error("Un fichier Git LFS requiert une collecte dédiée.");
-  const source = "app-" + commit + ".tar.gz";
-  await git(["archive", "--format=tar.gz", "--output=" + join(folder, source), commit]);
-  const tableDataEntries = await captureDatabase(folder);
-  if ((await productionDeployment()).deploymentId !== deployment.deploymentId) {
-    throw new Error("Le déploiement de production a changé pendant la sauvegarde.");
-  }
-  const manifest = {
+runPlatformBackup({
+  projectId: vigieProjectId,
+  name: "Vigie",
+  inventory: async () => [await productionDeployment()],
+  assertLinked: () => assertPlatformBackupLink(vigieVercel),
+  sameInventory: ([before], [after]) => before.deploymentId === after.deploymentId && before.commit === after.commit,
+  git: { repository, transport: "https", checkout: true },
+  databases: [{
+    file: "database.dump",
+    windowsClient: 18,
+    environment: postgresEnvironment,
+    requiredTables: ["public projects", "public project_backups", "public session", "public hosting_connections", "public vercel_connections"],
+  }],
+  manifest: (services, sources, [{ tableDataEntries }]) => ({
     format: "vigie.vercel-backup", version: 1, project: "Vigie", vercelProjectId, origin,
-    capturedAt: new Date().toISOString(), services: [deployment], sources: { [commit]: source },
+    capturedAt: new Date().toISOString(), services, sources,
     database: { provider: "neon", format: "pg_dump custom", tableDataEntries },
-  };
-  await writeFile(join(folder, "deployment.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
-  await runCommand(process.platform === "win32" ? "python" : "python3",
-    ["scripts/pack-git-backup.py", folder, output, source], { timeout: 10 * 60_000 });
-  console.log("Dump Neon validé pour " + tableDataEntries + " tables ou partitions.");
-}
-
-async function main(args: string[]) {
-  if (args.length === 1 && args[0] === "--verify") {
-    const scratch = process.env.VIGIE_BACKUP_SCRATCH_DIRECTORY;
-    if (!scratch) throw new Error("Répertoire temporaire de vérification manquant.");
-    const folder = await mkdtemp(join(resolve(scratch), "vigie-verify-"));
-    try { await collect(folder, join(folder, "verify.zip")); }
-    finally { await rm(folder, { recursive: true, force: true }); }
-    return;
-  }
-  if (args.length) throw new Error("Argument de sauvegarde inconnu.");
-  const saved = await runBackup(vigieProjectId, collect);
-  console.log(saved ? "ZIP vérifié pour Vigie." : "Le créneau Vigie possède déjà un ZIP vérifié ou réservé.");
-}
-
-main(process.argv.slice(2)).catch(error => {
+  }),
+}, process.argv.slice(2)).catch(error => {
   console.error("Sauvegarde Vigie en échec.", error instanceof Error ? error.message : "");
   process.exitCode = 1;
 });

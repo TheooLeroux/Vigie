@@ -1,6 +1,11 @@
 name: Vigie backups · NES App
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       mode:
@@ -55,6 +60,7 @@ jobs:
           VIGIE_BACKUP_S3_SECRET: ${{ secrets.VIGIE_BACKUP_S3_SECRET }}
           VIGIE_NES_DATABASE_PASSWORD: ${{ secrets.VIGIE_NES_DATABASE_PASSWORD }}
           VIGIE_NES_RAILWAY_TOKEN: ${{ secrets.VIGIE_NES_RAILWAY_TOKEN }}
+          VIGIE_BACKUP_INVENTORY_DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
           SOURCE_KEY: ${{ secrets.VIGIE_NES_GITHUB_KEY }}
           SOURCE_HOSTS: ${{ vars.VIGIE_NES_GITHUB_KNOWN_HOSTS }}
           SUPABASE_CA: ${{ vars.VIGIE_NES_SUPABASE_CA }}
@@ -75,5 +81,11 @@ jobs:
           export VIGIE_NES_SUPABASE_CA="$private/supabase.crt"
           export VIGIE_BACKUP_SCRATCH_DIRECTORY="$private/scratch"
           args=()
-          if [[ "$MODE" == verify ]]; then args+=(--verify); fi
+          case "$MODE" in
+            verify) args+=(--verify) ;;
+            capture) ;;
+            automatic) args+=(--automatic) ;;
+            automatic-verify) args+=(--automatic-verify) ;;
+            *) exit 1 ;;
+          esac
           node --import tsx scripts/backup-nes-railway.ts "${args[@]}"

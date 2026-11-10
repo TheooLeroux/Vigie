@@ -1,6 +1,11 @@
 name: Vigie backups
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       site:
@@ -50,7 +55,6 @@ jobs:
           SSH_KNOWN_HOSTS: ${{ vars.VIGIE_BACKUP_KNOWN_HOSTS }}
           SITE: ${{ inputs.site }}
           MODE: ${{ inputs.mode }}
-          EVENT: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,9 +84,13 @@ jobs:
           export VIGIE_BACKUP_SSH_CONFIG="$ssh_dir/config"
           export VIGIE_BACKUP_SCRATCH_DIRECTORY="$scratch"
           args=()
-          if [[ "$EVENT" == workflow_dispatch ]]; then
-            [[ -n "$SITE" ]]
-            args+=(--site "$SITE")
-            if [[ "$MODE" == preflight ]]; then args+=(--preflight); fi
-          fi
+          case "$MODE" in
+            automatic) args+=(--linked) ;;
+            preflight|capture)
+              [[ -n "$SITE" ]]
+              args+=(--site "$SITE")
+              if [[ "$MODE" == preflight ]]; then args+=(--preflight); fi
+              ;;
+            *) exit 1 ;;
+          esac
           node --import tsx scripts/backup-worker.ts "${args[@]}"

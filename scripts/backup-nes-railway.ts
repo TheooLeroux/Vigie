@@ -1,13 +1,12 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { z } from "zod";
-import { runBackup } from "../src/lib/backups";
-import { runCommand } from "../src/lib/updates/process";
+import { runPlatformBackup } from "./platform-backup";
+import { nesRailway } from "./platform-backup-targets";
+import { assertPlatformBackupLink } from "./check-platform-backup-link";
 
-const projectId = "b318d717-ef03-44ca-8feb-f4e9eb6d6fe2";
+const { remoteId: projectId, projectId: vigieProjectId } = nesRailway;
 const environmentId = "b3ca01d9-0295-4dab-ac62-7860ba87df95";
-const vigieProjectId = "f458d781-18cd-48d3-b65b-42372755dd04";
 const backendId = "0bcc758c-7650-4500-9388-54b5fecbe170";
 const repository = "TheooLeroux/NesAppli";
 const supabaseRef = "yaakyyvqcdsizchkiozq";
@@ -101,83 +100,25 @@ function postgresEnvironment() {
   return env;
 }
 
-function postgresCommand(tool: string, args: string[], options: { env?: NodeJS.ProcessEnv; timeout: number }) {
-  return process.platform === "win32"
-    ? runCommand("wsl.exe", ["-d", "Debian", "--", tool, ...args], options)
-    : runCommand(tool, args, options);
-}
-
-async function captureDatabase(folder: string) {
-  const database = join(folder, "database.dump");
-  const output = process.platform === "win32"
-    ? (await postgresCommand("wslpath", ["-a", database.replaceAll("\\", "/")], { timeout: 10_000 })).trim()
-    : database;
-  await postgresCommand("pg_dump", [
-    "--no-password", "--format=custom", "--no-owner", "--no-acl", "--lock-wait-timeout=10s",
-    "--schema=public", "--schema=auth", "--schema=storage", "--schema=supabase_migrations", "--file=" + output,
-  ], { env: postgresEnvironment(), timeout: 20 * 60_000 });
-  const toc = await postgresCommand("pg_restore", ["--list", output], { timeout: 30_000 });
-  for (const table of ["public profiles", "auth users", "auth identities", "storage objects"]) {
-    if (!toc.includes("TABLE DATA " + table + " ")) throw new Error("Données attendues absentes du dump PostgreSQL.");
-  }
-  await postgresCommand("pg_restore", ["--exit-on-error", "--file=/dev/null", output], { timeout: 10 * 60_000 });
-  return toc.split("\n").filter(line => / TABLE DATA /.test(line)).length;
-}
-
-async function collect(folder: string, output: string) {
-  const services = await inventory();
-  const gitDirectory = process.env.VIGIE_NES_GIT_DIRECTORY ?? join(folder, "source.git");
-  const gitOptions = { timeout: 180_000 };
-  const git = (args: string[], acceptedExitCodes?: number[]) =>
-    runCommand("git", ["--git-dir", gitDirectory, ...args], { ...gitOptions, acceptedExitCodes });
-  if (!process.env.VIGIE_NES_GIT_DIRECTORY) await git(["init", "--bare"]);
-  const sources = new Map<string, string>();
-  for (const service of services) {
-    if (!service.commit) continue;
-    if (!process.env.VIGIE_NES_GIT_DIRECTORY && !sources.has(service.commit)) {
-      await git(["fetch", "--quiet", "--no-tags", "--depth=1", "ssh://git@github.com/" + repository + ".git", service.commit]);
-    }
-    const path = (service.root ?? "").slice(1) + "/package.json";
-    await git(["cat-file", "-e", service.commit + ":" + path]);
-    if (sources.has(service.commit)) continue;
-    const modes = await git(["ls-tree", "-r", "--format=%(objectmode)", service.commit]);
-    const lfs = await git(["grep", "-l", "-F", "version https://git-lfs.github.com/spec/v1", service.commit, "--"], [0, 1]);
-    if (modes.split(/\s+/).includes("160000") || lfs.trim()) throw new Error("Les sous-modules ou fichiers Git LFS de NES App demandent une collecte dédiée.");
-    const source = "app-" + service.commit + ".tar.gz";
-    await git(["archive", "--format=tar.gz", "--output=" + join(folder, source), service.commit]);
-    sources.set(service.commit, source);
-  }
-  const tableDataEntries = await captureDatabase(folder);
-  if (JSON.stringify(services) !== JSON.stringify(await inventory())) throw new Error("Un déploiement Railway a changé pendant la sauvegarde.");
-  const manifest = {
+runPlatformBackup({
+  projectId: vigieProjectId,
+  name: "NES App",
+  inventory,
+  assertLinked: () => assertPlatformBackupLink(nesRailway),
+  git: { repository, transport: "ssh", directory: process.env.VIGIE_NES_GIT_DIRECTORY },
+  databases: [{
+    file: "database.dump",
+    windowsClient: 17,
+    environment: postgresEnvironment,
+    dumpOptions: ["--no-owner", "--no-acl", "--schema=public", "--schema=auth", "--schema=storage", "--schema=supabase_migrations"],
+    requiredTables: ["public profiles", "auth users", "auth identities", "storage objects"],
+  }],
+  manifest: (services, sources, [{ tableDataEntries }]) => ({
     format: "vigie.railway-backup", version: 1, project: "NES App", projectId, environmentId,
-    capturedAt: new Date().toISOString(), services, sources: Object.fromEntries(sources),
+    capturedAt: new Date().toISOString(), services, sources,
     database: { provider: "supabase", projectRef: supabaseRef, format: "pg_dump custom", tableDataEntries },
-  };
-  await writeFile(join(folder, "deployment.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
-  await runCommand(process.platform === "win32" ? "python" : "python3",
-    ["scripts/pack-git-backup.py", folder, output, ...sources.values()], { timeout: 10 * 60_000 });
-  console.log("Dump validé pour " + tableDataEntries + " tables ou partitions.");
-}
-
-async function main(args: string[]) {
-  if (args.length === 1 && args[0] === "--verify") {
-    const scratch = process.env.VIGIE_BACKUP_SCRATCH_DIRECTORY;
-    if (!scratch) throw new Error("Répertoire temporaire de vérification manquant.");
-    const folder = await mkdtemp(join(resolve(scratch), "nes-verify-"));
-    try {
-      await collect(folder, join(folder, "verify.zip"));
-    } finally {
-      await rm(folder, { recursive: true, force: true });
-    }
-    return;
-  }
-  if (args.length) throw new Error("Argument de sauvegarde inconnu.");
-  const saved = await runBackup(vigieProjectId, collect);
-  console.log(saved ? "ZIP vérifié pour NES App." : "Le créneau NES App possède déjà un ZIP vérifié ou réservé.");
-}
-
-main(process.argv.slice(2)).catch(error => {
+  }),
+}, process.argv.slice(2)).catch(error => {
   console.error("Sauvegarde NES App en échec.", error instanceof Error ? error.message : "");
   process.exitCode = 1;
 });

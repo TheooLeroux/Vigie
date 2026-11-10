@@ -1,6 +1,11 @@
 name: Vigie backups · Vercel
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       mode:
@@ -49,6 +54,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.VIGIE_SELF_CATALOG_DATABASE_URL }}
           VIGIE_SELF_SOURCE_DATABASE_URL: ${{ secrets.VIGIE_SELF_SOURCE_DATABASE_URL }}
+          VIGIE_BACKUP_INVENTORY_DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
           VIGIE_RUNTIME_PROBE_KEY: ${{ secrets.VIGIE_RUNTIME_PROBE_KEY }}
           VIGIE_BACKUP_S3_BUCKET: ${{ secrets.VIGIE_BACKUP_S3_BUCKET }}
           VIGIE_BACKUP_S3_ENDPOINT: ${{ secrets.VIGIE_BACKUP_S3_ENDPOINT }}
@@ -65,5 +71,11 @@ jobs:
           sudo mount -t tmpfs -o "noswap,nodev,nosuid,noexec,mode=0700,uid=$(id -u),gid=$(id -g),size=2G" tmpfs "$private"
           export VIGIE_BACKUP_SCRATCH_DIRECTORY="$private"
           args=()
-          if [[ "$MODE" == verify ]]; then args+=(--verify); fi
+          case "$MODE" in
+            verify) args+=(--verify) ;;
+            capture) ;;
+            automatic) args+=(--automatic) ;;
+            automatic-verify) args+=(--automatic-verify) ;;
+            *) exit 1 ;;
+          esac
           node --import tsx scripts/backup-vigie-vercel.ts "${args[@]}"

@@ -1,0 +1,65 @@
+name: Vigie · sauvegardes des projets liés
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Lister les projets ou vérifier les collectes Railway et Vercel
+        type: choice
+        options: [plan, verify]
+        default: plan
+  schedule:
+    - cron: '13 3 * * 1'
+      timezone: Europe/Paris
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigie-automatic-backups
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.ref_name == github.event.repository.default_branch && (github.event_name == 'workflow_dispatch' || vars.VIGIE_BACKUP_AUTOMATIC == '1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      railway: ${{ steps.inventory.outputs.railway }}
+      vercel: ${{ steps.inventory.outputs.vercel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - id: inventory
+        run: node --import tsx scripts/plan-platform-backups.ts --github
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_BACKUP_INVENTORY_DATABASE_URL }}
+
+  o2switch:
+    if: github.ref_name == github.event.repository.default_branch && github.event_name == 'schedule' && vars.VIGIE_BACKUP_AUTOMATIC == '1'
+    uses: ./.github/workflows/vigie-backups.yml
+    with:
+      mode: automatic
+    secrets: inherit
+
+  railway:
+    needs: plan
+    if: (github.event_name == 'schedule' || inputs.mode == 'verify') && needs.plan.outputs.railway == 'true'
+    uses: ./.github/workflows/vigie-nes-backups.yml
+    with:
+      mode: ${{ github.event_name == 'schedule' && 'automatic' || 'automatic-verify' }}
+    secrets: inherit
+
+  vercel:
+    needs: plan
+    if: (github.event_name == 'schedule' || inputs.mode == 'verify') && needs.plan.outputs.vercel == 'true'
+    uses: ./.github/workflows/vigie-self-backups.yml
+    with:
+      mode: ${{ github.event_name == 'schedule' && 'automatic' || 'automatic-verify' }}
+    secrets: inherit
