@@ -45,7 +45,12 @@ CREATE TABLE IF NOT EXISTS backup_pending_uploads (
   storage_id TEXT NOT NULL,
   discard_after TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS backup_pending_uploads_due ON backup_pending_uploads(storage_id, discard_after);`;
+CREATE INDEX IF NOT EXISTS backup_pending_uploads_due ON backup_pending_uploads(storage_id, discard_after);
+CREATE TABLE IF NOT EXISTS backup_account_leases (
+  account_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);`;
 
 function backupDatabase() {
   const db = database();
@@ -84,6 +89,18 @@ const paris = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
+
+export async function claimBackupAccount(accountId: string) {
+  const db = backupDatabase();
+  const owner = randomUUID();
+  const now = new Date();
+  const claim = await db.prepare(`INSERT INTO backup_account_leases(account_id,owner,expires_at) VALUES(?,?,?)
+    ON CONFLICT(account_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at
+    WHERE backup_account_leases.expires_at<=?`)
+    .run(accountId, owner, new Date(now.getTime() + backupLeaseMs).toISOString(), now.toISOString());
+  if (!claim.changes) return null;
+  return async () => { await db.prepare("DELETE FROM backup_account_leases WHERE account_id=? AND owner=?").run(accountId, owner); };
+}
 
 function parisParts(date: Date) {
   return Object.fromEntries(paris.formatToParts(date).map(part => [part.type, part.value]));

@@ -7,6 +7,11 @@ on:
         description: Domaine à vérifier
         type: string
         default: nes-proworking.fr
+      mode:
+        description: Vérifier le périmètre ou lancer une sauvegarde
+        type: choice
+        options: [preflight, capture]
+        default: preflight
 
 permissions:
   contents: read
@@ -30,7 +35,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Configurer SSH et vérifier le site
+      - name: Vérifier ou sauvegarder les sites o2switch
         env:
           DATABASE_URL: ${{ secrets.VIGIE_BACKUP_DATABASE_URL }}
           VIGIE_CONNECTOR_ENCRYPTION_KEY: ${{ secrets.VIGIE_BACKUP_CONNECTOR_KEY }}
@@ -44,6 +49,8 @@ jobs:
           SSH_GAZ: ${{ secrets.VIGIE_BACKUP_SSH_GAZ }}
           SSH_KNOWN_HOSTS: ${{ vars.VIGIE_BACKUP_KNOWN_HOSTS }}
           SITE: ${{ inputs.site }}
+          MODE: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -72,4 +79,10 @@ jobs:
           unset SSH_CANARY SSH_GAZ SSH_KNOWN_HOSTS
           export VIGIE_BACKUP_SSH_CONFIG="$ssh_dir/config"
           export VIGIE_BACKUP_SCRATCH_DIRECTORY="$scratch"
-          node --import tsx scripts/backup-worker.ts --preflight --site "$SITE"
+          args=()
+          if [[ "$EVENT" == workflow_dispatch ]]; then
+            [[ -n "$SITE" ]]
+            args+=(--site "$SITE")
+            if [[ "$MODE" == preflight ]]; then args+=(--preflight); fi
+          fi
+          node --import tsx scripts/backup-worker.ts "${args[@]}"

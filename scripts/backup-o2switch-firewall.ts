@@ -1,6 +1,8 @@
 import { isIPv4 } from "node:net";
 import { z } from "zod";
 import { withHostingCredentials } from "../src/lib/hosting-connections";
+import { database, isPostgres } from "../src/lib/storage";
+import { backupLeaseMs } from "../src/lib/backup-store";
 
 const ruleSchema = z.object({
   address: z.string(),
@@ -13,6 +15,7 @@ const replySchema = z.object({
 });
 
 export async function allowBackupSsh(connectionId: string, host: string, username: string) {
+  if (!isPostgres()) throw new Error("Le pare-feu automatique nécessite le catalogue PostgreSQL.");
   return withHostingCredentials(connectionId, async connection => {
     if (connection.endpoint !== "https://" + host + ":2083" || connection.username !== username ||
         !/^[a-z0-9-]+\.o2switch\.net$/.test(host) || connection.authMode !== "token") {
@@ -33,26 +36,36 @@ export async function allowBackupSsh(connectionId: string, host: string, usernam
       return reply.data;
     }
     const list = async () => z.object({ ip: z.string(), list: z.array(ruleSchema) }).parse(await call("list"));
+    const db = database();
+    const rulesForAddress = (rules: z.infer<typeof ruleSchema>[], address: string) =>
+      rules.filter(rule => rule.address === address && rule.port === 22);
+    async function release(address: string) {
+      if (!isIPv4(address)) throw new Error("Adresse d’exception SSH invalide.");
+      const current = rulesForAddress((await list()).list, address);
+      for (const rule of current) await call("remove", { address, port: "22", direction: rule.direction });
+      if (rulesForAddress((await list()).list, address).length) throw new Error("Exception SSH temporaire encore présente.");
+      await db.prepare("DELETE FROM backup_firewall_rules WHERE account_id=? AND address=?").run(connectionId, address);
+    }
+    const now = new Date();
+    const abandoned = await db.prepare("SELECT address FROM backup_firewall_rules WHERE account_id=? AND expires_at<=?")
+      .all(connectionId, now.toISOString());
+    for (const rule of abandoned) await release(String(rule.address));
+
     const before = await list();
     const address = before.ip;
     if (!isIPv4(address)) throw new Error("Adresse IPv4 du worker indisponible.");
-    const rulesForWorker = (rules: z.infer<typeof ruleSchema>[]) =>
-      rules.filter(rule => rule.address === address && rule.port === 22);
-    const existing = rulesForWorker(before.list);
+    const existing = rulesForAddress(before.list, address);
     if (existing.some(rule => rule.direction === "in")) return async () => {};
     if (existing.length) throw new Error("L’adresse du worker a déjà une exception SSH partielle.");
 
-    const fields = { address, port: "22" };
-    async function release() {
-      const current = rulesForWorker((await list()).list);
-      for (const rule of current) await call("remove", { ...fields, direction: rule.direction });
-      if (rulesForWorker((await list()).list).length) throw new Error("Exception SSH temporaire encore présente.");
-    }
+    const tracked = await db.prepare("INSERT INTO backup_firewall_rules(account_id,address,expires_at) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+      .run(connectionId, address, new Date(now.getTime() + backupLeaseMs).toISOString());
+    if (!tracked.changes) throw new Error("Une autre exécution prépare déjà l’accès SSH.");
     try {
-      await call("add", fields);
-      return release;
+      await call("add", { address, port: "22" });
+      return () => release(address);
     } catch (error) {
-      await release();
+      await release(address);
       throw error;
     }
   });

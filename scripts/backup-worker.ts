@@ -8,9 +8,7 @@ import { parseArgs } from "node:util";
 import { z } from "zod";
 import { backupHostingInstallations } from "../src/lib/hosting-discovery";
 import { hostingConnections } from "../src/lib/hosting-connections";
-import { claimHostingObservation } from "../src/lib/hosting-storage";
-import { cleanupAbandonedBackupUploads, runBackup } from "../src/lib/backups";
-import { backupLeaseMs } from "../src/lib/backup-store";
+import { claimBackupAccount, cleanupAbandonedBackupUploads, runBackup } from "../src/lib/backups";
 import { runCommand } from "../src/lib/updates/process";
 import { shellQuote } from "../src/lib/updates/wordpress";
 import { allowBackupSsh } from "./backup-o2switch-firewall";
@@ -235,7 +233,7 @@ async function main(args: string[]) {
           console.log(JSON.stringify({ site: domain, ...report }));
           continue;
         }
-        release = await claimHostingObservation("backup:o2switch:" + account.id, backupLeaseMs);
+        release = await claimBackupAccount(account.id);
         if (!release) continue;
         const saved = await runBackup({ installationId: site.id, projectId: site.projectId, domain }, async (folder, zip) => {
           const files = join(folder, "files.tar.gz");
