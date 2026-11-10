@@ -1,13 +1,11 @@
 import { z } from "zod";
 import { controlInterval } from "./automatic-control-state";
 import { list } from "./db";
-import { observedProjectDetail } from "./project-observations";
+import { readProjectObservationBatch } from "./project-observation-batch";
 import { lastRecordedSecurity, projectSecurity } from "./project-security";
 import { rankSecurityWatch, type ProjectFinding, type PublicAdvisory, type SecurityWatch } from "./security-watch";
 import { railwayRuntimeDeployments } from "./railway-status";
-import type { Project, Workspace } from "./types";
-import { mapConcurrent } from "./updates/planning";
-import { projectUpdates } from "./updates/service";
+import type { Project, Service, Workspace } from "./types";
 
 const ghsa = /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/i;
 const advisorySchema = z.array(z.object({
@@ -55,12 +53,27 @@ function publicFeed() {
 }
 
 async function readProjectFindings(workspace: Workspace, signal: AbortSignal) {
-  const projects = (await list<Project>("projects", workspace)).filter(project => project.lifecycle === "active");
-  const results = await mapConcurrent(projects, 4, async project => {
-    if (signal.aborted) return null;
+  const workspaceProjects = await list<Project>("projects", workspace);
+  const projects = workspaceProjects.filter(project => project.lifecycle === "active");
+  if (!projects.length) return { projects: 0, fullyCovered: 0, findings: [] };
+  const [batch, services] = await Promise.all([
+    readProjectObservationBatch(projects, workspaceProjects, signal),
+    list<Service>("services", workspace),
+  ]);
+  if (signal.aborted || ![...batch.values()].some(observation => observation.updates)) {
+    throw new Error("Les relevés de sécurité du parc sont indisponibles.");
+  }
+  const serviceLabels = new Map<string, Set<string>>();
+  for (const service of services) {
+    const labels = serviceLabels.get(service.projectId) ?? new Set<string>();
+    labels.add(service.technology).add(service.runtime);
+    serviceLabels.set(service.projectId, labels);
+  }
+  const results = projects.map(project => {
+    const observation = batch.get(project.id);
+    if (!observation?.updates) return null;
+    const { detail, updates } = observation;
     try {
-      const [detail, updates] = await Promise.all([observedProjectDetail(project.id, workspace), projectUpdates(project.id)]);
-      if (detail.project.lifecycle !== "active") return null;
       const security = projectSecurity(detail, updates);
       const monitored = new Set(security.services.map(service => service.id));
       const unverifiedServices = security.services.filter(service => service.status !== "covered" && service.status !== "partial");
@@ -73,7 +86,7 @@ async function readProjectFindings(workspace: Workspace, signal: AbortSignal) {
         return age >= 0 && age < controlInterval && monitored.has(finding.targetId) && !historicalKeys.has(finding.key);
       });
       const projectRef = { id: detail.project.id, name: detail.project.name };
-      const projectLabels = [detail.project.client, ...detail.project.tags, ...detail.services.flatMap(service => [service.technology, service.runtime])];
+      const projectLabels = [project.client, ...project.tags, ...(serviceLabels.get(project.id) ?? [])];
       const targetLabels = new Map(updates.targets.map(target => {
         const vercel = detail.vercel?.find(item => target.provider === "vercel" && item.id === target.remoteId && item.connectionId === target.connectionId);
         const railway = detail.railway?.find(item => target.provider === "railway" && item.connectionId === target.connectionId && item.services.some(service => service.id === target.remoteId && service.environmentId === target.environmentId))
@@ -98,6 +111,9 @@ async function readProjectFindings(workspace: Workspace, signal: AbortSignal) {
       return null;
     }
   });
+  if (!results.some(result => result !== null)) {
+    throw new Error("Les relevés de sécurité du parc sont indisponibles.");
+  }
   return { projects: projects.length, fullyCovered: results.filter(result => result?.known).length, findings: results.flatMap(result => result?.findings ?? []) };
 }
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import { controlInterval, controlSource } from "../src/lib/automatic-control-state";
 import { writeAutomaticControl } from "../src/lib/automatic-control-storage";
 import { createProject } from "../src/lib/db";
+import { sqliteDatabase } from "../src/lib/db-sqlite";
 import { observedProjectDetail } from "../src/lib/project-observations";
 import { filterSecurityWatch, rankSecurityWatch, type ProjectFinding, type PublicAdvisory } from "../src/lib/security-watch";
 import { securityWatch } from "../src/lib/security-watch-data";
@@ -130,5 +131,20 @@ test("Veille : flux indisponible puis rétabli et couverture calculée à partir
   assert.equal(mixed.detected[0].affected.length, 1);
   assert.equal(mixed.detected[0].affected[0].historical, true);
   assert.equal(mixed.detected[0].affected[0].project.id, project.id);
+  await createProject("live", createProjectSchema.parse({ name: "Actif sans contrôle" }));
+  await createProject("live", createProjectSchema.parse({ name: "Projet archivé", lifecycle: "archived" }));
+  const db = sqliteDatabase();
+  const prepare = db.prepare.bind(db);
+  const queries: string[] = [];
+  t.mock.method(db, "prepare", (sql: string) => {
+    queries.push(sql);
+    return prepare(sql);
+  });
+  const batched = await read();
+  assert.deepEqual(batched.coverage, { projects: 2, fullyCovered: 0 });
+  assert.deepEqual(batched.detected, mixed.detected);
+  assert.equal(queries.filter(sql => /SELECT \* FROM vercel_projects ORDER BY/.test(sql)).length, 1);
+  assert.equal(queries.filter(sql => /SELECT \* FROM railway_projects ORDER BY/.test(sql)).length, 1);
+  assert.equal(queries.filter(sql => /FROM update_runs WHERE project_id IN/.test(sql)).length, 1);
   assert.equal(transport.mock.callCount(), 2);
 });

@@ -1,5 +1,5 @@
 name: Vigie automatic controls and WordPress agents
-run-name: ${{ inputs.security_only && 'security-watch' || format('wordpress-agent-{0}', inputs.installation_id || 'reconcile') }}
+run-name: ${{ inputs.fallback_only && 'security-watch-fallback' || inputs.security_only && 'security-watch' || format('wordpress-agent-{0}', inputs.installation_id || 'reconcile') }}
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +19,10 @@ on:
         description: Lancer le cycle de surveillance et le contrôle des agents WordPress
         default: false
         type: boolean
+      fallback_only:
+        description: Appliquer les mêmes conditions que le cron de secours
+        default: false
+        type: boolean
   push:
     branches: [main]
   deployment_status:
@@ -27,11 +31,33 @@ on:
 permissions:
   contents: read
 jobs:
+  scheduled-gate:
+    if: github.event_name == 'schedule' || inputs.fallback_only
+    environment: vigie-maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.claim.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Réserver le cycle de secours si nécessaire
+        id: claim
+        run: node --import tsx scripts/scheduled-maintenance-gate.ts
+        env:
+          DATABASE_URL: ${{ secrets.VIGIE_UPDATES_DATABASE_URL }}
   agents:
+    needs: scheduled-gate
     concurrency:
       group: ${{ inputs.installation_id && format('wordpress-agent-{0}', inputs.installation_id) || 'wordpress-agent-fleet' }}
       cancel-in-progress: false
-    if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
+    if: ${{ !cancelled() && needs.scheduled-gate.outputs.run != 'false' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -53,11 +79,11 @@ jobs:
           VIGIE_AGENT_REQUEST_ID: ${{ inputs.request_id }}
           VIGIE_WORDPRESS_CONTROL_URL: https://vigie-azure.vercel.app
   wordpress-security:
-    needs: wordpress-observations
+    needs: [scheduled-gate, wordpress-observations]
     concurrency:
       group: wordpress-security-scan
       cancel-in-progress: false
-    if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
+    if: ${{ !cancelled() && needs.scheduled-gate.outputs.run != 'false' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && inputs.project_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -92,10 +118,11 @@ jobs:
           VIGIE_CONTROL_PROVIDER: o2switch
           VIGIE_CONTROL_FORCE: ${{ github.event_name == 'push' || github.event_name == 'deployment_status' }}
   observations:
+    needs: scheduled-gate
     concurrency:
       group: ${{ matrix.provider == 'o2switch' && 'hosting-discovery-o2switch' || format('hosting-observation-{0}', matrix.provider) }}
       cancel-in-progress: false
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    if: ${{ !cancelled() && needs.scheduled-gate.outputs.run != 'false' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -119,10 +146,11 @@ jobs:
       - name: Relever les projets et installations
         run: node --import tsx scripts/hosting-control-worker.ts
   wordpress-observations:
+    needs: scheduled-gate
     concurrency:
       group: hosting-observation-o2switch
       cancel-in-progress: false
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    if: ${{ !cancelled() && needs.scheduled-gate.outputs.run != 'false' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.installation_id == '' && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') }}
     environment: vigie-maintenance
     runs-on: ubuntu-latest
     timeout-minutes: 15

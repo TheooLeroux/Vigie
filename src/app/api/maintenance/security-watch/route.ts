@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { ApiError, assertLocal, errorResponse } from "@/lib/http";
+import { claimScheduledMaintenance } from "@/lib/scheduled-maintenance";
 import { refreshSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { githubRequest, updateRunner } from "@/lib/updates/github";
 
@@ -9,10 +10,20 @@ export const maxDuration = 120;
 async function dispatchSecurityControls() {
   const runner = updateRunner();
   if (!runner) throw new ApiError("Le contrôle automatique n’est pas configuré.", 503);
-  await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-wordpress-agents.yml/dispatches`, runner.token, "POST", {
-    ref: runner.ref,
-    inputs: { security_only: true },
+  const lease = await claimScheduledMaintenance("primary").catch(() => {
+    console.warn("Vigie : réservation du cycle automatique indisponible.");
+    return undefined;
   });
+  if (lease === null) return;
+  try {
+    await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-wordpress-agents.yml/dispatches`, runner.token, "POST", {
+      ref: runner.ref,
+      inputs: { security_only: true },
+    });
+  } catch (error) {
+    await lease?.().catch(() => console.warn("Vigie : réservation du cycle non libérée."));
+    throw error;
+  }
 }
 
 export async function GET(request: Request) {
