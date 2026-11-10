@@ -33,6 +33,6 @@ Le dump PostgreSQL de Supabase contient les schémas `public`, `auth`, `storage`
 
 ## Vigie sur Vercel
 
-Le ZIP contient les sources du commit réellement servi en production et un export logique de la base PostgreSQL Neon. La sonde Vercel signée confirme le déploiement et l’identité de la base avant et après la collecte. Le worker lit le dump en entier sans connexion à une cible avant de publier le ZIP dans R2.
+Le workflow passe le lundi à 03 h 13, heure de Paris. Le ZIP contient les sources du commit réellement servi en production et un export logique de la base PostgreSQL Neon. La sonde Vercel signée confirme le déploiement et l’identité de la base avant et après la collecte. Le worker lit le dump en entier sans connexion à une cible avant de publier le ZIP dans R2.
 
 L’archive comprend les données et le schéma de la base, dont le catalogue des sauvegardes. Les ZIP référencés dans ce catalogue restent des objets séparés dans R2. Les variables Vercel et les fonctions compilées ne font pas partie de l’archive.
