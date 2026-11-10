@@ -27,6 +27,12 @@ export function checkWordPressRequirements(plan: WordPressUpdatePlan) {
 export function wordpressPlanPhp() {
   const php = `require_once ABSPATH . 'wp-admin/includes/update.php';
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
+// Older Divi loads the vendor updater only in wp-admin or cron. Enable its
+// updater after CLI bootstrap, without running the admin menus or cron jobs.
+if (get_template() === 'Divi' && defined('ET_CORE_URL') && function_exists('et_core_enable_automatic_updates') && !isset($GLOBALS['et_core_updates'])) {
+  if (!defined('DOING_CRON')) { define('DOING_CRON', true); }
+  et_core_enable_automatic_updates('', wp_get_theme('Divi')->get('Version'));
+}
 $pluginSlug = static fn($file) => dirname($file) === '.' ? basename($file, '.php') : dirname($file);
 $officialOffer = static function ($kind, $slug, $offer) {
   $offer = (array)$offer;
@@ -37,7 +43,7 @@ $officialOffer = static function ($kind, $slug, $offer) {
   $path = $url['path'] ?? '';
   $public = $host === 'downloads.wordpress.org' && preg_match('#^/'.($kind === 'plugin' ? 'plugin' : 'theme').'/'.preg_quote($slug, '#').'(?:[.][a-zA-Z0-9._-]+)?[.]zip$#D', $path);
   $vendor = ($kind === 'plugin' && $slug === 'wp-rocket' && in_array($host, array('wp-rocket.me', 'api.wp-rocket.me'), true))
-    || ($kind === 'theme' && $slug === 'Divi' && in_array($host, array('elegantthemes.com', 'www.elegantthemes.com', 'api.elegantthemes.com'), true));
+    || ($kind === 'theme' && $slug === 'Divi' && in_array($host, array('elegantthemes.com', 'www.elegantthemes.com', 'api.elegantthemes.com', 'cdn.elegantthemes.com'), true));
   if (!$public && !$vendor) { return null; }
   return array('source' => $public ? 'wordpress.org' : 'vendor', 'fingerprint' => hash('sha256', $package));
 };
@@ -91,6 +97,11 @@ foreach (get_plugins() as $file => $headers) {
   if (!preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) || !preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $next)) { $next = $current; $data['warnings'][] = $slug . ' : version absente ou non standard, extension conservée.'; }
   $source = $origin($headers['UpdateURI'] ?? '', $slug, 'plugin'); $manual = '';
   $official = $officialOffer('plugin', $slug, $update);
+  if ($slug === 'wp-rocket' && !$official && function_exists('get_rocket_option')
+      && !get_rocket_option('consumer_key') && !get_rocket_option('consumer_email')
+      && !defined('WP_ROCKET_KEY') && !defined('WP_ROCKET_EMAIL')) {
+    $manual = 'WP Rocket ne dispose pas des identifiants de licence attendus et ne fournit pas de paquet officiel.';
+  }
   if ($next !== $current && (!$official || ($source === 'external' && $official['source'] !== 'vendor'))) { $manual = 'Aucun paquet officiel vérifié pour la mise à jour proposée.'; }
   elseif ($next !== $current && $official['source'] === 'wordpress.org' && preg_match('/^[a-z0-9_-]{1,150}$/iD', $slug)) {
     // A skipped verification (e.g. no published checksums) is not proof of integrity.
@@ -112,6 +123,8 @@ foreach (wp_get_themes() as $slug => $theme) {
   if ($target !== $current && $official && ($source !== 'external' || $official['source'] === 'vendor') && preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $current) && preg_match('/^\\d+(?:\\.\\d+){0,7}$/D', $target) && version_compare($target, $current, '>')) {
     $entry['target'] = $target;
     $entry['officialOffer'] = $official;
+  } elseif ($slug === 'Divi' && $target !== $current && empty($update['package']) && get_site_option('et_account_status') === 'expired') {
+    $entry['manualReason'] = 'Elegant Themes signale un abonnement expiré et ne fournit pas le paquet Divi. Renouvelez ou reconnectez un abonnement actif.';
   }
   $data['themes'][] = $entry;
 }
