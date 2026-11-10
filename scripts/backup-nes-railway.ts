@@ -156,7 +156,7 @@ async function collect(folder: string, output: string) {
   };
   await writeFile(join(folder, "deployment.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
   await runCommand(process.platform === "win32" ? "python" : "python3",
-    ["scripts/pack-nes-backup.py", folder, output, ...sources.values()], { timeout: 10 * 60_000 });
+    ["scripts/pack-git-backup.py", folder, output, ...sources.values()], { timeout: 10 * 60_000 });
   console.log("Dump validé pour " + tableDataEntries + " tables ou partitions.");
 }
 

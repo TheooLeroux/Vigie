@@ -30,3 +30,9 @@ Le worker relit le ZIP dans R2 et vérifie son empreinte avant de le publier. L�
 Le workflow dédié passe le lundi à 03 h 13, heure de Paris. Il archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il vérifie que le backend utilise la base sauvegardée. Un changement de périmètre, l’apparition d’un volume ou un déploiement qui change pendant la collecte bloque la publication. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
 
 Le dump PostgreSQL de Supabase contient les schémas `public`, `auth`, `storage` et `supabase_migrations`, avec les données. Il est lu intégralement pour vérification sans connexion à une cible. Les objets binaires Supabase Storage et les buckets R2 de NES App sont distincts de ce dump. Les variables secrètes Railway restent dans Railway.
+
+## Vigie sur Vercel
+
+Le ZIP contient les sources du commit réellement servi en production et un export logique de la base PostgreSQL Neon. La sonde Vercel signée confirme le déploiement avant et après la collecte. Le worker lit le dump en entier sans connexion à une cible avant de publier le ZIP dans R2.
+
+L’archive comprend les données et le schéma de la base, dont le catalogue des sauvegardes. Les ZIP référencés dans ce catalogue restent des objets séparés dans R2. Les variables Vercel et les fonctions compilées ne font pas partie de l’archive.
