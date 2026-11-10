@@ -23,4 +23,10 @@ GitHub Actions utilise les clés SSH dédiées et les clés d’hôte vérifiée
 
 Le moteur conserve par installation les cinq dernières copies complètes et la dernière copie valide de chacun des douze mois civils glissants, mois courant compris. Un ZIP qui compte pour les deux règles n’existe qu’une fois. Le worker limite la collecte à un site à la fois par compte o2switch. La suppression des copies expirées suit une capture réussie. Les erreurs sont remontées au journal de l’exécuteur.
 
-Le worker relit le ZIP dans R2 et vérifie son empreinte avant de le publier. L’application vérifie la session, puis délivre un lien valable cinq minutes. Les collectes Railway et Vercel seront qualifiées sur NES App et Vigie.
+Le worker relit le ZIP dans R2 et vérifie son empreinte avant de le publier. L’application vérifie la session, puis délivre un lien valable cinq minutes.
+
+## NES App sur Railway
+
+Le workflow dédié archive les sources des commits réellement déployés pour le frontend, le backend et la documentation, avec le relevé des déploiements de production et les empreintes d’image. Il s’arrête si le périmètre change, si un volume apparaît ou si un déploiement change pendant la collecte. Le proxy Tailscale figure dans le relevé par référence d’image. L’archive contient des sources Git, pas les images OCI internes de Railway.
+
+Le dump PostgreSQL de Supabase contient les schémas `public`, `auth`, `storage` et `supabase_migrations`, avec les données. Il est lu intégralement pour vérification sans connexion à une cible. Les objets binaires Supabase Storage et les buckets R2 de NES App sont distincts de ce dump. Les variables secrètes Railway restent dans Railway.
