@@ -70,7 +70,7 @@ export async function withVercelCredentials<T>(id: string, run: (token: string, 
   return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.team_id);
 }
 const running = new Set<string>();
-export async function vercelState({ includeDisplayLabels = true } = {}): Promise<VercelState> {
+export async function vercelState({ includeDisplayLabels = true, projectIds }: { includeDisplayLabels?: boolean; projectIds?: string[] } = {}): Promise<VercelState> {
   const connections = (
     (await (await storage())
       .prepare("SELECT * FROM vercel_connections ORDER BY rowid")
@@ -78,8 +78,10 @@ export async function vercelState({ includeDisplayLabels = true } = {}): Promise
   ).map(connection);
   const projects = (await Promise.all((
     (await (await storage())
-      .prepare("SELECT * FROM vercel_projects ORDER BY rowid")
-      .all()) as ProjectRow[]
+      .prepare("SELECT * FROM vercel_projects" +
+        (projectIds ? ` WHERE project_id IN (${projectIds.map(() => "?").join(",") || "NULL"})` : "") +
+        " ORDER BY rowid")
+      .all(...(projectIds ?? []))) as ProjectRow[]
   ).map(async (r) => {
     const c = connections.find((c) => c.id === r.connection_id)!,
       p = includeDisplayLabels && r.project_id ? (await get<Project>("projects", r.project_id, "live")) : null;

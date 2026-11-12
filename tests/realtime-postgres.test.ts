@@ -40,11 +40,12 @@ test("PostgreSQL : événements de workers, rapports Railway sans sources, suppr
     await db.query("DELETE FROM wordpress_catalog WHERE cache_key LIKE 'control:report:%'");
     assert.deepEqual(changedProjects(beforeDelete, await read()).projects, ["second"]);
     const beforeWatch = await read();
-    await db.query("INSERT INTO wordpress_catalog VALUES ($1,'{ \"detected\": [] }','2099-01-01')", [securityWatchSnapshotKey]);
+    const revision = "2099-01-01T00:00:00.000Z";
+    await db.query("INSERT INTO wordpress_catalog VALUES ($1,'{ \"detected\": [] }',$2)", [securityWatchSnapshotKey, revision]);
     const change = changedProjects(beforeWatch, await read());
-    assert.deepEqual(change, { all: false, workspace: false, projects: [], activity: false, activityProjects: [], watch: true });
+    assert.deepEqual(change, { all: false, workspace: false, projects: [], activity: false, activityProjects: [], watch: true, watchRevision: revision });
     assert.deepEqual((await read()).find(row => row.key === securityWatchSnapshotKey), {
-      key: securityWatchSnapshotKey, project_id: null, kind: "watch", revision: "2099-01-01",
+      key: securityWatchSnapshotKey, project_id: null, kind: "watch", revision,
     });
     await db.query(`UPDATE "user" SET "emailVerified"=false`);
     assert.deepEqual(await read(), []);

@@ -22,7 +22,7 @@ import { readUpdateSource } from "@/lib/updates/storage";
 import { updateTargets } from "@/lib/updates/targets";
 import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
 import { projectSummaries } from "@/lib/project-summaries";
-import { readSecurityWatchSnapshot } from "@/lib/security-watch-cache";
+import { loadSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { activityPage } from "@/lib/activity";
 import { downloadBackup, listBackups } from "@/lib/backups";
 import {
@@ -163,12 +163,14 @@ async function handleRequest(request: Request, context: Context) {
     }
     if (method === "GET") {
       if (root === "security-watch" && path.length === 1) {
-        const snapshot = await readSecurityWatchSnapshot();
+        const revision = z.union([z.iso.datetime(), z.literal("missing")]).optional()
+          .parse(url.searchParams.get("revision") ?? undefined);
+        const { snapshot, source } = await loadSecurityWatchSnapshot(revision === "missing" ? null : revision);
         return Response.json(snapshot
           ? { ...snapshot.watch, savedAt: snapshot.savedAt }
           : { error: "Aucun relevé récent de la veille n’est disponible." }, {
           status: snapshot ? 200 : 503,
-          headers: { "Cache-Control": "private, no-store" },
+          headers: { "Cache-Control": "private, no-store", "X-Vigie-Watch-Source": source },
         });
       }
       if (root === "activity" && path.length === 1) return Response.json(await activityPage(Object.fromEntries(url.searchParams.entries().filter(([key]) => key !== "workspace")), workspace));

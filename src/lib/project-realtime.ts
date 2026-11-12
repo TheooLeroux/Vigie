@@ -1,12 +1,14 @@
 export type ProjectRevision = { key: string; project_id: string | null; kind: string; revision: string };
-export type ProjectChange = { projects: string[]; all: boolean; workspace: boolean; activity: boolean; activityProjects: string[]; watch: boolean };
+export type ProjectChange = { projects: string[]; all: boolean; workspace: boolean; activity: boolean; activityProjects: string[]; watch: boolean; watchRevision?: string | null };
 export const emptyProjectChange = (): ProjectChange => ({ projects: [], all: false, workspace: false, activity: false, activityProjects: [], watch: false });
 export function mergeProjectChanges(a: ProjectChange, b: ProjectChange): ProjectChange {
-  return { projects: [...new Set([...a.projects, ...b.projects])], all: a.all || b.all, workspace: a.workspace || b.workspace, activity: a.activity || b.activity, activityProjects: [...new Set([...a.activityProjects, ...b.activityProjects])], watch: a.watch || b.watch };
+  const change = { projects: [...new Set([...a.projects, ...b.projects])], all: a.all || b.all, workspace: a.workspace || b.workspace, activity: a.activity || b.activity, activityProjects: [...new Set([...a.activityProjects, ...b.activityProjects])], watch: a.watch || b.watch };
+  const watchRevision = b.watch ? b.watchRevision : a.watchRevision;
+  return watchRevision === undefined ? change : { ...change, watchRevision };
 }
 export function changedProjects(previous: readonly ProjectRevision[] | undefined, rows: readonly ProjectRevision[]): ProjectChange {
   // Initial catch-up closes the gap between the initial HTTP read and subscribing.
-  if (!previous) return { ...emptyProjectChange(), all: true, workspace: true, activity: true, watch: true };
+  if (!previous) return { ...emptyProjectChange(), all: true, workspace: true, activity: true, watch: true, watchRevision: rows.find(row => row.kind === "watch")?.revision ?? null };
   let result = emptyProjectChange();
   const before = new Map(previous.map(row => [row.key, row]));
   const after = new Map(rows.map(row => [row.key, row]));
@@ -29,7 +31,7 @@ export function changedProjects(previous: readonly ProjectRevision[] | undefined
     }
   }
   for (const [key, row] of before) if (!after.has(key)) add(row);
-  return result;
+  return result.watch ? { ...result, watchRevision: rows.find(row => row.kind === "watch")?.revision ?? null } : result;
 }
 export const hasProjectChanges = (change: ProjectChange) => change.all || change.workspace || change.activity || !!change.projects.length || !!change.activityProjects.length || change.watch;
 

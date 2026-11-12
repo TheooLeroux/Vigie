@@ -1,14 +1,18 @@
-import { list, log } from "./db";
+import { get, list, log, requireProject } from "./db";
 import { observedProjectDetail } from "./project-observations";
-import type { Project } from "./types";
+import { projectHostingInstallationsByProject } from "./hosting-discovery";
+import { vercelState } from "./vercel";
+import { railwayState } from "./railway";
+import type { Project, ProjectObservationDetail } from "./types";
 import { ApiError } from "./http";
-import { updateTargets } from "./updates/targets";
+import { prepareUpdateTargets, updateTargets } from "./updates/targets";
+import { readConfiguredUpdateTargets } from "./updates/storage";
 import { currentWordPressSecurity } from "./updates/wordpress-current-security";
 import { scanCurrentDependencies } from "./updates/source-monitor";
 import { automaticControlDue, controlSource } from "./automatic-control-state";
 import type { UpdateTarget } from "./updates/types";
 import { mapConcurrent } from "./updates/planning";
-import { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
+import { readAutomaticControl, readAutomaticControls, readAutomaticControlSchedules, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 import { CoverageLimit, SourceQualificationError } from "./updates/capabilities";
 import type { AutomaticControl } from "./automatic-control-state";
 import { scanDeployedImage } from "./updates/image-monitor";
@@ -18,19 +22,73 @@ import { scanRailwaySources } from "./updates/railway-source-monitor";
 import { GitHubAccessError } from "./updates/github";
 import { railpackImageIdentity } from "./updates/railpack-image-report";
 import { minimalStaticWitnessId } from "./updates/minimal-static-migration";
-import { railpackScanDue, readRailpackScan, refreshRailpackImage } from "./updates/railpack-image-control";
+import { railpackScanDue, readRailpackScans, refreshRailpackImage } from "./updates/railpack-image-control";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
+async function activeProjects(projectId?: string) {
+  if (!projectId) return (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active");
+  const project = await get<Project>("projects", projectId, "live");
+  return project?.lifecycle === "active" ? [project] : [];
+}
+
+async function readControlProjects(projects: Project[], provider?: UpdateTarget["provider"]) {
+  const ids = projects.map(project => project.id);
+  const query = { includeDisplayLabels: false, projectIds: ids };
+  const [hosting, vercel, railway, configured] = await Promise.all([
+    !provider || provider === "o2switch" ? projectHostingInstallationsByProject(new Set(ids), projects, false) : null,
+    !provider || provider === "vercel" ? vercelState(query) : null,
+    !provider || provider === "railway" ? railwayState(query) : null,
+    readConfiguredUpdateTargets(ids),
+  ]);
+  return mapConcurrent(projects, 4, async project => {
+    const detail: ProjectObservationDetail = {
+      project,
+      hosting: hosting?.get(project.id) ?? [],
+      vercel: vercel?.projects.filter(item => item.projectId === project.id),
+      railway: railway?.projects.filter(item => item.projectId === project.id),
+    };
+    try {
+      return { detail, targets: await prepareUpdateTargets(detail, configured.get(project.id)!) };
+    } catch { return null; }
+  });
+}
+
+async function readCurrentControlProject(project: Project, provider: UpdateTarget["provider"]) {
+  const [prepared] = await readControlProjects([project], provider);
+  if (!prepared) return null;
+  const reports = await readAutomaticControls(prepared.targets.ids);
+  return { detail: prepared.detail, targets: prepared.targets.qualify(reports), reports };
+}
+
+function imageToCheck(target: UpdateTarget, detail: ProjectObservationDetail) {
+  const image = railpackImageIdentity(target, detail.railway);
+  return image && (image.caddy !== "minimal-static" || minimalStaticWitnessId(target)) ? image : null;
+}
+
+async function planAutomaticControls(projects: Project[], provider?: UpdateTarget["provider"], force?: boolean, revision?: string) {
+  if (!projects.length) return [];
+  const batch = await readControlProjects(projects, provider);
+  const [schedules, scans] = await Promise.all([
+    readAutomaticControlSchedules(batch.flatMap(project => project?.targets.ids ?? [])),
+    readRailpackScans(batch.flatMap(project =>
+      project?.targets.targets.filter(target => imageToCheck(target, project.detail)).map(target => target.id) ?? [])),
+  ]);
+  const now = Date.now();
+  return batch.map(project => project && {
+    detail: project.detail,
+    targets: project.targets.targets.filter(target => {
+      const identity = controlSource(target, project.detail, now)?.identity || "unavailable";
+      if (automaticControlDue(schedules.get(target.id) ?? null, identity, now, force, revision)) return true;
+      const image = imageToCheck(target, project.detail);
+      return !!image && railpackScanDue(image, scans.get(target.id), now, force, revision);
+    }),
+  });
+}
+
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string) {
-  for (const project of (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active" && (!projectId || project.id === projectId))) {
-    const detail = await observedProjectDetail(project.id, "live");
-    for (const target of (await updateTargets(project.id)).filter(target => target.provider === provider)) {
-      if (automaticControlDue(await readAutomaticControl(target.id), controlSource(target, detail)?.identity || "unavailable", Date.now(), force, forceRevision)) return true;
-      const image = railpackImageIdentity(target, detail.railway);
-      if (image && (image.caddy !== "minimal-static" || minimalStaticWitnessId(target)) && railpackScanDue(image, await readRailpackScan(target.id), Date.now(), force, forceRevision)) return true;
-    }
-  }
-  return false;
+  const plan = await planAutomaticControls(await activeProjects(projectId), provider, force, forceRevision);
+  // A failed preparation should reach the worker instead of being treated as up to date.
+  return plan.some(project => !project || project.targets.length > 0);
 }
 
 export async function scanAutomaticTarget(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>, readers = { dependencies: scanCurrentDependencies, railway: scanRailwaySources }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage" | "coverage">> {
@@ -57,40 +115,66 @@ export async function scanAutomaticTarget(target: UpdateTarget, source: NonNulla
 
 const defaultControls = { projects: () => list<Project>("projects", "live"), detail: observedProjectDetail, targets: updateTargets, scan: scanAutomaticTarget, read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log, scanRailpack: refreshRailpackImage };
 
-export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies: Omit<typeof defaultControls, "scanRailpack"> & { scanRailpack?: typeof refreshRailpackImage } = defaultControls) {
+type ControlDependencies = Omit<typeof defaultControls, "scanRailpack"> & { scanRailpack?: typeof refreshRailpackImage };
+
+export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies?: ControlDependencies) {
+  const controls = dependencies ?? defaultControls;
   const result = { checked: 0, failed: 0, deferred: 0, limited: 0 };
   const attemptRevision = options.forceRevision || (/^[a-f0-9]{40}$/i.test(process.env.GITHUB_SHA || "") ? process.env.GITHUB_SHA : undefined);
-  await mapConcurrent((await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId)), 3, async project => {
+  const projects = dependencies
+    ? (await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId))
+    : await activeProjects(options.projectId);
+  const plan = dependencies ? null : await planAutomaticControls(projects, options.provider, options.force, options.forceRevision);
+  await mapConcurrent(projects, 3, async (project, index) => {
     try {
-      const detail = await dependencies.detail(project.id, "live");
-      for (const target of (await dependencies.targets(project.id)).filter(target => !options.provider || target.provider === options.provider)) {
-        const release = await dependencies.claim(target.id);
+      const planned = plan?.[index];
+      if (plan && !planned) { result.failed++; return; }
+      const plannedDetail = planned?.detail ?? await controls.detail(project.id, "live");
+      const targets = planned?.targets ?? (await controls.targets(project.id)).filter(target => !options.provider || target.provider === options.provider);
+      for (let target of targets) {
+        const release = await controls.claim(target.id);
         if (!release) { result.deferred++; continue; }
         try {
-          const railpack = dependencies.scanRailpack && railpackImageIdentity(target, detail.railway);
-          if (railpack && (railpack.caddy !== "minimal-static" || minimalStaticWitnessId(target))) {
-            const image = await dependencies.scanRailpack!(target, railpack, options.force, attemptRevision).catch(() => "failed" as const);
+          let detail = plannedDetail;
+          let previous: AutomaticControl | null;
+          if (planned) {
+            // Reports and deployments may have changed while this project waited for its turn.
+            const currentProject = await get<Project>("projects", project.id, "live");
+            if (currentProject?.lifecycle !== "active") continue;
+            const current = await readCurrentControlProject(currentProject, target.provider);
+            if (!current) { result.failed++; continue; }
+            const currentTarget = current.targets.find(item => item.id === target.id);
+            if (!currentTarget) continue;
+            detail = current.detail;
+            target = currentTarget;
+            previous = current.reports.get(target.id) ?? null;
+          } else previous = await controls.read(target.id);
+          const railpack = controls.scanRailpack && imageToCheck(target, detail);
+          if (railpack) {
+            const image = await controls.scanRailpack!(target, railpack, options.force, attemptRevision).catch(() => "failed" as const);
             if (image) result[image]++;
           }
           const source = controlSource(target, detail);
           const identity = source?.identity || "unavailable";
-          const previous = await dependencies.read(target.id);
           if (!automaticControlDue(previous, identity, Date.now(), options.force, options.forceRevision)) continue;
           const attemptedAt = new Date().toISOString();
           try {
             if (target.mode !== "wordpress" && !target.repository && !source?.image && !source?.deploymentId && !source?.hosting) throw new CoverageLimit(["database", "network", "image"].includes(target.capability?.family || "") ? "Image externe : une image publique accessible et une empreinte identique sur les déploiements actifs sont nécessaires au contrôle." : "Sources non disponibles ; relier un dépôt ou un inventaire vérifiable au déploiement.");
             if (!source) throw new ApiError("Le relevé de l’hébergeur ou l’inventaire actuel est manquant, périmé ou non vérifiable.");
-            const observation = await dependencies.scan(target, source);
+            const observation = await controls.scan(target, source);
             // A deployment or inventory may change while the scanner is running.
-            const fresh = await dependencies.detail(project.id, "live");
-            const currentTargets = await dependencies.targets(project.id);
+            const freshProject = dependencies
+              ? { detail: await controls.detail(project.id, "live"), targets: await controls.targets(project.id) }
+              : await readCurrentControlProject(await requireProject(project.id, "live"), target.provider);
+            if (!freshProject) throw new ApiError("Le relevé a changé pendant le contrôle. Une reprise automatique est prévue.");
+            const { detail: fresh, targets: currentTargets } = freshProject;
             const current = currentTargets.find(item => item.id === target.id);
             if (fresh.project.lifecycle !== "active" || !current || controlSource(current, fresh)?.identity !== identity) throw new ApiError("Le déploiement a changé pendant le contrôle. Une reprise automatique est prévue.");
-            await dependencies.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: new Date().toISOString(), ...observation });
+            await controls.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: new Date().toISOString(), ...observation });
             result.checked++;
           } catch (error) {
             if (error instanceof CoverageLimit) {
-              await dependencies.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: attemptedAt, coverage: "partial", checks: [], updates: [], warnings: [error.message], ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}) });
+              await controls.write({ targetId: target.id, identity, attemptedAt, attemptRevision, checkedAt: attemptedAt, coverage: "partial", checks: [], updates: [], warnings: [error.message], ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}) });
               result.limited++; continue;
             }
             if (!(error instanceof ApiError)) {
@@ -100,13 +184,13 @@ export async function reconcileAutomaticControls(options: { force?: boolean; for
               console.error(JSON.stringify({ targetId: target.id, kind, frames }));
             }
             const message = error instanceof ApiError ? error.message : "Le contrôle automatique n’a pas abouti. Nouvelle tentative au prochain passage ; consultez les accès et l’inventaire du projet.";
-            await dependencies.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}), targetId: target.id, identity, attemptedAt, attemptRevision, error: message });
+            await controls.write({ ...(previous?.identity === identity ? previous : { checks: [], updates: [], warnings: [] }), ...(error instanceof SourceQualificationError ? { sourceQualification: error.sourceQualification } : {}), targetId: target.id, identity, attemptedAt, attemptRevision, error: message });
             result.failed++;
           }
         } finally { await release(); }
       }
     } catch { result.failed++; }
   });
-  if (result.checked || result.failed || result.limited) await dependencies.log("live", "hosting.automatic_control", `Contrôle automatique : ${result.checked} analyse(s) réussie(s), ${result.limited} couverture(s) limitée(s), ${result.failed} échec(s), ${result.deferred} différé(s).`);
+  if (result.checked || result.failed || result.limited) await controls.log("live", "hosting.automatic_control", `Contrôle automatique : ${result.checked} analyse(s) réussie(s), ${result.limited} couverture(s) limitée(s), ${result.failed} échec(s), ${result.deferred} différé(s).`);
   return result;
 }

@@ -32,6 +32,7 @@ export type AutomaticControl = {
   error?: string;
   coverage?: "partial";
 };
+export type AutomaticControlSchedule = Pick<AutomaticControl, "identity" | "attemptedAt" | "attemptRevision" | "checkedAt" | "error">;
 
 // Include deployment IDs as well as commits: redeploying the same sources also
 // invalidates the previous observation. Never substitute the branch head.
@@ -89,7 +90,7 @@ export function controlMatches(control: AutomaticControl, target: UpdateTarget, 
   return source?.identity === control.identity || control.coverage === "partial" && control.identity === "unavailable" && !source;
 }
 
-export function automaticControlDue(previous: AutomaticControl | null, identity: string, now = Date.now(), force = false, forceRevision?: string) {
+export function automaticControlDue(previous: AutomaticControlSchedule | null, identity: string, now = Date.now(), force = false, forceRevision?: string) {
   if (!previous || previous.identity !== identity || force && (!forceRevision || previous.attemptRevision !== forceRevision)) return true;
   // Retry failures after five minutes, independently of the hourly success cadence.
   const age = now - Date.parse(previous.attemptedAt);

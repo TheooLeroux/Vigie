@@ -4,7 +4,8 @@ import test from "node:test";
 import { authFixture } from "./auth-fixture";
 import { GET as readWatch } from "../src/app/api/[...path]/route";
 import { GET } from "../src/app/api/maintenance/security-watch/route";
-import { readSecurityWatchSnapshot, refreshSecurityWatchSnapshot } from "../src/lib/security-watch-cache";
+import { loadSecurityWatchSnapshot, readSecurityWatchSnapshot, refreshSecurityWatchSnapshot } from "../src/lib/security-watch-cache";
+import { sqliteDatabase } from "../src/lib/db-sqlite";
 import { claimScheduledMaintenance } from "../src/lib/scheduled-maintenance";
 
 test("Surveillance planifiée : authentification, déclenchement automatique et cache privé", async t => {
@@ -65,12 +66,27 @@ test("Surveillance planifiée : authentification, déclenchement automatique et 
   await refreshSecurityWatchSnapshot(AbortSignal.abort());
   assert.deepEqual(await readSecurityWatchSnapshot(), snapshot);
   t.mock.timers.tick(10 * 60_000);
+  const entries = new Map<string, unknown>();
+  const cache = {
+    get: async (key: string) => entries.get(key) ?? null,
+    set: async (key: string, value: unknown) => { entries.set(key, value); },
+  };
   await Promise.all([
-    refreshSecurityWatchSnapshot(new AbortController().signal),
-    refreshSecurityWatchSnapshot(new AbortController().signal),
+    refreshSecurityWatchSnapshot(new AbortController().signal, cache),
+    refreshSecurityWatchSnapshot(new AbortController().signal, cache),
   ]);
   const updated = await readSecurityWatchSnapshot();
   assert.ok(updated && updated.savedAt > snapshot.savedAt);
+  const database = sqliteDatabase();
+  const prepare = t.mock.method(database, "prepare");
+  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, cache), { snapshot: updated, source: "cache" });
+  assert.equal(prepare.mock.callCount(), 0);
+  assert.deepEqual(await loadSecurityWatchSnapshot("2099-01-01T00:00:00.000Z", cache), { snapshot: updated, source: "neon" });
+  assert.deepEqual(await loadSecurityWatchSnapshot(null, cache), { snapshot: updated, source: "neon" });
+  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, {
+    ...cache, get: async () => { throw new Error("cache unavailable"); },
+  }), { snapshot: updated, source: "neon" });
+  prepare.mock.restore();
   assert.equal(advisoryReads, 2);
   const fallback = await claimScheduledMaintenance("fallback");
   assert.ok(fallback);

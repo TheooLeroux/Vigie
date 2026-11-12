@@ -85,11 +85,14 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
 
   useEffect(() => {
     const controller = new AbortController();
+    let watchRevision: string | null | undefined;
     const queue = createRefreshQueue(async () => {
       setBusy(true);
       setError(false);
       try {
-        const { savedAt, ...watch } = await request("security-watch", "GET", undefined, { signal: controller.signal });
+        const path = watchRevision === undefined ? "security-watch"
+          : `security-watch?revision=${encodeURIComponent(watchRevision ?? "missing")}`;
+        const { savedAt, ...watch } = await request(path, "GET", undefined, { signal: controller.signal });
         if (controller.signal.aborted) return;
         const next = { savedAt, watch };
         setSnapshot(next);
@@ -112,7 +115,10 @@ export function SecurityWatchPanel({ sessionId, initialWatch, request, onProject
     refresh.current = () => queue.invalidate(["watch"]);
     refresh.current();
     const unsubscribe = subscribe(change => {
-      if (change.watch) refresh.current();
+      if (change.watch) {
+        watchRevision = change.watchRevision;
+        refresh.current();
+      }
     });
     window.addEventListener("online", refresh.current);
     return () => {

@@ -2,7 +2,7 @@ import "./auth-fixture";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { automaticControlDue, automaticControlFresh, controlInterval, controlRenewalInterval, controlSource, hasVerifiedSecurityControl, type AutomaticControl } from "../src/lib/automatic-control-state";
-import { claimAutomaticControl, readAutomaticControl, reconcileAutomaticControls, writeAutomaticControl } from "../src/lib/automatic-controls";
+import { automaticControlsNeeded, claimAutomaticControl, readAutomaticControl, reconcileAutomaticControls, writeAutomaticControl } from "../src/lib/automatic-controls";
 import { healthCheck, healthFixture, healthUpdates } from "./project-health-fixture";
 import { projectHealth } from "../src/lib/project-health";
 import type { UpdateTarget } from "../src/lib/updates/types";
@@ -234,6 +234,8 @@ test("Contrôle réel depuis la base : les observations hébergeur sont chargée
   const target = (await updateTargets(project.id))[0];
   assert.equal(detail.vercel?.[0].production?.commit, commit);
   assert.equal(controlSource(target, detail)?.commit, commit);
+  assert.equal(await automaticControlsNeeded("vercel", false, project.id), true);
+  assert.equal(await automaticControlsNeeded("railway", false, project.id), false);
   let scanned = false;
   const result = await reconcileAutomaticControls({ provider: "vercel" }, {
     projects: async () => [project], detail: observedProjectDetail, targets: updateTargets,
@@ -244,6 +246,13 @@ test("Contrôle réel depuis la base : les observations hébergeur sont chargée
   assert.equal(result.checked, 1);
   assert.equal(result.failed, 0);
   assert.equal((await readAutomaticControl(target.id))?.error, undefined);
+  assert.equal(await automaticControlsNeeded("vercel", false, project.id), false);
+  assert.equal(await automaticControlsNeeded("vercel", true, project.id, "a".repeat(40)), true);
+  assert.deepEqual(await reconcileAutomaticControls({ provider: "vercel", projectId: project.id }),
+    { checked: 0, failed: 0, deferred: 0, limited: 0 });
+  remote.production!.id = "same-commit-redeployed";
+  await applyVercelSnapshot(connection.id, [remote]);
+  assert.equal(await automaticControlsNeeded("vercel", false, project.id), true);
   // The same deployed-source identity remains usable without a Git repository.
   remote.repository = null; remote.production!.repository = null; remote.production!.commit = null;
   await applyVercelSnapshot(connection.id, [remote]);
@@ -251,7 +260,7 @@ test("Contrôle réel depuis la base : les observations hébergeur sont chargée
   let deploymentRead = false;
   const noGit = await reconcileAutomaticControls({ provider: "vercel", force: true }, {
     projects: async () => [project], detail: observedProjectDetail, targets: async () => noGitTargets,
-    scan: async (_target, source) => { assert.equal(source.deploymentId, "deployed"); assert.equal(source.commit, null); deploymentRead = true; return { checks: [], updates: [], warnings: [] }; },
+    scan: async (_target, source) => { assert.equal(source.deploymentId, "same-commit-redeployed"); assert.equal(source.commit, null); deploymentRead = true; return { checks: [], updates: [], warnings: [] }; },
     read: readAutomaticControl, write: writeAutomaticControl, claim: claimAutomaticControl, log: async () => {},
   });
   assert.equal(deploymentRead, true); assert.equal(noGit.checked, 1); assert.equal(noGit.limited, 0);

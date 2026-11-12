@@ -71,5 +71,5 @@ export async function prepareUpdateTargets({ project, vercel = [], railway = [],
       return { ...target, capability, unavailable: project.lifecycle !== "active" ? "Projet archivé." : capability.status !== "automatic" ? capability.reason : target.unavailable || (!target.url && capability.adapter !== "node-worker" && capability.adapter !== "railway-image" ? "Renseignez une URL pour vérifier le site après publication." : !target.configured ? "Configurez l’accès de mise à jour une première fois." : target.mode === "git" ? !target.branch ? "Synchronisez l’hébergement pour identifier la branche de production." : !repositoryAllowed(target.repository!) || !githubUpdateToken(target.repository!) ? "Autorisez ce dépôt dans les accès de mise à jour GitHub." : null : target.mode === "archive" && !configured.has(target.id) ? "Ajoutez les sources du projet une première fois." : null) };
     });
   }
-  return { ids: targets.map(target => target.id), qualify };
+  return { ids: targets.map(target => target.id), targets, qualify };
 }

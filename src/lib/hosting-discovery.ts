@@ -52,12 +52,13 @@ async function connection(id: string): Promise<ConnectionIdentity> {
   if (!row) throw new ApiError("Connexion introuvable.", 404);
   return JSON.parse(row.data);
 }
-async function rows(connectionId?: string): Promise<Row[]> {
+async function rows(connectionId?: string, projectIds?: string[]): Promise<Row[]> {
   return (await (await hostingStorage())
     .prepare(
-      `SELECT i.* FROM hosting_installations i JOIN hosting_connections c ON c.id=i.connection_id WHERE i.workspace='live' AND i.scope=json_extract(c.data,'$.endpoint')||'|'||json_extract(c.data,'$.username') ${connectionId ? "AND i.connection_id=?" : ""}`,
+      `SELECT i.* FROM hosting_installations i JOIN hosting_connections c ON c.id=i.connection_id WHERE i.workspace='live' AND i.scope=json_extract(c.data,'$.endpoint')||'|'||json_extract(c.data,'$.username') ${connectionId ? "AND i.connection_id=?" : ""}` +
+        (projectIds ? ` AND i.project_id IN (${projectIds.map(() => "?").join(",") || "NULL"})` : ""),
     )
-    .all(...(connectionId ? [connectionId] : []))) as Row[];
+    .all(...(connectionId ? [connectionId] : []), ...(projectIds ?? []))) as Row[];
 }
 async function requireInstallation(id: string, lock = false): Promise<Row> {
   if (lock && isPostgres())
@@ -163,6 +164,7 @@ async function view(
   row: Row,
   host: ConnectionIdentity,
   data: Awaited<ReturnType<typeof projectData>>,
+  includeCandidates = true,
 ): Promise<HostingInstallationView> {
   const item = JSON.parse(row.data) as HostingInstallation;
   const project = data.projects.find((p) => p.id === row.project_id);
@@ -184,7 +186,7 @@ async function view(
       ? { id: project.id, name: project.name, lifecycle: project.lifecycle }
       : null,
     linkMethod: row.link_method,
-    candidates: findInstallationMatches(item, host, data),
+    candidates: includeCandidates ? findInstallationMatches(item, host, data) : [],
   };
 }
 export async function hostingDiscovery(connectionId: string): Promise<HostingDiscovery> {
@@ -232,15 +234,17 @@ export async function hostingDiscovery(connectionId: string): Promise<HostingDis
 export async function projectHostingInstallations(projectId: string) {
   return (await projectHostingInstallationsByProject(new Set([projectId]))).get(projectId) || [];
 }
-export async function projectHostingInstallationsByProject(projectIds: ReadonlySet<string>, projects?: Project[]) {
+export async function projectHostingInstallationsByProject(projectIds: ReadonlySet<string>, projects?: Project[], includeCandidates = true) {
   const result = new Map<string, (HostingInstallationView & { connectionName: string })[]>();
-  const installations = (await rows()).filter(row => row.project_id && projectIds.has(row.project_id));
+  const installations = await rows(undefined, [...projectIds]);
   if (!installations.length) return result;
-  const data = await projectData(projects);
+  const data = includeCandidates
+    ? await projectData(projects)
+    : { projects: projects ?? [], services: [], environments: [], accesses: [] };
   const hosts = new Map([...new Set(installations.map(row => row.connection_id))].map(id => [id, connection(id)]));
   const views = await Promise.all(installations.map(async row => {
     const host = await hosts.get(row.connection_id)!;
-    return { ...(await view(row, host, data)), connectionName: host.name };
+    return { ...(await view(row, host, data, includeCandidates)), connectionName: host.name };
   }));
   installations.forEach((row, index) => {
     const projectId = row.project_id!;

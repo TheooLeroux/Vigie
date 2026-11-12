@@ -70,7 +70,7 @@ export async function withRailwayCredentials<T>(id: string, run: (token: string,
   return run(openConnectorSecret(stored.secret_cipher, context(stored)), stored.workspace_id);
 }
 const running = new Set<string>();
-export async function railwayState({ includeDisplayLabels = true } = {}): Promise<RailwayState> {
+export async function railwayState({ includeDisplayLabels = true, projectIds }: { includeDisplayLabels?: boolean; projectIds?: string[] } = {}): Promise<RailwayState> {
   const connections = (
     (await (await storage())
       .prepare("SELECT * FROM railway_connections ORDER BY rowid")
@@ -79,8 +79,10 @@ export async function railwayState({ includeDisplayLabels = true } = {}): Promis
   const names = new Map(connections.map((c) => [c.id, c.name]));
   const projects = (await Promise.all((
     (await (await storage())
-      .prepare("SELECT * FROM railway_projects ORDER BY rowid")
-      .all()) as ProjectRow[]
+      .prepare("SELECT * FROM railway_projects" +
+        (projectIds ? ` WHERE project_id IN (${projectIds.map(() => "?").join(",") || "NULL"})` : "") +
+        " ORDER BY rowid")
+      .all(...(projectIds ?? []))) as ProjectRow[]
   ).map(async (r) => ({
     ...(JSON.parse(r.data) as RailwayProject),
     connectionId: r.connection_id,

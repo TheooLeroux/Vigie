@@ -12,8 +12,8 @@ type Dependencies = {
 };
 const providers: Record<ControlProvider, Dependencies> = {
   o2switch: { connections: hostingConnections, synchronize: discoverHostingConnection },
-  vercel: { connections: async () => (await vercelState()).connections, synchronize: synchronizeVercel },
-  railway: { connections: async () => (await railwayState()).connections, synchronize: synchronizeRailway },
+  vercel: { connections: async () => (await vercelState({ projectIds: [] })).connections, synchronize: synchronizeVercel },
+  railway: { connections: async () => (await railwayState({ projectIds: [] })).connections, synchronize: synchronizeRailway },
 };
 // Refresh provider control independently of site deployments. A failed account must
 // not prevent other accounts from being checked; existing observations stay dated.
