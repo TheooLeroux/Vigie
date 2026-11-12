@@ -7,7 +7,7 @@ import type { SecurityFinding } from "./types";
 const version = z.string().max(80).regex(/^\d+(?:\.\d+){0,7}$/);
 export const wordpressPluginSlug = z.string().regex(/^[a-z0-9_][a-z0-9_-]{0,149}$/i);
 const component = z.object({ slug: z.string().regex(/^[a-z0-9_-]+$/i).max(150), current: z.string().max(80).regex(/^[^\x00-\x1f]*$/), target: z.string().max(80).regex(/^[^\x00-\x1f]*$/), requiresPhp: z.string().max(40), requiresWordPress: z.string().max(40), requiresPlugins: z.array(z.string().regex(/^[a-z0-9_-]+$/i)).max(100).default([]), updateOrigin: z.enum(["wordpress.org", "external", "unknown"]).optional(), manualReason: z.string().max(500).optional(), closed: z.literal(true).optional(), template: z.string().max(150).optional(), officialOffer: z.object({ source: z.enum(["wordpress.org", "vendor"]), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).optional() });
-export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default(""), manualReason: z.string().max(500).optional(), integrity: z.enum(["verified", "unverified"]).optional() }), php: version, plugins: z.array(component).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]), licenses: z.array(z.object({ component: z.enum(["wp-rocket", "Divi"]), status: z.enum(["active", "expired", "disconnected", "unknown"]) })).max(2).optional(), removePlugins: z.array(wordpressPluginSlug).max(1000).optional(), removalDependencies: z.array(wordpressPluginSlug).max(1000).optional() }).superRefine((plan, context) => {
+export const wordpressPlanSchema = z.object({ wordpress: z.object({ current: version, target: version, requiresPhp: z.string().max(40).default(""), manualReason: z.string().max(500).optional(), integrity: z.enum(["verified", "unverified"]).optional() }), php: version, plugins: z.array(component.extend({ active: z.boolean().optional() })).max(1000), themes: z.array(component).max(300), warnings: z.array(z.string().max(500)).max(1500).default([]), licenses: z.array(z.object({ component: z.enum(["wp-rocket", "Divi"]), status: z.enum(["active", "expired", "disconnected", "unknown"]) })).max(2).optional(), removePlugins: z.array(wordpressPluginSlug).max(1000).optional(), removalDependencies: z.array(wordpressPluginSlug).max(1000).optional() }).superRefine((plan, context) => {
   for (const item of plan.plugins) if (item.current !== item.target && (!version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) < 0)) context.addIssue({ code: "custom", message: "Version d’extension non admissible.", path: ["plugins"] });
   for (const item of plan.themes) if (item.current !== item.target && (!item.officialOffer || !version.safeParse(item.current).success || !version.safeParse(item.target).success || compareWordPressVersions(item.target, item.current) <= 0)) context.addIssue({ code: "custom", message: "Mise à jour de thème non admissible.", path: ["themes"] });
 });
@@ -68,7 +68,16 @@ if (($args[0] ?? '') === 'apply-offer') {
     return hash_equals($fingerprint, hash('sha256', $package)) ? $reply : new WP_Error('official_offer_changed');
   }, PHP_INT_MAX, 2);
   $skin = new Automatic_Upgrader_Skin();
-  $upgrader = $kind === 'plugin' ? new Plugin_Upgrader($skin) : new Theme_Upgrader($skin);
+  if ($kind === 'plugin') {
+    $upgrader = new class($skin) extends Plugin_Upgrader {
+      public function deactivate_plugin_before_upgrade($response, $plugin) {
+        // The agent already puts WordPress into maintenance mode. Keep active plugins loaded on the next request.
+        return $response;
+      }
+    };
+  } else {
+    $upgrader = new Theme_Upgrader($skin);
+  }
   if ($upgrader->upgrade($file, array('clear_update_cache' => false)) !== true) { WP_CLI::error('component_update_failed'); }
   return;
 }
@@ -123,7 +132,7 @@ foreach (get_plugins() as $file => $headers) {
   if ($manual !== '') { $next = $current; }
   $requiresPhp = $update->requires_php ?? false;
   if ($requiresPhp === false) { $requiresPhp = $headers['RequiresPHP'] ?? ''; }
-  $entry = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $requiresPhp, 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies, 'updateOrigin' => $source, 'manualReason' => $manual);
+  $entry = array('slug' => $slug, 'current' => $current, 'target' => $next, 'active' => is_plugin_active($file), 'requiresPhp' => $requiresPhp, 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies, 'updateOrigin' => $source, 'manualReason' => $manual);
   if ($next !== $current) { $entry['officialOffer'] = $official; }
   $data['plugins'][] = $entry;
 }

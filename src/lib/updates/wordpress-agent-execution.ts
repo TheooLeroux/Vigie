@@ -59,6 +59,7 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
       throw error;
     });
     const checkedAt = Date.now();
+    if (update.cacheFlush === "failed") result.warnings.push("Le cache objet WordPress n’a pas pu être vidé. Vérifiez son état auprès de l’hébergeur.");
     step = "Contrôle WordPress après installation non confirmé. Vérifiez le site et les versions chargées avant une reprise.";
     await progress("verifying", "Contrôle du site et des versions installées par l’agent local.");
     await refreshWordPressWeb(target, "postflight");
@@ -71,6 +72,8 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     // A cached public page can still answer while the actual WordPress is broken.
     const web = (await hostingInstallation(target.remoteId)).inventory;
     if (!web || web.source !== "wordpress-observer" || web.collectionMode === "early" || web.error || !web.observedAt || Date.parse(web.observedAt) < checkedAt - 5000 || web.wordpress?.version !== installed.wordpress.current || web.php?.version !== installed.php || web.plugins.some(plugin => !plugin.mustUse && removals.includes(plugin.slug)) || installed.plugins.some(item => (web.plugins.find(plugin => !plugin.mustUse && plugin.slug === item.slug)?.version || "") !== item.current) || installed.themes.some(item => (web.themes.find(theme => theme.slug === item.slug)?.version || "") !== item.current)) throw new ApiError("Le WordPress chargé côté web ne confirme pas les versions installées.");
+    const webActivation = new Map(web.plugins.filter(plugin => !plugin.mustUse).map(plugin => [plugin.slug, plugin.active]));
+    if (installed.plugins.some(plugin => plugin.active !== undefined && webActivation.get(plugin.slug) !== plugin.active)) throw new ApiError("Le WordPress chargé côté web ne confirme pas l’état d’activation des extensions.");
     if (installed.licenses) result.wordpressLicenses = { checkedAt: new Date().toISOString(), items: installed.licenses };
     const final = wordpressMaintenanceCheck(remainingPlan, "after", "WordPress, extensions et thèmes réellement installés", await scan(installed, false));
     result.checks.push(final); requireSecurityPass(final);

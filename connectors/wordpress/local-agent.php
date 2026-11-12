@@ -179,13 +179,21 @@ function va_update(array $config, array $job): array {
             }
         }
         if (($plan['wordpress']['integrity'] ?? null) !== 'unverified') { va_wp($config, ['core','verify-checksums']); }
-        va_wp($config, ['cache','flush']);
+        // An explicit cache failure is a warning. A CLI crash or a missing result still fails the operation.
+        $cacheResult = va_wp($config, ['eval', 'echo "\nVIGIE_CACHE_FLUSH=".(wp_cache_flush() ? "flushed" : "failed")."\n";']);
+        if (!preg_match('/^VIGIE_CACHE_FLUSH=(flushed|failed)$/m', $cacheResult, $cacheMatch)) { throw new RuntimeException('cache_flush_unconfirmed'); }
     } finally {
         // This removal does not need WordPress to boot after a fatal plugin error.
         if (is_file($config['root'].'/.maintenance') && !is_link($config['root'].'/.maintenance')) { unlink($config['root'].'/.maintenance'); }
     }
     $installed = va_plan($config); va_same_versions($installed, $plan, true);
-    return ['plan' => $installed];
+    $previousActivation = array_column($before['plugins'], 'active', 'slug');
+    foreach ($installed['plugins'] as $plugin) {
+        if (!is_bool($plugin['active'] ?? null) || ($previousActivation[$plugin['slug']] ?? null) !== $plugin['active']) {
+            throw new RuntimeException('plugin_activation_changed');
+        }
+    }
+    return ['plan' => $installed, 'cacheFlush' => $cacheMatch[1]];
 }
 function va_restore(array $config, array $job): array {
     // Full data restoration is explicitly requested, never an automatic failure handler.

@@ -92,7 +92,7 @@ add_filter('site_transient_update_plugins', static function ($updates) {
 });
 `);
     await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/plugins/vigie-retired/uninstall.php`], "<?php delete_option('vigie_retired_data');\n");
-    await shell(`wp --path=${root} plugin activate vigie-retired
+    await shell(`wp --path=${root} plugin activate vigie-retired classic-editor
 wp --path=${root} option update vigie_retired_data preserved`);
     // Preserve a locally edited public plugin while a different public plugin updates.
     await exec(["sh", "-c", 'printf "\\n// Vigie custom code must survive\\n" >> "$1"', "sh", `${root}/wp-content/plugins/akismet/akismet.php`]);
@@ -148,7 +148,16 @@ wp --path=${root} option update vigie_retired_data preserved`);
     assert.deepEqual(plan.removePlugins, ["vigie-retired"]);
     await assert.rejects(op(randomUUID(), "update", { plan: { ...plan, removePlugins: ["vigie-required"] }, webPhp: php }), /plugin_required/);
     const updateRun = randomUUID();
-    const updated = agentPlan((await op(updateRun, "update", { plan, webPhp: php })).plan); report.after = updated;
+    await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/mu-plugins/vigie-cache-unavailable.php`], `<?php
+add_action('wp_loaded', static function () {
+    $GLOBALS['wp_object_cache'] = new class extends WP_Object_Cache {
+        public function flush() { return false; }
+    };
+});
+`);
+    const updatedResult = await op(updateRun, "update", { plan, webPhp: php });
+    assert.equal(updatedResult.cacheFlush, "failed");
+    const updated = agentPlan(updatedResult.plan); report.after = updated;
     await shell(`test ! -e '${directory}/backups/${updateRun}'`);
     assert.ok(!updated.plugins.some(item => item.slug === "vigie-retired"));
     assert.ok(updated.plugins.some(item => item.slug === "vigie-retained"));
@@ -160,6 +169,9 @@ wp --path=${root} option update vigie_retired_data preserved`);
     assert.equal(await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]), customBefore);
     assert.equal(updated.plugins.find(item => item.slug === "classic-editor")?.current, plan.plugins.find(item => item.slug === "classic-editor")?.target);
     assert.notEqual(updated.plugins.find(item => item.slug === "classic-editor")?.current, "1.5");
+    assert.equal(updated.plugins.find(item => item.slug === "classic-editor")?.active, true);
+    assert.equal(updated.plugins.find(item => item.slug === "akismet")?.active, false);
+    check("active plugin stays active and signed verification continues after an explicit cache flush failure");
     check("customized public plugin preserved byte for byte while another plugin updates");
     assert.equal(updated.php, php);
     assert.equal(updated.themes.find(item => item.slug === theme.slug)?.current, theme.target);
@@ -198,7 +210,9 @@ wp --path=${root} option update vigie_retired_data preserved`);
     assert.equal(customCore.wordpress.integrity, "unverified");
     const coreHash = await exec(["sha256sum", `${root}/wp-includes/version.php`]);
     const secondRun = randomUUID();
-    const withCustomCore = agentPlan((await op(secondRun, "update", { plan: customCore, webPhp: php })).plan);
+    const customCoreResult = await op(secondRun, "update", { plan: customCore, webPhp: php });
+    assert.equal(customCoreResult.cacheFlush, "flushed");
+    const withCustomCore = agentPlan(customCoreResult.plan);
     assert.equal(withCustomCore.wordpress.current, "6.8.3");
     assert.equal(await exec(["sha256sum", `${root}/wp-includes/version.php`]), coreHash);
     assert.notEqual(withCustomCore.plugins.find(item => item.slug === "classic-editor")?.current, "1.5");
