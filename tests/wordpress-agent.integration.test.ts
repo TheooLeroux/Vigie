@@ -74,14 +74,23 @@ printf '<?php /* Plugin Name: Private fixture\nVersion: 1.0\nUpdate URI: https:/
     for (const slug of ["vigie-retired", "vigie-retained", "vigie-required", "vigie-dependent"]) {
       await shell(`mkdir -p ${root}/wp-content/plugins/${slug}`);
       const dependency = slug === "vigie-dependent" ? "Requires Plugins: vigie-required\n" : "";
+      const phpRequirement = slug === "vigie-retained" ? "Requires PHP: 8.1\n" : "";
       const plugin = `<?php
 /*
 Plugin Name: ${slug}
 Version: 1.0
-${dependency}*/
+${dependency}${phpRequirement}*/
 `;
       await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/plugins/${slug}/main.php`], plugin);
     }
+    await shell(`mkdir -p ${root}/wp-content/mu-plugins`);
+    await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/mu-plugins/vigie-plugin-php-requirement.php`], `<?php
+add_filter('site_transient_update_plugins', static function ($updates) {
+    $updates = is_object($updates) ? $updates : new stdClass();
+    $updates->response['vigie-retained/main.php'] = (object) array('new_version' => '1.0', 'requires_php' => false);
+    return $updates;
+});
+`);
     await exec(["sh", "-c", 'cat > "$1"', "sh", `${root}/wp-content/plugins/vigie-retired/uninstall.php`], "<?php delete_option('vigie_retired_data');\n");
     await shell(`wp --path=${root} plugin activate vigie-retired
 wp --path=${root} option update vigie_retired_data preserved`);
@@ -89,6 +98,8 @@ wp --path=${root} option update vigie_retired_data preserved`);
     await exec(["sh", "-c", 'printf "\\n// Vigie custom code must survive\\n" >> "$1"', "sh", `${root}/wp-content/plugins/akismet/akismet.php`]);
     const customBefore = await exec(["sha256sum", `${root}/wp-content/plugins/akismet/akismet.php`]);
     let plan = agentPlan((await op(run, "inspect")).plan); report.before = plan;
+    assert.equal(plan.plugins.find(item => item.slug === "vigie-retained")?.requiresPhp, "8.1");
+    check("boolean false in a plugin offer falls back to its installed PHP requirement");
     assert.equal(plan.plugins.find(item => item.slug === "akismet")?.target, "5.3");
     assert.match(plan.plugins.find(item => item.slug === "akismet")?.manualReason || "", /personnalisés|intégrité/);
     assert.notEqual(plan.plugins.find(item => item.slug === "classic-editor")?.target, "1.5");

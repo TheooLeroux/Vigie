@@ -121,7 +121,9 @@ foreach (get_plugins() as $file => $headers) {
     if ($check->return_code !== 0 || trim($check->stderr) !== '' || trim($check->stdout) !== 'Success: Verified 1 of 1 plugins.') { $manual = 'Fichiers personnalisés ou intégrité non vérifiable : faire vérifier les différences avant mise à jour.'; }
   }
   if ($manual !== '') { $next = $current; }
-  $entry = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $update->requires_php ?? ($headers['RequiresPHP'] ?? ''), 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies, 'updateOrigin' => $source, 'manualReason' => $manual);
+  $requiresPhp = $update->requires_php ?? false;
+  if ($requiresPhp === false) { $requiresPhp = $headers['RequiresPHP'] ?? ''; }
+  $entry = array('slug' => $slug, 'current' => $current, 'target' => $next, 'requiresPhp' => $requiresPhp, 'requiresWordPress' => $update->requires ?? ($headers['RequiresWP'] ?? ''), 'requiresPlugins' => $dependencies, 'updateOrigin' => $source, 'manualReason' => $manual);
   if ($next !== $current) { $entry['officialOffer'] = $official; }
   $data['plugins'][] = $entry;
 }
