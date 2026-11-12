@@ -1,8 +1,13 @@
 import { controlSource } from "../automatic-control-state";
 import type { ProjectObservationDetail } from "../types";
-import { remainingNpmFindings, type UpdateResult, type UpdateState, type UpdateTarget } from "./types";
+import { remainingNpmFindings, type UpdateResult, type UpdateRun, type UpdateState, type UpdateTarget } from "./types";
 
 export const assessmentInterval = 24 * 60 * 60_000;
+export const noAssessmentTargetMessage = "Aucun service admissible au bilan. Consultez les blocs à qualifier ou les services rattachés au projet.";
+
+export function assessmentHasNoTarget(run: UpdateRun) {
+  return run.purpose === "assessment" && run.stage === "completed" && run.targets.length === 0 && run.results.length === 0;
+}
 
 export function finishAssessment(result: UpdateResult, changes: string[], limitation?: string) {
   result.assessment = { changes: [...new Set(changes)], ...(limitation ? { limitation } : {}) };

@@ -1,15 +1,19 @@
 import { withAuditActor } from "../audit-context";
-import { list, log, transaction } from "../db";
+import { list, log, requireProject, transaction } from "../db";
+import { ApiError } from "../http";
 import type { Project } from "../types";
 import { startProjectUpdate } from "./service";
 import { updateStorage } from "./storage";
 import type { UpdateRun } from "./types";
+import { assessmentHasNoTarget } from "./assessment";
 
 // Assessments can never have published anything. Only an unchanged report with
 // no heartbeat for two hours may release its scopes after a dead runner.
-export async function expireInterruptedAssessments(now = Date.now()) {
+export async function expireInterruptedAssessments(now = Date.now(), projectId?: string) {
   const db = await updateStorage();
-  const rows = await db.prepare("SELECT data FROM update_runs WHERE json_extract(data,'$.purpose')='assessment' AND stage IN ('queued','checking','updating')").all() as { data: string }[];
+  const scope = projectId ? " AND project_id=?" : "";
+  const rows = await db.prepare("SELECT data FROM update_runs WHERE json_extract(data,'$.purpose')='assessment' AND stage IN ('queued','checking','updating')" + scope)
+    .all(...(projectId ? [projectId] : [])) as { data: string }[];
   for (const row of rows) {
     const run = JSON.parse(row.data) as UpdateRun;
     if (now - Date.parse(run.updatedAt) < 2 * 60 * 60_000) continue;
@@ -24,15 +28,27 @@ export async function expireInterruptedAssessments(now = Date.now()) {
   }
 }
 
-export async function planDailyAssessments(dependencies = { projects: () => list<Project>("projects", "live"), start: startProjectUpdate, expire: expireInterruptedAssessments }) {
-  await dependencies.expire();
-  const result = { runs: [] as string[], deferred: 0, failed: 0 };
-  for (const project of (await dependencies.projects()).filter(project => project.lifecycle === "active")) {
+const dailyDependencies = {
+  projects: async (projectId?: string) => projectId ? [await requireProject(projectId, "live")] : list<Project>("projects", "live"),
+  start: startProjectUpdate,
+  expire: (projectId?: string) => expireInterruptedAssessments(Date.now(), projectId),
+};
+
+export async function planDailyAssessments(dependencies = dailyDependencies, projectId?: string) {
+  const projects = (await dependencies.projects(projectId)).filter(project => project.lifecycle === "active" && (!projectId || project.id === projectId));
+  if (projectId && !projects.length) throw new ApiError("Le projet de la relance doit être actif.", 409);
+  await dependencies.expire(projectId);
+  const result = { runs: [] as string[], noEligibleTarget: 0, deferred: 0, failed: 0 };
+  for (const project of projects) {
     try {
-      const run = await dependencies.start({ projectId: project.id }, async () => {}, { assessment: true });
+      const run = await dependencies.start({ projectId: project.id }, async () => {}, { assessment: true, retryAssessment: Boolean(projectId) });
       if (run.purpose === "assessment" && run.stage === "queued") result.runs.push(run.id);
+      else if (assessmentHasNoTarget(run)) result.noEligibleTarget++;
       else result.deferred++;
-    } catch { result.failed++; }
+    } catch (error) {
+      if (projectId) throw error;
+      result.failed++;
+    }
   }
   if (result.runs.length > 256) throw new Error("Le parc dépasse le nombre de bilans admis par cette matrice.");
   return result;

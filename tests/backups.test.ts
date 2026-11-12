@@ -92,6 +92,7 @@ test("Le ZIP vérifié s’affiche une seule fois et se télécharge uniquement 
     const groups = await listing.json();
     assert.equal(groups.length, 1);
     assert.equal(groups[0].projectName, project.name);
+    assert.deepEqual(groups[0].latestAttempt, { slot: "2026-11-16", state: "failed" });
     assert.equal(groups[0].backups.length, 1);
     const [{ id, createdAt }] = groups[0].backups;
     assert.equal(createdAt, slot.toISOString());
@@ -111,7 +112,9 @@ test("Le ZIP vérifié s’affiche une seule fois et se télécharge uniquement 
     assert.equal(sha(downloaded), sha(await readFile(join(directory, name))));
     await unlink(join(directory, name));
     assert.equal((await get(route)).status, 404);
-    assert.deepEqual(await (await get(["backups"])).json(), []);
+    const missingGroups = await (await get(["backups"])).json();
+    assert.equal(missingGroups[0].latestAttempt.state, "failed");
+    assert.deepEqual(missingGroups[0].backups, []);
 
     const sites = [
       { installationId: "one", projectId: project.id, domain: "one.example.test" },
@@ -121,7 +124,7 @@ test("Le ZIP vérifié s’affiche une seule fois et se télécharge uniquement 
     const copy = (_folder: string, output: string) => writeFile(output, downloaded);
     assert.deepEqual(await Promise.all(sites.map(site => runBackup(site, copy, slot))), [true, true, true]);
     assert.deepEqual(await Promise.all(sites.map(site => runBackup(site, copy, slot))), [false, false, false]);
-    const bySite = await (await get(["backups"])).json();
+    const bySite = (await (await get(["backups"])).json()).filter((group: { id: string }) => group.id.startsWith("o2switch:"));
     assert.deepEqual(bySite.map((site: { projectName: string }) => site.projectName), sites.map(site => site.domain));
     assert.ok(bySite.every((site: { backups: unknown[] }) => site.backups.length === 1));
     const unlinked = await get(["backups", bySite[2].backups[0].id, "download"]);

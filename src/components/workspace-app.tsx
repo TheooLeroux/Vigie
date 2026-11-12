@@ -1300,7 +1300,7 @@ function WorkspaceContent({ user, sessionId, initialWatch }: WorkspaceProps) {
                       </section>
                     )}
                     {view === "backup" && (
-                      <BackupsPanel request={api} />
+                      <BackupsPanel request={api} projects={data.projects} onProject={openProject} />
                     )}
                     {view === "activity" && (
                       <ActivityPanel

@@ -109,6 +109,17 @@ test("Publication statique : tous les fichiers et le domaine actif sont comparé
   assert.equal((await verifyStaticDeployment(target, { deploymentId: "dpl_static", commit }, build(), { ...dependencies, read: async (t, path) => path.includes("/projects/") ? { ...project(), outputDirectory: "dist" } : dependencies.read(t, path) })).status, "passed");
 });
 
+test("Publication statique : un domaine personnalisé absent du détail doit être un alias direct du déploiement", async () => {
+  const reference = { deploymentId: "dpl_static", commit }, dependencies = readers();
+  const read = (redirect: string | null) => async (t: UpdateTarget, path: string) => {
+    if (path === "/v2/deployments/dpl_static/aliases") return { aliases: [{ alias: "static.example", redirect }] };
+    if (path === "/v13/deployments/dpl_static") return { ...deployment(), alias: ["static-fixture.vercel.app"] };
+    return dependencies.read(t, path);
+  };
+  assert.equal((await verifyStaticDeployment(target, reference, build(), { ...dependencies, read: read(null) })).status, "passed");
+  await assert.rejects(verifyStaticDeployment(target, reference, build(), { ...dependencies, read: read("other.example") }), /domaine public/);
+});
+
 test("Publication statique : un asset différent, une promotion concurrente ou une protection HTTP empêchent le succès", async () => {
   const reference = { deploymentId: "dpl_static", commit }, dependencies = readers();
   await assert.rejects(verifyStaticDeployment(target, reference, build(), { ...dependencies, file: async url => url.pathname.endsWith("app.js") ? Buffer.from("different") : dependencies.file(url) }), /ne correspond pas/);

@@ -43,6 +43,13 @@ test("PostgreSQL isolé : migration et concurrence réelle des mises à jour", {
     await assert.rejects(startProjectUpdate({ projectId: second.id }, dispatch), /déjà ces sources/);
     assert.equal((await projectUpdates(second.id)).runs.length, 0);
     assert.equal((await pool.query("SELECT count(*)::int AS count FROM update_locks")).rows[0].count, 1);
+    const empty = await createProject("live", createProjectSchema.parse({ name: "À qualifier" }));
+    const startEmpty = () => startProjectUpdate({ projectId: empty.id }, dispatch, { assessment: true });
+    const [emptyReport, duplicateReport] = await Promise.all([startEmpty(), startEmpty()]);
+    assert.equal(emptyReport.id, duplicateReport.id);
+    assert.match(emptyReport.message, /Aucun service admissible/);
+    assert.equal(dispatched, 1);
+    assert.equal((await pool.query("SELECT count(*)::int AS count FROM update_locks")).rows[0].count, 1);
     const demo = await createProject("demo", createProjectSchema.parse({ name: "Demo" }));
     await assert.rejects(pool.query("INSERT INTO update_runs(id,project_id,stage,data) VALUES($1,$2,'queued','{}')", [randomUUID(), demo.id]), /hors périmètre/);
   } finally {

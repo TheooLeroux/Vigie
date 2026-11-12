@@ -142,7 +142,14 @@ export async function staticPreflight(target: UpdateTarget, reference: { deploym
   let url: URL;
   try { url = new URL(target.url || ""); } catch { return fail("Le site statique doit avoir un domaine public qualifié."); }
   if (url.protocol !== "https:" || url.username || url.password || url.port && url.port !== "443" || url.pathname !== "/" || url.search || url.hash) return fail("Le contrôle statique demande la racine d’un domaine HTTPS public.");
-  if (!Array.isArray(deployment.alias) || !deployment.alias.some((alias: unknown) => typeof alias === "string" && alias.toLowerCase() === url.hostname)) return fail("Le domaine public n’est pas rattaché au déploiement de production attendu.");
+  const listed = Array.isArray(deployment.alias) && deployment.alias.some((alias: unknown) => typeof alias === "string" && alias.toLowerCase() === url.hostname);
+  if (!listed) {
+    // Deployment details can omit custom production aliases that are assigned to this deployment.
+    const { aliases } = await read(target, `/v2/deployments/${reference.deploymentId}/aliases`);
+    if (!Array.isArray(aliases) || !aliases.some(entry => typeof entry?.alias === "string" && entry.alias.toLowerCase() === url.hostname && entry.redirect === null)) {
+      return fail("Le domaine public n’est pas rattaché au déploiement de production attendu.");
+    }
+  }
   return { url, framework: deployment.projectSettings?.framework as string, commit: deployment.meta?.githubCommitSha as string | undefined };
 }
 async function readStaticFile(url: URL, limit: number, redirects = 0): Promise<Buffer> {

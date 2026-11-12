@@ -100,22 +100,34 @@ test("Bilan : un rapport partiel ne valide pas les autres blocs", () => {
 });
 
 test("Plan quotidien : projets archivés exclus, installation en cours différée, échec isolé", async () => {
-  const projects = ["ready", "busy", "broken", "archived"].map(id => ({ ...healthFixture().project, id, lifecycle: id === "archived" ? "archived" as const : "active" as const }));
+  const projects = ["ready", "busy", "empty", "broken", "archived"].map(id => ({ ...healthFixture().project, id, lifecycle: id === "archived" ? "archived" as const : "active" as const }));
   const seen: string[] = [];
   const result = await planDailyAssessments({ projects: async () => projects, expire: async () => {}, start: async (raw, dispatch, options) => {
     const id = (raw as { projectId: string }).projectId;
     seen.push(id); assert.equal(options?.assessment, true);
     if (id === "broken") throw new Error("isolated");
+    if (id === "empty") return { ...fixture().state.assessment!, id, targets: [], results: [] };
     return { ...fixture().state.assessment!, id, purpose: id === "busy" ? undefined : "assessment", stage: id === "busy" ? "checking" : "queued" } as UpdateRun;
   } });
-  assert.deepEqual(seen, ["ready", "busy", "broken"]);
-  assert.deepEqual(result, { runs: ["ready"], deferred: 1, failed: 1 });
+  assert.deepEqual(seen, ["ready", "busy", "empty", "broken"]);
+  assert.deepEqual(result, { runs: ["ready"], noEligibleTarget: 1, deferred: 1, failed: 1 });
+});
+
+test("Bilan historique sans cible : le résultat affiche le périmètre à qualifier", () => {
+  const { detail, state } = fixture();
+  state.assessment!.targets = [];
+  state.assessment!.results = [];
+  const html = renderToStaticMarkup(createElement(ProjectMaintenanceSummary, { detail, updates: state }));
+  assert.match(html, /Bilan quotidien · Aucun service admissible/);
+  assert.doesNotMatch(html, /Aucune meilleure version validée/);
 });
 
 test("Workflow quotidien : une exécution journalière réutilise les validations avec la finalité obligatoire assessment", async () => {
   const daily = YAML.parse(await readFile(".github/workflows/vigie-daily-assessments.yml", "utf8"));
   const update = YAML.parse(await readFile(".github/workflows/vigie-updates.yml", "utf8"));
   assert.equal(daily.on.schedule[0].cron, "17 3 * * *");
+  assert.equal(daily.on.workflow_dispatch.inputs.project.type, "string");
+  assert.match(daily.jobs.plan.steps.at(-1).env.VIGIE_ASSESSMENT_PROJECT, /inputs\.project/);
   assert.equal(daily.jobs.assess.with.assessment, true);
   assert.equal(daily.jobs.assess.strategy["max-parallel"], 2);
   assert.equal(update.on.workflow_call.inputs.assessment.default, false);
@@ -163,4 +175,8 @@ test("Bilan WordPress : inspection et scans des candidates, aucune demande de sa
   assert.deepEqual(result.assessment!.changes, ["WordPress : 7.1.3 → 7.1.4"]);
   assert.equal(result.backup, undefined);
   assert.equal(result.stage, "completed");
+  await assert.rejects(executeLocalWordPress(run, target, result, inventory, async () => {}, {
+    agent: async (_target, callback) => callback(async () => ({ eligibility: { privateOutput: "fixture-secret" } }), {} as never),
+    scanner: () => { throw new Error("Le scan ne doit pas démarrer avant la validation de l’inspection."); },
+  }), error => error instanceof Error && /Inspection de l’agent WordPress/.test(error.message) && !error.message.includes("fixture-secret"));
 });

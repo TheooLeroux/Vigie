@@ -106,6 +106,14 @@ test("Stockage objet : multipart, contrôle avant publication, téléchargement 
     const downloaded = await fetch(signed);
     assert.match(downloaded.headers.get("content-disposition")!, /site-example-test-2026-11-09\.zip/);
     assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), archive);
+    assert.equal(group.latestAttempt.state, "ready");
+    const [key, saved] = [...objects.entries()][0];
+    objects.delete(key);
+    const [missing] = await (await get(["backups"])).json();
+    assert.equal(missing.latestAttempt.state, "unavailable");
+    assert.deepEqual(missing.backups, []);
+    assert.equal((await get(path)).status, 404);
+    objects.set(key, saved);
 
     const fixture = Buffer.from("temporary ZIP");
     assert.equal(await verifyBackupRoundtrip((_folder, output) => writeFile(output, fixture)), fixture.length);

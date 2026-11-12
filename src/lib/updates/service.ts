@@ -25,6 +25,7 @@ import { controlSource } from "../automatic-control-state";
 import { railwayState } from "../railway";
 import { railpackImageIdentity } from "./railpack-image-report";
 import { projectRailpackReports } from "./railpack-image-control";
+import { assessmentHasNoTarget, noAssessmentTargetMessage } from "./assessment";
 
 function attentionScopes(run: UpdateRun) {
   const targets = run.targets || [];
@@ -70,7 +71,7 @@ export async function projectUpdates(projectId: string): Promise<UpdateState> {
   };
 }
 const startSchema = z.object({ projectId: z.string().uuid(), targetIds: z.array(z.string().max(300)).min(1).max(30).optional() });
-export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate, options: { assessment?: boolean } = {}) {
+export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate, options: { assessment?: boolean; retryAssessment?: boolean } = {}) {
   const input = startSchema.parse(raw);
   if (!options.assessment && !updatesEnabled()) throw new ApiError("Le service de mise à jour n’est pas encore activé.", 503);
   await refreshProjectHosting(input.projectId);
@@ -88,11 +89,16 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
     candidate.purpose = "assessment";
     candidate.actor = { name: "Bilan quotidien Vigie", email: "" };
     candidate.message = "Recherche quotidienne de versions stables, sans installation.";
-    const detail = await observedProjectDetail(input.projectId, "live");
-    candidate.assessmentSources = Object.fromEntries(targets.flatMap(target => {
-      const source = controlSource(target, detail);
-      return source ? [[target.id, source.identity]] : [];
-    }));
+    if (targets.length) {
+      const detail = await observedProjectDetail(input.projectId, "live");
+      candidate.assessmentSources = Object.fromEntries(targets.flatMap(target => {
+        const source = controlSource(target, detail);
+        return source ? [[target.id, source.identity]] : [];
+      }));
+    } else {
+      candidate.stage = "completed";
+      candidate.message = noAssessmentTargetMessage;
+    }
   }
   const { run, created } = await transaction(async () => {
     if (isPostgres()) await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(input.projectId);
@@ -107,8 +113,12 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
     if (existing?.purpose === "assessment" && !options.assessment) throw new ApiError("Un bilan préalable est en cours. Attendez sa fin avant de lancer une installation.", 409);
     if (existing) return { run: existing, created: false };
     if (options.assessment) {
-      const today = recorded.find(run => run.purpose === "assessment" && run.assessmentOrigin !== "maintenance" && run.createdAt.slice(0, 10) === now.slice(0, 10));
-      if (today) return { run: today, created: false };
+      const today = recorded.filter(run => run.purpose === "assessment" && run.assessmentOrigin !== "maintenance" && run.createdAt.slice(0, 10) === now.slice(0, 10))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (today) {
+        const canRetry = today.stage === "failed" || (assessmentHasNoTarget(today) && targets.length > 0);
+        if (!options.retryAssessment || !canRetry) return { run: today, created: false };
+      }
     }
     const scopes = [...new Set(targets.map(updateScope))].sort();
     const pending = recorded.some(previous => previous.stage === "attention" && attentionScopes(previous).some(scope => scopes.includes(scope)));
@@ -121,7 +131,7 @@ export async function startProjectUpdate(raw: unknown, dispatch = dispatchUpdate
     if (!options.assessment) await log("live", "updates.started", "Mise à jour du projet demandée.", input.projectId);
     return { run: candidate, created: true };
   });
-  if (created) {
+  if (created && run.stage === "queued") {
     try { await dispatch(run.id); }
     catch (error) {
       run.stage = "queued";

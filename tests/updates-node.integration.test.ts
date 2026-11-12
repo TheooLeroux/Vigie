@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { prepareNodeSources, snapshotSources, changedSources, nodeValidationRuntime } from "../src/lib/updates/node";
 import { createNodeRemediator } from "../src/lib/updates/remediation";
@@ -37,7 +37,17 @@ for (const manager of ["npm@11.9.0", "pnpm@10.11.0", "yarn@1.22.22", "yarn@4.9.2
       const changes = await changedSources(folder, before, prepared.allowed);
       assert.ok(changes.some(file => file.path === "package.json"));
       assert.ok(changes.some(file => /lock|shrinkwrap/.test(file.path)));
-    } finally { await rm(folder, { recursive: true, force: true }); }
+    } finally {
+      if (process.platform === "win32" && manager.startsWith("pnpm@")) {
+        // Docker writes Linux symlinks that Windows cannot unlink from this bind mount.
+        const path = await realpath(folder);
+        assert.equal(dirname(path), await realpath(tmpdir()));
+        assert.match(basename(path), /^vigie-node-integration-[A-Za-z0-9]+$/);
+        await runCommand("docker", ["run", "--rm", "--network=none", "--mount", `type=bind,source=${path},target=/fixture`,
+          `node:${nodeVersion}-bookworm`, "rm", "-rf", "--", "/fixture/node_modules"]);
+      }
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 }
 

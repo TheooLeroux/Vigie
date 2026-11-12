@@ -68,6 +68,34 @@ test("Mises à jour : un double clic ne crée qu’un traitement et un seul envo
   assert.equal((await projectUpdates(project.id)).runs.length, 1);
 });
 
+test("Bilan sans cible : enregistré sans envoi ni réservation de maintenance", async () => {
+  const project = await createProject("live", createProjectSchema.parse({ name: "Projet à qualifier" }));
+  let dispatches = 0;
+  const start = () => startProjectUpdate({ projectId: project.id }, async () => { dispatches++; }, { assessment: true });
+  const first = await start();
+  assert.match(first.message, /Aucun service admissible/);
+  assert.deepEqual(first.targets, []);
+  assert.equal((await start()).id, first.id);
+  assert.equal(await executeUpdate(first.id), false);
+  assert.equal(dispatches, 0);
+});
+
+test("Relance ciblée : un bilan bloqué peut être repris le même jour sans relancer une installation", async () => {
+  const { project } = await fixture();
+  const input = { projectId: project.id };
+  const dispatch = async () => {};
+  const first = await startProjectUpdate(input, dispatch, { assessment: true });
+  await executeUpdate(first.id, async () => { throw new ApiError("Sonde Vercel indisponible."); }, undefined, noRefresh);
+  assert.equal((await readUpdateRun(first.id))?.stage, "failed");
+  assert.equal((await startProjectUpdate(input, dispatch, { assessment: true })).id, first.id);
+  const retry = () => startProjectUpdate(input, dispatch, { assessment: true, retryAssessment: true });
+  const second = await retry();
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.id, (await retry()).id);
+  assert.equal(second.purpose, "assessment");
+  assert.equal(second.stage, "queued");
+});
+
 test("Bilan durable : une préparation par jour, historique séparé et aucun contrôle post-installation", async () => {
   const { project } = await fixture();
   let dispatches = 0, refreshes = 0;

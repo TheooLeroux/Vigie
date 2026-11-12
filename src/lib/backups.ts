@@ -21,7 +21,13 @@ type BackupRow = {
   sha256: string | null;
 };
 
-export type BackupGroup = { id: string; projectId: string | null; projectName: string; backups: { id: string; createdAt: string }[] };
+export type BackupGroup = {
+  id: string;
+  projectId: string | null;
+  projectName: string;
+  latestAttempt: { slot: string; state: "ready" | "failed" | "running" | "interrupted" | "unavailable" | "unverified" };
+  backups: { id: string; createdAt: string }[];
+};
 type SiteBackup = { installationId: string; projectId: string | null; domain: string };
 export type LinkedPlatformBackup = { provider: "railway" | "vercel"; remoteId: string; projectId: string };
 
@@ -143,21 +149,47 @@ const readyBackups = `
 `;
 type DownloadableBackup = BackupRow & { project_name: string };
 
-export async function listBackups(): Promise<BackupGroup[]> {
+type BackupListingRow = DownloadableBackup & {
+  state: "ready" | "failed" | "running" | "expired";
+  next_attempt_at: string;
+  latest: boolean;
+};
+
+export async function listBackups(now = new Date()): Promise<BackupGroup[]> {
   const { byId } = backupStores();
-  if (!byId.size) return [];
-  const rows = await backupDatabase().prepare(`${readyBackups}
-    ORDER BY project_name, b.created_at DESC, b.slot DESC
-  `).all() as DownloadableBackup[];
+  const rows = await backupDatabase().prepare(`
+    WITH attempts AS (
+      SELECT b.*, COALESCE(b.source_name,json_extract(p.data,'$.name')) AS project_name,
+        ROW_NUMBER() OVER (PARTITION BY b.source_id ORDER BY b.slot DESC)=1 AS latest
+      FROM project_backups b LEFT JOIN projects p ON p.id=b.project_id AND p.workspace='live'
+      WHERE b.source_name IS NOT NULL OR p.id IS NOT NULL
+    )
+    SELECT * FROM attempts WHERE latest OR state='ready'
+    ORDER BY source_id, latest DESC, created_at DESC, slot DESC
+  `).all() as BackupListingRow[];
+  const remoteChecks = new Map<string, boolean | undefined>();
+  const latestRemoteCopies = rows.filter(row => row.latest && row.state === "ready" && row.storage_id !== "local" && byId.has(row.storage_id));
+  for (let offset = 0; offset < latestRemoteCopies.length; offset += 6) {
+    await Promise.all(latestRemoteCopies.slice(offset, offset + 6).map(async row => {
+      const exists = await byId.get(row.storage_id)!.exists(row).catch(() => undefined);
+      remoteChecks.set(row.id, exists);
+    }));
+  }
   const groups = new Map<string, BackupGroup>();
   for (const row of rows) {
     const store = byId.get(row.storage_id);
-    if (!store || (store.id === "local" && !await store.exists(row))) continue;
-    const group = groups.get(row.source_id) ?? { id: row.source_id, projectId: row.project_id, projectName: row.project_name, backups: [] };
-    group.backups.push({ id: row.id, createdAt: row.created_at });
-    groups.set(row.source_id, group);
+    const downloadable = row.state === "ready" && store && (store.id === "local" ? await store.exists(row) : remoteChecks.get(row.id) !== false);
+    if (row.latest) {
+      const remoteUnverified = remoteChecks.has(row.id) && remoteChecks.get(row.id) === undefined;
+      const state = downloadable ? (remoteUnverified ? "unverified" : "ready") : row.state === "failed" ? "failed" : row.state === "running"
+        ? Date.parse(row.next_attempt_at) > now.getTime() ? "running" : "interrupted"
+        : "unavailable";
+      groups.set(row.source_id, { id: row.source_id, projectId: row.project_id, projectName: row.project_name,
+        latestAttempt: { slot: row.slot, state }, backups: [] });
+    }
+    if (downloadable) groups.get(row.source_id)!.backups.push({ id: row.id, createdAt: row.created_at });
   }
-  return [...groups.values()];
+  return [...groups.values()].sort((left, right) => left.projectName.localeCompare(right.projectName, "fr"));
 }
 
 export async function downloadBackup(id: string) {

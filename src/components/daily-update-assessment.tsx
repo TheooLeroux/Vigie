@@ -1,4 +1,4 @@
-import { currentAssessmentResults } from "@/lib/updates/assessment";
+import { assessmentHasNoTarget, currentAssessmentResults, noAssessmentTargetMessage } from "@/lib/updates/assessment";
 import { activeUpdateStages, type UpdateCheck, type UpdateState } from "@/lib/updates/types";
 import type { ProjectDetail } from "@/lib/types";
 import { formatDate } from "./ui";
@@ -25,15 +25,16 @@ export function DailyUpdateAssessment({ detail, state }: { detail: ProjectDetail
   const run = state?.assessment;
   if (!run) return <small>Bilan quotidien des versions stables : premier résultat attendu.</small>;
   const active = activeUpdateStages.includes(run.stage);
+  const noTarget = assessmentHasNoTarget(run);
   const verified = new Set(currentAssessmentResults(detail, state).map(result => result.targetId));
   const proposals = run.results.filter(result => verified.has(result.targetId) && result.assessment!.changes.length > 0).length;
   const stale = run.results.some(result => result.stage === "completed" && !verified.has(result.targetId));
-  const status = active ? "En cours" : stale ? "À actualiser" : run.stage === "failed" && !verified.size ? "Bilan bloqué" : run.stage !== "completed" || run.excludedTargets?.length ? "Bilan partiel" : proposals ? `${proposals} bloc(s) avec proposition validée` : "Aucune meilleure version validée";
+  const status = active ? "En cours" : noTarget ? "Aucun service admissible" : stale ? "À actualiser" : run.stage === "failed" && !verified.size ? "Bilan bloqué" : run.stage !== "completed" || run.excludedTargets?.length ? "Bilan partiel" : proposals ? `${proposals} bloc(s) avec proposition validée` : "Aucune meilleure version validée";
   return <details className="updates-details daily-assessment" open={active}>
     <summary>{run.assessmentOrigin === "maintenance" ? "Bilan après maintenance" : "Bilan quotidien"} · {status} · {formatDate(run.updatedAt)}</summary>
     <p>Recherche de versions stables et contrôles avant maintenance. Aucune installation ni publication automatique.</p>
     {active && <p role="status">{run.message}</p>}
-    {!run.results.length && !active && <p>{run.stage === "failed" ? run.message : "Aucun bloc n’a pu être validé dans ce bilan."}</p>}
+    {!run.results.length && !active && <p>{noTarget ? noAssessmentTargetMessage : run.stage === "failed" ? run.message : "Aucun bloc n’a pu être validé dans ce bilan."}</p>}
     {run.results.map(result => <section className="updates-target" key={result.targetId}>
       <strong>Bloc : {result.name}</strong>
       <p>{activeUpdateStages.includes(result.stage) ? "Vérification en cours." : result.stage === "completed" && !verified.has(result.targetId) ? "Ce bilan ne confirme plus l’état actuel du bloc : date, déploiement ou sources à actualiser." : result.message}</p>

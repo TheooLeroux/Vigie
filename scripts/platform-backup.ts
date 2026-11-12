@@ -173,7 +173,7 @@ export async function runPlatformBackup<T extends BackupService>(profile: Backup
 
   if (args.length === 1 && args[0] === "--verify-r2") {
     console.log("Téléchargement R2 vérifié pour " + profile.name + " (" + await verifyBackupRoundtrip(collect) + " octets).");
-    return;
+    return true;
   }
   if (verify) {
     const scratch = process.env.VIGIE_BACKUP_SCRATCH_DIRECTORY;
@@ -181,10 +181,11 @@ export async function runPlatformBackup<T extends BackupService>(profile: Backup
     const folder = await mkdtemp(join(resolve(scratch), ".platform-verify-"));
     try { await collect(folder, join(folder, "verify.zip")); }
     finally { await rm(folder, { recursive: true, force: true }); }
-    return;
+    return true;
   }
   if (args.length && !automatic) throw new Error("Argument de sauvegarde inconnu.");
   await assertLinked?.();
   const saved = await runBackup(profile.linkedSource ?? profile.projectId, collect);
   console.log(saved ? "ZIP publié pour " + profile.name + "." : "Le créneau possède déjà un ZIP vérifié ou réservé.");
+  return saved;
 }

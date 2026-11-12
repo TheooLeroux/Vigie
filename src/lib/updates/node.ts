@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile, lstat, realpath, rm, mkdtemp, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { ApiError } from "../http";
 import { runCommand, DependencyValidationError, IndirectValidationError, PeerResolutionError } from "./process";
@@ -44,24 +44,36 @@ async function fetchJson(url: string, transport: typeof fetch) {
   if (content.length > 3_000_000) throw new ApiError("Catalogue de versions trop volumineux.");
   return JSON.parse(content);
 }
+async function sourceDirectory(folder: string) {
+  if (!(await lstat(folder)).isDirectory()) throw new ApiError("Répertoire des sources non autorisé.");
+  return realpath(folder);
+}
+
+async function requireSourcePath(root: string, path: string) {
+  const name = relative(root, await realpath(path));
+  if (!name || name === ".." || name.startsWith(".." + sep) || isAbsolute(name)) throw new ApiError("Source située hors du répertoire autorisé.");
+}
+
 export async function snapshotSources(folder: string, names: string[]): Promise<SourceFile[]> {
+  const root = await sourceDirectory(folder);
   const result: SourceFile[] = [];
   // Parallel service copies must not multiply thousands of open descriptors.
   for (let offset = 0; offset < names.length; offset += 64) result.push(...await Promise.all(names.slice(offset, offset + 64).map(async name => {
-    const path = join(folder, name);
-    if (!(await realpath(path)).startsWith(resolve(folder) + (process.platform === "win32" ? "\\" : "/"))) throw new ApiError("Source située hors du répertoire autorisé.");
+    const path = join(root, name);
+    await requireSourcePath(root, path);
     if ((await lstat(path)).isSymbolicLink()) throw new ApiError("Lien symbolique non autorisé dans les sources.");
     return { path: name, hash: createHash("sha256").update(await readFile(path)).digest("hex") };
   })));
   return result;
 }
 export async function changedSources(folder: string, before: SourceFile[], allowed: Set<string>) {
+  const root = await sourceDirectory(folder);
   const files: { path: string; content: string }[] = [];
   for (const original of before) {
-    const path = join(folder, original.path);
-    if (!(await realpath(path)).startsWith(resolve(folder) + (process.platform === "win32" ? "\\" : "/"))) throw new ApiError("Source située hors du répertoire autorisé.");
+    const path = join(root, original.path);
     const info = await lstat(path).catch(() => null);
     if (!info?.isFile() || info.isSymbolicLink()) throw new ApiError("La validation a supprimé ou remplacé un fichier source.");
+    await requireSourcePath(root, path);
     const content = await readFile(path);
     if (createHash("sha256").update(content).digest("hex") !== original.hash) {
       if (!allowed.has(original.path)) throw new ApiError("La construction a modifié du code hors du périmètre des versions. Publication annulée.");
@@ -70,11 +82,12 @@ export async function changedSources(folder: string, before: SourceFile[], allow
   }
   for (const name of allowed) {
     if (before.some(file => file.path === name)) continue;
-    const info = await lstat(join(folder, name)).catch(() => null);
+    const path = join(root, name);
+    const info = await lstat(path).catch(() => null);
     if (!info) continue;
-    if (!(await realpath(join(folder, name))).startsWith(resolve(folder) + (process.platform === "win32" ? "\\" : "/"))) throw new ApiError("Source située hors du répertoire autorisé.");
+    await requireSourcePath(root, path);
     if (!info.isFile() || info.isSymbolicLink()) throw new ApiError("Fichier de versions non autorisé.");
-    files.push({ path: name, content: await readFile(join(folder, name), "utf8") });
+    files.push({ path: name, content: await readFile(path, "utf8") });
   }
   return files;
 }

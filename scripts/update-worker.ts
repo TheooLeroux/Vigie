@@ -15,7 +15,11 @@ if (!id || process.env.VIGIE_UPDATES_ENABLED !== "1" || !process.env.DATABASE_UR
   }).then(async claimed => {
     const run = await readUpdateRun(id);
     if (claimed && run?.stage !== "completed") {
-      console.error("La mise à jour exige une vérification. Le résultat et les références de récupération sont disponibles dans Vigie.");
+      if (run?.purpose === "assessment") {
+        const confirmed = run.results.filter(result => result.stage === "completed").length;
+        const blocked = run.results.length - confirmed;
+        console.error(`Bilan préalable incomplet. ${confirmed} service(s) vérifié(s), ${blocked} à reprendre. Consultez les étapes dans la fiche Vigie.`);
+      } else console.error("La mise à jour exige une vérification. Le résultat et les références de récupération sont disponibles dans Vigie.");
       process.exitCode = 1;
     } else console.log(claimed ? run?.purpose === "assessment" ? "Bilan préalable terminé, sans installation. Résultat disponible dans Vigie." : "Mise à jour terminée. Le résultat est disponible dans Vigie." : "Ce traitement est déjà pris en charge ou n’est plus en attente.");
   }).catch(() => {

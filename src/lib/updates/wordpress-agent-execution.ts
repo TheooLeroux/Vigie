@@ -12,7 +12,9 @@ import { wordpressMaintenanceCheck, recordWordPressManualUpdates, selectWordPres
 import { finishAssessment, wordpressAssessmentChanges } from "./assessment";
 
 export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget, result: UpdateResult, inventory: SiteInventory, progress: (stage: UpdateStage, message: string) => Promise<void>, dependencies: { agent: typeof withLocalWordPressAgent; scanner: typeof freeWordPressScanner; closed?: typeof closedWordPressPlugin } = { agent: withLocalWordPressAgent, scanner: freeWordPressScanner }) {
+  let step = "Accès à l’agent WordPress indisponible. Vérifiez la connexion à l’hébergement et la configuration de l’agent.";
   return dependencies.agent(target, async (operation, _settings, allowedRemovals = []) => {
+    step = "Inspection de l’agent WordPress non confirmée. Vérifiez la réponse de l’agent et le chargement du site par WP-CLI.";
     await progress("checking", "L’agent local prépare le plan WordPress sans connexion SSH.");
     const inspection = await operation(run.id, "inspect");
     const eligibility = z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).parse(inspection.eligibility);
@@ -20,6 +22,7 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     const proposed = agentPlan(inspection.plan);
     if (proposed.licenses) result.wordpressLicenses = { checkedAt: new Date().toISOString(), items: proposed.licenses };
     if (proposed.php !== inventory.php?.version) throw new ApiError("Le PHP de l’agent local diffère du PHP web. Aucun site n’a été modifié.");
+    step = "Analyse de sécurité WordPress interrompue. Vérifiez les catalogues avant de reprendre le bilan.";
     const scan = dependencies.scanner();
     const plan = await scan.prepare(proposed);
     checkWordPressRequirements(plan);
@@ -48,6 +51,7 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
       result.stage = "completed"; result.message = wordpressCompletionMessage(result, false); return;
     }
     result.stage = "publishing";
+    step = "Installation WordPress interrompue. Vérifiez l’état du site et les sauvegardes avant une reprise.";
     await progress("publishing", removals.length ? "L’agent local applique les mises à jour et les retraits autorisés." : "L’agent local installe les mises à jour officielles compatibles.");
     const update = await operation(run.id, "update", { plan, webPhp: inventory.php!.version }).catch(async error => {
       await progress("verifying", "La mise à jour a été interrompue. Vérification de l’accès au site.");
@@ -55,6 +59,7 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
       throw error;
     });
     const checkedAt = Date.now();
+    step = "Contrôle WordPress après installation non confirmé. Vérifiez le site et les versions chargées avant une reprise.";
     await progress("verifying", "Contrôle du site et des versions installées par l’agent local.");
     await refreshWordPressWeb(target, "postflight");
     const installed = agentPlan(update.plan);
@@ -76,5 +81,8 @@ export async function executeLocalWordPress(run: UpdateRun, target: UpdateTarget
     }
     result.message = wordpressCompletionMessage(result, true);
     result.warnings.push("Le module Backup gère les sauvegardes. Le contrôle web couvre l’accès au site et le chargement de WordPress.");
+  }).catch(error => {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(step, 502);
   });
 }
