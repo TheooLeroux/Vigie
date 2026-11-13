@@ -30,6 +30,6 @@ async function main() {
   }
   const result = await reconcileHostingConnections(provider as ControlProvider);
   console.log(JSON.stringify(result));
-  if (result.failed) process.exitCode = 1;
+  if (result.failed || result.deferred) process.exitCode = 1;
 }
 main().catch(() => { console.error("Contrôle hébergeur incomplet. Consultez les connexions dans Vigie."); process.exitCode = 1; }).finally(() => postgresPool().end());

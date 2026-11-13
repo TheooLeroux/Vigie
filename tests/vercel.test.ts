@@ -31,7 +31,7 @@ import {
   vercelMatches,
 } from "../src/lib/vercel";
 import { collectVercel } from "../src/lib/connectors/vercel";
-import { observeVercelProduction } from "../src/lib/vercel-production-pilot";
+import { readVercelProductionPointers } from "../src/lib/connectors/vercel";
 import {
   VERCEL_SOURCE_TEAM,
   VERCEL_CLIENT_PROJECTS,
@@ -89,14 +89,8 @@ async function expire(id: string) {
     .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
     .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id));
 }
-test("Sonde Vercel : repère un rollback et repart d’un relevé complet après une interruption", async t => {
-  t.mock.timers.enable({ apis: ["Date"] });
+test("La sonde Vercel relève la cible de production, y compris après un rollback", async () => {
   const teamId = VERCEL_SOURCE_TEAM;
-  const entries = new Map<string, unknown>();
-  const cache = {
-    get: async (key: string) => entries.get(key) ?? null,
-    set: async (key: string, value: unknown) => { entries.set(key, value); },
-  };
   let deploymentId = "dpl_New";
   let invalid = false;
   const transport: typeof fetch = async (input, options) => {
@@ -114,20 +108,12 @@ test("Sonde Vercel : repère un rollback et repart d’un relevé complet après
       pagination: { next: null },
     });
   };
-  const read = () => observeVercelProduction({ teamId, token: secret }, cache, transport);
-  assert.equal(await read(), "baseline");
-  t.mock.timers.tick(5 * 60_000);
-  assert.equal(await read(), "unchanged");
+  const read = () => readVercelProductionPointers(teamId, secret, transport);
+  assert.equal((await read())[0]?.deploymentId, "dpl_New");
   deploymentId = "dpl_Old";
-  t.mock.timers.tick(5 * 60_000);
-  assert.equal(await read(), "changed");
+  assert.equal((await read())[0]?.deploymentId, "dpl_Old");
   invalid = true;
-  t.mock.timers.tick(5 * 60_000);
-  assert.equal(await read(), "unavailable");
-  invalid = false;
-  t.mock.timers.tick(5 * 60_000);
-  assert.equal(await read(), "baseline");
-  assert.ok(!JSON.stringify([...entries]).includes(secret));
+  await assert.rejects(read(), /Cibles Vercel absentes/);
 });
 
 function fakeApi(

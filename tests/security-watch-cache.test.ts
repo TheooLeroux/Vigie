@@ -7,6 +7,68 @@ import { GET } from "../src/app/api/maintenance/security-watch/route";
 import { loadSecurityWatchSnapshot, readSecurityWatchSnapshot, refreshSecurityWatchSnapshot } from "../src/lib/security-watch-cache";
 import { sqliteDatabase } from "../src/lib/db-sqlite";
 import { claimScheduledMaintenance, recentSuccessfulPrimaryCycle } from "../src/lib/scheduled-maintenance";
+import { maintenanceCache } from "../src/lib/scheduled-maintenance-cache";
+
+test("Vigie peut éviter un seul cycle lorsque le parc est inchangé et le dernier lancement confirmé", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-13T13:00:00Z") });
+  t.mock.method(console, "warn", () => {});
+  const previousKey = process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY;
+  process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = "b".repeat(64);
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY;
+    else process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = previousKey;
+  });
+  let saved: unknown;
+  let probesRead = 0;
+  let due = false;
+  let changed = false;
+  let runStartedAt = Date.now();
+  let githubAvailable = true;
+  const credentials = "existing-connector-credential";
+  const store = {
+    get: async () => saved,
+    set: async (_key: string, value: unknown) => { saved = value; },
+  };
+  const checks = {
+    controlsCurrent: async (until: number) => {
+      assert.equal(until, Date.now() + 600_000);
+      return !due;
+    },
+    readProbes: async () => {
+      probesRead++;
+      return { vercel: [{ teamId: "team_example", token: credentials, digest: "example" }], railway: [], hosting: [] };
+    },
+    recentCycle: async () => githubAvailable ? { id: 1, attempt: 1, startedAt: runStartedAt } : null,
+    unchanged: async (probes: { vercel: { token: string }[] }) => {
+      assert.equal(probes.vercel[0].token, credentials);
+      return !changed;
+    },
+  };
+  const runner = { repository: "qa/vigie", ref: "main", token: "existing-github-credential" };
+  const cache = maintenanceCache(runner, "a".repeat(40), store, checks);
+  assert.equal(await cache.decision(), "cache-miss");
+  due = true;
+  assert.equal(await cache.prepare(Date.now()), null);
+  assert.equal(probesRead, 0);
+  due = false;
+  const evidence = await cache.prepare(Date.now());
+  assert.ok(evidence && !evidence.includes(credentials));
+  await cache.publish(evidence);
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await cache.decision(), "skip");
+  assert.equal(probesRead, 1);
+  changed = true;
+  assert.equal(await cache.decision(), "observations-changed-or-unavailable");
+  changed = false;
+  githubAvailable = false;
+  assert.equal(await cache.decision(), "cycle-unconfirmed");
+  githubAvailable = true;
+  runStartedAt -= 1000;
+  assert.equal(await cache.decision(), "cycle-unconfirmed");
+  assert.equal(await maintenanceCache(runner, "c".repeat(40), store, checks).decision(), "cache-unavailable");
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await cache.decision(), "cache-expired");
+});
 
 test("Le secours GitHub passe son tour uniquement si le dernier cycle récent a couvert tout le parc", async () => {
   const completed = {

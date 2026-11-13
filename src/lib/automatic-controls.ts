@@ -68,21 +68,37 @@ function imageToCheck(target: UpdateTarget, detail: ProjectObservationDetail) {
 async function planAutomaticControls(projects: Project[], provider?: UpdateTarget["provider"], force?: boolean, revision?: string) {
   if (!projects.length) return [];
   const batch = await readControlProjects(projects, provider);
+  const checks = await readControlSchedules(batch);
+  const now = Date.now();
+  return batch.map(project => project && {
+    detail: project.detail,
+    targets: project.targets.targets.filter(target => checks(project.detail, target, now, force, revision)),
+  });
+}
+
+async function readControlSchedules(batch: Awaited<ReturnType<typeof readControlProjects>>) {
   const [schedules, scans] = await Promise.all([
     readAutomaticControlSchedules(batch.flatMap(project => project?.targets.ids ?? [])),
     readRailpackScans(batch.flatMap(project =>
       project?.targets.targets.filter(target => imageToCheck(target, project.detail)).map(target => target.id) ?? [])),
   ]);
-  const now = Date.now();
-  return batch.map(project => project && {
-    detail: project.detail,
-    targets: project.targets.targets.filter(target => {
-      const identity = controlSource(target, project.detail, now)?.identity || "unavailable";
-      if (automaticControlDue(schedules.get(target.id) ?? null, identity, now, force, revision)) return true;
-      const image = imageToCheck(target, project.detail);
-      return !!image && railpackScanDue(image, scans.get(target.id), now, force, revision);
-    }),
-  });
+  return (detail: ProjectObservationDetail, target: UpdateTarget, now: number, force?: boolean, revision?: string, sourceAt = now) => {
+    const identity = controlSource(target, detail, sourceAt)?.identity || "unavailable";
+    if (automaticControlDue(schedules.get(target.id) ?? null, identity, now, force, revision)) return true;
+    const image = imageToCheck(target, detail);
+    return !!image && railpackScanDue(image, scans.get(target.id), now, force, revision);
+  };
+}
+
+export async function scheduledControlsCurrent(until: number) {
+  const batch = await readControlProjects(await activeProjects());
+  const due = await readControlSchedules(batch);
+  const observedAt = Date.now();
+  // The preceding cycle refreshes the observations. Compare the captured identity
+  // now and evaluate the scan deadlines at the next scheduled tick.
+  // A failed result is retried on the original five-minute cadence.
+  return batch.every(project => project && project.targets.targets.every(target =>
+    !due(project.detail, target, until, false, undefined, observedAt)));
 }
 
 export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string) {
@@ -91,7 +107,7 @@ export async function automaticControlsNeeded(provider: UpdateTarget["provider"]
   return plan.some(project => !project || project.targets.length > 0);
 }
 
-export async function scanAutomaticTarget(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>, readers = { dependencies: scanCurrentDependencies, railway: scanRailwaySources }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage" | "coverage">> {
+export async function scanAutomaticTarget(target: UpdateTarget, source: NonNullable<ReturnType<typeof controlSource>>, readers = { dependencies: scanCurrentDependencies, railway: scanRailwaySources }): Promise<Pick<AutomaticControl, "checks" | "updates" | "warnings" | "sourceQualification" | "securityCoverage" | "coverage" | "sourceDigest">> {
   if (source.image) return scanDeployedImage(source.image);
   if (source.hosting) return scanHostingSources(target);
   if (target.provider === "vercel" && source.deploymentId) {

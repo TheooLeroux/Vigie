@@ -223,10 +223,12 @@ export async function collectObserver(
   transport: typeof fetch = fetch,
   resolve = lookup,
   early = false,
+    options?: { refresh: boolean; signal: AbortSignal },
 ): Promise<SiteInventory> {
+  options?.signal.throwIfAborted();
   const target = await observerUrl(url, resolve),
     body = JSON.stringify(
-      early ? { refresh: false, mode: "early" } : { refresh: true },
+        early ? { refresh: false, mode: "early" } : { refresh: options?.refresh ?? true },
     ),
     nonce = randomBytes(16).toString("hex");
   try {
@@ -237,6 +239,7 @@ export async function collectObserver(
     if (checked.some((a) => !publicAddress(a.address)))
       throw new ApiError("Adresse locale ou privée refusée.");
     if (checked[0]) await pace(checked[0].address);
+      options?.signal.throwIfAborted();
     const response =
       transport === fetch
         ? await new Promise<Response>((resolveResponse, reject) => {
@@ -257,7 +260,7 @@ export async function collectObserver(
                   Host: target.hostname,
                   "Content-Length": Buffer.byteLength(body),
                 },
-                signal: AbortSignal.timeout(90_000),
+                  signal: options?.signal ?? AbortSignal.timeout(90_000),
               },
               (res) => {
                 const chunks: Buffer[] = [];
@@ -310,7 +313,7 @@ export async function collectObserver(
             body,
             redirect: "manual",
             cache: "no-store",
-            signal: AbortSignal.timeout(90_000),
+            signal: options?.signal ?? AbortSignal.timeout(90_000),
           });
     if (response.status === 429) {
       const retry = response.headers.get("retry-after"),
@@ -346,7 +349,7 @@ export async function collectObserver(
           }
         } catch { /* A diagnostic failure must not suppress the bounded fallback. */ }
       }
-      const fallback = await collectObserver(url, root, secret, transport, resolve, true);
+      const fallback = await collectObserver(url, root, secret, transport, resolve, true, options);
       return failure && fallback.collectionMode === "early"
         ? { ...fallback, loadFailure: failure, warnings: [...fallback.warnings, wordpressLoadFailureMessage(failure)] }
         : fallback;

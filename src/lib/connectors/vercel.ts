@@ -249,7 +249,7 @@ export async function readVercelProductionPointers(
     }
     const production = targets?.production;
     // Follow the current production pointer, including a promotion or rollback.
-    const deploymentId = production == null ? null : deploymentIdSchema.parse(production.id || production.uid);
+    const deploymentId = production == null || vercelExcluded(teamId, project.name) ? null : deploymentIdSchema.parse(production.id || production.uid);
     const name = z.string().min(1).max(150).parse(project.name);
     return { projectId: project.id as string, name, deploymentId };
   }).sort((a, b) => a.projectId.localeCompare(b.projectId));
