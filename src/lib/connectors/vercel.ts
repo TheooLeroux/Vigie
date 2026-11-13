@@ -143,15 +143,8 @@ async function readJson(r: Response) {
     throw new ApiError("Réponse Vercel illisible.", 502);
   }
 }
-export async function collectVercel(
-  teamId: string,
-  token: string,
-  transport: typeof fetch = fetch,
-): Promise<VercelProject[]> {
-  teamIdSchema.parse(teamId);
-  const abort = new AbortController(),
-    signal = AbortSignal.any([AbortSignal.timeout(120_000), abort.signal]);
-  async function get(path: string, query: Record<string, string> = {}) {
+function vercelReader(token: string, transport: typeof fetch, signal: AbortSignal) {
+  return async function get(path: string, query: Record<string, string> = {}) {
     // Fixed internal routes only. Never follow URLs supplied by the API or caller.
     if (
       !/^\/v(?:2\/teams\/team_[a-zA-Z0-9]+|10\/projects|9\/projects\/prj_[a-zA-Z0-9]+\/domains|13\/deployments\/dpl_[a-zA-Z0-9]+|3\/deployments\/dpl_[a-zA-Z0-9]+\/events|6\/deployments)$/.test(
@@ -195,7 +188,82 @@ export async function collectVercel(
         502,
       );
     return data;
+  };
+}
+
+async function listVercelProjects(teamId: string, get: ReturnType<typeof vercelReader>) {
+  const rawProjects: Record<string, any>[] = [],
+    seen = new Set<string>();
+  let cursor: string | null = null;
+  for (let page = 0; page < 10; page++) {
+    const raw = await get("/v10/projects", {
+      teamId,
+      limit: "50",
+      ...(cursor ? { until: cursor } : {}),
+    });
+    if (
+      !Array.isArray(raw.projects) ||
+      raw.projects.length > 50 ||
+      !raw.pagination ||
+      !Object.hasOwn(raw.pagination, "next")
+    )
+      throw new ApiError("Liste Vercel incomplète.", 502);
+    for (const p of raw.projects) {
+      const id = projectIdSchema.parse(p?.id);
+      if (p.accountId !== teamId) throw new ApiError("Projet Vercel hors périmètre.", 502);
+      if (seen.has(id))
+        throw new ApiError("Pagination Vercel incohérente.", 502);
+      seen.add(id);
+      rawProjects.push(p);
+    }
+    const next = raw.pagination.next;
+    if (next === null) break;
+    if (
+      typeof next !== "number" ||
+      !Number.isSafeInteger(next) ||
+      String(next) === cursor ||
+      page === 9
+    )
+      throw new ApiError(
+        "Pagination Vercel incohérente ou limite de 500 projets atteinte.",
+        502,
+      );
+    cursor = String(next);
   }
+  return rawProjects;
+}
+
+export async function readVercelProductionPointers(
+  teamId: string,
+  token: string,
+  transport: typeof fetch = fetch,
+) {
+  teamIdSchema.parse(teamId);
+  const get = vercelReader(token, transport, AbortSignal.timeout(10_000));
+  const projects = await listVercelProjects(teamId, get);
+  return projects.map(project => {
+    if (!Object.hasOwn(project, "targets")) throw new ApiError("Cibles Vercel absentes.", 502);
+    const targets = project.targets;
+    if (targets !== null && (typeof targets !== "object" || Array.isArray(targets))) {
+      throw new ApiError("Cibles Vercel invalides.", 502);
+    }
+    const production = targets?.production;
+    // Follow the current production pointer, including a promotion or rollback.
+    const deploymentId = production == null ? null : deploymentIdSchema.parse(production.id || production.uid);
+    const name = z.string().min(1).max(150).parse(project.name);
+    return { projectId: project.id as string, name, deploymentId };
+  }).sort((a, b) => a.projectId.localeCompare(b.projectId));
+}
+
+export async function collectVercel(
+  teamId: string,
+  token: string,
+  transport: typeof fetch = fetch,
+): Promise<VercelProject[]> {
+  teamIdSchema.parse(teamId);
+  const abort = new AbortController(),
+    signal = AbortSignal.any([AbortSignal.timeout(120_000), abort.signal]);
+  const get = vercelReader(token, transport, signal);
   try {
     const rawTeam = await get("/v2/teams/" + teamId),
       team = z
@@ -211,50 +279,15 @@ export async function collectVercel(
         .parse(rawTeam);
     if (team.id !== teamId)
       throw new ApiError("Équipe Vercel inattendue.", 502);
-    const rawProjects: Record<string, any>[] = [],
-      seen = new Set<string>();
-    let cursor: string | null = null;
-    for (let page = 0; page < 10; page++) {
-      const raw = await get("/v10/projects", {
-        teamId,
-        limit: "50",
-        ...(cursor ? { until: cursor } : {}),
-      });
-      if (
-        !Array.isArray(raw.projects) ||
-        raw.projects.length > 50 ||
-        !raw.pagination ||
-        !Object.hasOwn(raw.pagination, "next")
-      )
-        throw new ApiError("Liste Vercel incomplète.", 502);
-      for (const p of raw.projects) {
-        const base = projectBase(p, team);
-        if (seen.has(base.id))
-          throw new ApiError("Pagination Vercel incohérente.", 502);
-        seen.add(base.id);
-        rawProjects.push(p);
-      }
-      const next = raw.pagination.next;
-      if (next === null) break;
-      if (
-        typeof next !== "number" ||
-        !Number.isSafeInteger(next) ||
-        String(next) === cursor ||
-        page === 9
-      )
-        throw new ApiError(
-          "Pagination Vercel incohérente ou limite de 500 projets atteinte.",
-          502,
-        );
-      cursor = String(next);
-    }
+    const rawProjects = await listVercelProjects(teamId, get);
+    const baseProjects = rawProjects.map(project => projectBase(project, team));
     const results = new Array<VercelProject>(rawProjects.length);
     let index = 0;
     async function worker() {
       while (index < rawProjects.length) {
         const slot = index++,
           raw = rawProjects[slot],
-          p = projectBase(raw, team);
+          p = baseProjects[slot];
         results[slot] = p;
         if (p.excluded) continue;
         const domains: VercelProject["domains"] = [];

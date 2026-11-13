@@ -3,6 +3,7 @@ import { ApiError, assertLocal, errorResponse } from "@/lib/http";
 import { claimScheduledMaintenance } from "@/lib/scheduled-maintenance";
 import { refreshSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { githubRequest, updateRunner } from "@/lib/updates/github";
+import { scheduleVercelProductionPilot } from "@/lib/vercel-production-pilot";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -35,6 +36,7 @@ export async function GET(request: Request) {
     if (!secret || authorization.length !== expected.length || !timingSafeEqual(authorization, expected)) {
       throw new ApiError("Contrôle automatique non autorisé.", 401);
     }
+    scheduleVercelProductionPilot();
     const [dispatch, cache] = await Promise.allSettled([
       dispatchSecurityControls(),
       refreshSecurityWatchSnapshot(AbortSignal.timeout(85_000)),

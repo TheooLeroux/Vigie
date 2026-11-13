@@ -31,6 +31,7 @@ import {
   vercelMatches,
 } from "../src/lib/vercel";
 import { collectVercel } from "../src/lib/connectors/vercel";
+import { observeVercelProduction } from "../src/lib/vercel-production-pilot";
 import {
   VERCEL_SOURCE_TEAM,
   VERCEL_CLIENT_PROJECTS,
@@ -88,6 +89,47 @@ async function expire(id: string) {
     .prepare("UPDATE vercel_connections SET data=? WHERE id=?")
     .run(JSON.stringify({ ...c, lastAttemptAt: "2026-01-01T00:00:00Z" }), id));
 }
+test("Sonde Vercel : repère un rollback et repart d’un relevé complet après une interruption", async t => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const teamId = VERCEL_SOURCE_TEAM;
+  const entries = new Map<string, unknown>();
+  const cache = {
+    get: async (key: string) => entries.get(key) ?? null,
+    set: async (key: string, value: unknown) => { entries.set(key, value); },
+  };
+  let deploymentId = "dpl_New";
+  let invalid = false;
+  const transport: typeof fetch = async (input, options) => {
+    const url = new URL(String(input));
+    assert.equal(url.origin, "https://api.vercel.com");
+    assert.equal(url.pathname, "/v10/projects");
+    assert.equal(url.searchParams.get("teamId"), teamId);
+    assert.equal(options?.method, "GET");
+    assert.equal(options?.redirect, "error");
+    return Response.json({
+      projects: [{
+        id: "prj_TestMain", accountId: teamId, name: "example",
+        ...(invalid ? {} : { targets: { production: { id: deploymentId } } }),
+      }],
+      pagination: { next: null },
+    });
+  };
+  const read = () => observeVercelProduction({ teamId, token: secret }, cache, transport);
+  assert.equal(await read(), "baseline");
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await read(), "unchanged");
+  deploymentId = "dpl_Old";
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await read(), "changed");
+  invalid = true;
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await read(), "unavailable");
+  invalid = false;
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(await read(), "baseline");
+  assert.ok(!JSON.stringify([...entries]).includes(secret));
+});
+
 function fakeApi(
   team = VERCEL_SOURCE_TEAM,
   options: {

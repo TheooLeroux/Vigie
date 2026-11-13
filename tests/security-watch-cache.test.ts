@@ -81,11 +81,14 @@ test("Surveillance planifiée : authentification, déclenchement automatique et 
   const prepare = t.mock.method(database, "prepare");
   assert.deepEqual(await loadSecurityWatchSnapshot(undefined, cache), { snapshot: updated, source: "cache" });
   assert.equal(prepare.mock.callCount(), 0);
+  await refreshSecurityWatchSnapshot(new AbortController().signal, cache);
+  assert.equal(prepare.mock.callCount(), 0);
+  const unavailableCache = { ...cache, get: async () => { throw new Error("cache unavailable"); } };
+  await refreshSecurityWatchSnapshot(new AbortController().signal, unavailableCache);
+  assert.ok(prepare.mock.callCount() > 0);
   assert.deepEqual(await loadSecurityWatchSnapshot("2099-01-01T00:00:00.000Z", cache), { snapshot: updated, source: "neon" });
   assert.deepEqual(await loadSecurityWatchSnapshot(null, cache), { snapshot: updated, source: "neon" });
-  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, {
-    ...cache, get: async () => { throw new Error("cache unavailable"); },
-  }), { snapshot: updated, source: "neon" });
+  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, unavailableCache), { snapshot: updated, source: "neon" });
   prepare.mock.restore();
   assert.equal(advisoryReads, 2);
   const fallback = await claimScheduledMaintenance("fallback");
