@@ -1,5 +1,6 @@
 import { database } from "../db";
 import { openConnectorSecret, sealConnectorSecret } from "../connector-secrets";
+import { isPostgres } from "../storage";
 import type { SourceSettings, UpdateRun } from "./types";
 import { railpackImageReport, type RailpackImageIdentity } from "./railpack-image-report";
 
@@ -30,8 +31,9 @@ export async function readConfiguredUpdateTargets(projectIds: string[]) {
 export async function readUpdateHistory(projectIds: string[]) {
   const history = new Map<string, UpdateHistory>(projectIds.map(id => [id, { runs: [], assessment: null }]));
   if (!history.size) return history;
+  const withoutReceipts = isPostgres() ? "(data::jsonb - 'nodeReceipts')::text" : "json_remove(data,'$.nodeReceipts')";
   const rows = await (await updateStorage()).prepare(`
-    SELECT project_id, data, assessment FROM (
+    SELECT project_id, CASE WHEN assessment THEN data ELSE ${withoutReceipts} END AS data, assessment FROM (
       SELECT project_id, data, COALESCE(json_extract(data,'$.purpose'),'update')='assessment' AS assessment,
         ROW_NUMBER() OVER (
           PARTITION BY project_id, COALESCE(json_extract(data,'$.purpose'),'update')='assessment'
@@ -46,10 +48,7 @@ export async function readUpdateHistory(projectIds: string[]) {
     const run = JSON.parse(row.data) as UpdateRun;
     const projectHistory = history.get(row.project_id)!;
     if (row.assessment) projectHistory.assessment = run;
-    else {
-      delete run.nodeReceipts;
-      projectHistory.runs.push(run);
-    }
+    else projectHistory.runs.push(run);
   }
   return history;
 }
