@@ -12,7 +12,7 @@ async function refreshWordPressObservations() {
   const sites = (await Promise.all(connections.map(async connection => (await hostingDiscovery(connection.id)).installations)))
     .flat().filter(site => site.project?.lifecycle === "active" && (!projectId || site.project.id === projectId) && wordpressObservationNeedsRefresh(site));
   const results = await mapConcurrent(sites, 3, async site => {
-    try { await refreshWordPressWeb({ remoteId: site.id, connectionId: site.connectionId, url: null }, "observe"); return true; }
+    try { await refreshWordPressWeb({ remoteId: site.id }, "observe"); return true; }
     catch { return false; }
   });
   return { checked: results.filter(Boolean).length, failed: results.filter(result => !result).length };

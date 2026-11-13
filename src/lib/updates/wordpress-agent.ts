@@ -240,7 +240,7 @@ export async function withLocalWordPressAgent<T>(target: UpdateTarget, callback:
   const settings = source?.settings.localAgent;
   if (!settings?.ready) throw new ApiError("L’agent local WordPress n’est pas configuré.");
   const site = await hostingInstallation(target.remoteId);
-  if (site.documentRoot !== target.root || site.project?.id !== target.projectId || site.missingSince || site.kind !== "wordpress" || site.suggestedEnvironment !== settings.environment) throw new ApiError("Le rattachement WordPress a changé.");
+  if (site.documentRoot !== target.root || site.connectionId !== target.connectionId || site.project?.id !== target.projectId || site.project.lifecycle !== "active" || site.ignored || site.missingSince || site.kind !== "wordpress" || site.suggestedEnvironment !== settings.environment) throw new ApiError("Le rattachement WordPress a changé.");
   if (settings.environment === "production" && process.env.VIGIE_WORDPRESS_AGENT_PRODUCTION_ENABLED !== "1") throw new ApiError("Les mises à jour de production par l’agent local ne sont pas encore activées.");
   if (settings.bundleVersion !== wordpressAgentPackageVersion) throw new ApiError("L’agent doit terminer sa mise à niveau automatique avant de lancer une mise à jour WordPress.");
   return withHostingCredentials(target.connectionId, async connection => {

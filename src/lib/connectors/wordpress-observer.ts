@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 const nextRequestAt = new Map<string, number>();
 async function pace(address: string) {
@@ -77,6 +77,14 @@ export const observerPayloadSchema = z.object({
   plugins: z.array(component).max(1000),
   themes: z.array(component).max(300),
 });
+const globalUnicast = new BlockList();
+globalUnicast.addSubnet("2000::", 3, "ipv6");
+const nonPublicIPv6 = new BlockList();
+// Exclude IETF protocol assignments (including Teredo) and 6to4 tunnels.
+for (const [network, prefix] of [["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20]] as const) {
+  nonPublicIPv6.addSubnet(network, prefix, "ipv6");
+}
+
 export function publicAddress(address: string) {
   if (isIP(address) === 4) {
     const a = address.split(".").map(Number);
@@ -86,18 +94,19 @@ export function publicAddress(address: string) {
       a[0] === 127 ||
       (a[0] === 169 && a[1] === 254) ||
       (a[0] === 172 && a[1] >= 16 && a[1] <= 31) ||
-      (a[0] === 192 && (a[1] === 168 || a[1] === 0 || a[1] === 2)) ||
+      (a[0] === 192 && (a[1] === 168 || a[1] === 0 && (a[2] === 0 || a[2] === 2) || a[1] === 88 && a[2] === 99)) ||
       (a[0] === 100 && a[1] >= 64 && a[1] <= 127) ||
       a[0] >= 224 ||
-      (a[0] === 198 && (a[1] === 18 || a[1] === 19 || a[1] === 51)) ||
+      (a[0] === 198 && (a[1] === 18 || a[1] === 19 || a[1] === 51 && a[2] === 100)) ||
       (a[0] === 203 && a[1] === 0 && a[2] === 113)
     );
   }
   // Public global-unicast IPv6 only; reject mapped IPv4, loopback and local ranges.
   return (
     isIP(address) === 6 &&
-    /^[23][0-9a-f]{3}:/i.test(address) &&
-    !/^2001:db8:/i.test(address)
+    !address.includes("%") &&
+    globalUnicast.check(address, "ipv6") &&
+    !nonPublicIPv6.check(address, "ipv6")
   );
 }
 export async function observerUrl(url: string, resolve = lookup) {

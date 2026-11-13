@@ -1,15 +1,5 @@
-import { lookup } from "node:dns/promises";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { withHostingCredentials } from "../hosting-connections";
-import { hostingInstallation } from "../hosting-discovery";
-import { publicAddress } from "../connectors/wordpress-observer";
 import { ApiError } from "../http";
-import { readUpdateSource } from "./storage";
-import { runCommand } from "./process";
-import type { UpdateTarget } from "./types";
 import type { WordPressUpdatePlan } from "./wordpress-security";
 
 export function shellQuote(value: string) { return `'${value.replace(/'/g, `'"'"'`)}'`; }
@@ -77,23 +67,4 @@ plugins=$(wp --path="$root" plugin list --update=available --format=count)
 themes=$(wp --path="$root" theme list --update=available --format=count)
 printf 'VIGIE_WORDPRESS=%s\\nVIGIE_PLUGINS=%s\\nVIGIE_THEMES=%s\\n' "$version" "$plugins" "$themes"
 `;
-}
-export async function withWordPressUpdater<T>(target: UpdateTarget, run: (execute: (script: string) => Promise<string>, username: string) => Promise<T>) {
-  const source = await readUpdateSource(target.id);
-  if (!source?.settings.sshKey || !source.settings.hostKey) throw new ApiError("Configurez l’accès SSH de ce WordPress.");
-  const installation = await hostingInstallation(target.remoteId);
-  if (installation.documentRoot !== target.root || installation.project?.id !== target.projectId || installation.missingSince || installation.kind !== "wordpress") throw new ApiError("Le rattachement WordPress a changé. Synchronisez le projet.");
-  return withHostingCredentials(target.connectionId, async connection => {
-    const host = new URL(connection.endpoint).hostname;
-    if (!/^[a-z0-9.-]+\.o2switch\.net$/i.test(host) || !/^[\w-]+$/.test(connection.username)) throw new ApiError("Serveur SSH o2switch non reconnu.");
-    const addresses = await lookup(host, { all: true });
-    if (!addresses.length || addresses.some(address => !publicAddress(address.address))) throw new ApiError("Adresse SSH non publique.");
-    const folder = await mkdtemp(join(tmpdir(), "vigie-ssh-"));
-    try {
-      const key = join(folder, "key"), hosts = join(folder, "known_hosts");
-      await writeFile(key, source.settings.sshKey! + "\n", { mode: 0o600 });
-      await writeFile(hosts, `${host} ${source.settings.hostKey}\n`, { mode: 0o600 });
-      return await run(script => runCommand("ssh", ["-F", "/dev/null", "-T", "-i", key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${hosts}`, "-o", `HostKeyAlias=${host}`, "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", `${connection.username}@${addresses[0].address}`, "bash", "-s"], { input: script, timeout: 12 * 60_000, errorMessages: { cli_missing: "WP-CLI n’est pas disponible sur ce compte o2switch.", php_mismatch: "WP-CLI utilise un autre PHP que le site. Alignez la version CLI avant de mettre à jour WordPress.", domain_mismatch: "Le WordPress trouvé ne correspond pas au domaine de la fiche. Vérifiez son rattachement.", symlinks: "Ce WordPress utilise des liens symboliques. Sa sauvegarde doit être adaptée avant toute mise à jour.", multisite: "Le WordPress est un multisite : une intervention dédiée est nécessaire.", file_mods: "Les mises à jour sont désactivées dans WordPress.", maintenance: "Le site est déjà en maintenance. Terminez cette intervention avant de lancer une mise à jour." } }), connection.username);
-    } finally { await rm(folder, { recursive: true, force: true }); }
-  });
 }

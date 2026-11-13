@@ -123,7 +123,7 @@ export async function remove(table: Table, id: string, workspace: Workspace) {
 }
 export async function requireProject(id: string, workspace: Workspace): Promise<Project> {
   const p = (await get<Project>("projects", id, workspace));
-  if (!p) throw new Error("Projet introuvable.");
+  if (!p) throw new ApiError("Projet introuvable.", 404);
   return p;
 }
 export async function createClient(
@@ -347,7 +347,7 @@ export async function saveInventory(
   components: ParsedComponent[],
 ) {
   const service = (await get<Service>("services", serviceId, workspace));
-  if (!service) throw new Error("Service introuvable.");
+  if (!service) throw new ApiError("Service introuvable.", 404);
   return (await transaction(async () => {
     const inventory = (await save<Inventory>(
       "inventories",

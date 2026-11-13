@@ -102,7 +102,7 @@ test("Bilan : un rapport partiel ne valide pas les autres blocs", () => {
 test("Plan quotidien : projets archivés exclus, installation en cours différée, échec isolé", async () => {
   const projects = ["ready", "busy", "empty", "broken", "archived"].map(id => ({ ...healthFixture().project, id, lifecycle: id === "archived" ? "archived" as const : "active" as const }));
   const seen: string[] = [];
-  const result = await planDailyAssessments({ projects: async () => projects, expire: async () => {}, start: async (raw, dispatch, options) => {
+  const result = await planDailyAssessments({ projects: async () => projects, expire: async () => {}, start: async (raw, _dispatch, options) => {
     const id = (raw as { projectId: string }).projectId;
     seen.push(id); assert.equal(options?.assessment, true);
     if (id === "broken") throw new Error("isolated");

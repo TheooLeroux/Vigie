@@ -156,15 +156,15 @@ async function readStaticFile(url: URL, limit: number, redirects = 0): Promise<B
   const addresses = await lookup(url.hostname, { all: true });
   if (!addresses.length || addresses.some(address => !publicAddress(address.address))) return fail("Les fichiers doivent être servis par une adresse HTTPS publique.");
   const address = addresses[0];
-  return new Promise((done, reject) => {
+  const result = await new Promise<Buffer | URL>((done, reject) => {
     const request = httpsRequest({ hostname: address.address, family: address.family, servername: url.hostname, port: 443, method: "GET", path: url.pathname + url.search, headers: { Host: url.hostname, "Accept-Encoding": "identity", "Cache-Control": "no-cache", "User-Agent": "Vigie-static-check/1.0" }, signal: AbortSignal.timeout(20_000) }, response => {
       if ([301, 302, 307, 308].includes(response.statusCode || 0) && response.headers.location) {
-        response.resume();
-        const next = new URL(response.headers.location, url);
-        if (redirects >= 3 || next.origin !== url.origin || next.username || next.password) { reject(new ApiError("Redirection statique non qualifiée.", 422)); return; }
-        void readStaticFile(next, limit, redirects + 1).then(done, reject); return;
+        response.destroy();
+        const next = URL.parse(response.headers.location, url);
+        if (redirects >= 3 || !next || next.origin !== url.origin || next.username || next.password) { reject(new ApiError("Redirection statique non qualifiée.", 422)); return; }
+        done(next); return;
       }
-      if (response.statusCode !== 200) { response.resume(); reject(new ApiError(`Fichier statique inaccessible (HTTP ${response.statusCode}). Les protections d’accès restent actives.`, 422)); return; }
+      if (response.statusCode !== 200) { response.destroy(); reject(new ApiError(`Fichier statique inaccessible (HTTP ${response.statusCode}). Les protections d’accès restent actives.`, 422)); return; }
       const chunks: Buffer[] = []; let size = 0;
       response.on("data", chunk => { size += chunk.length; if (size > limit) response.destroy(new Error("size")); else chunks.push(chunk); });
       response.on("error", () => reject(new ApiError("Lecture statique interrompue ou trop volumineuse.", 422)));
@@ -172,9 +172,10 @@ async function readStaticFile(url: URL, limit: number, redirects = 0): Promise<B
     });
     request.on("error", () => reject(new ApiError("Le fichier statique ne répond pas au contrôle HTTPS.", 502))); request.end();
   });
+  return result instanceof URL ? readStaticFile(result, limit, redirects + 1) : result;
 }
-export async function verifyStaticDeployment(target: UpdateTarget, reference: { deploymentId: string; commit?: string }, build: StaticBuild, dependencies = { read: vercelUpdateRequest, file: readStaticFile }): Promise<UpdateCheck> {
-  const observed = await staticPreflight(target, reference, dependencies.read);
+export async function verifyStaticDeployment(target: UpdateTarget, reference: { deploymentId: string; commit?: string }, build: StaticBuild, { read = vercelUpdateRequest, file: readFile = readStaticFile }: { read?: typeof vercelUpdateRequest; file?: typeof readStaticFile } = {}): Promise<UpdateCheck> {
+  const observed = await staticPreflight(target, reference, read);
   let cursor = 0;
   const deadline = Date.now() + 180_000;
   let failure: unknown;
@@ -185,7 +186,7 @@ export async function verifyStaticDeployment(target: UpdateTarget, reference: { 
       if (Date.now() > deadline) return fail("Le contrôle de tous les fichiers statiques a dépassé son délai ; résultat non confirmé.");
       const file = build.files[cursor++];
       const pathname = file.path === "index.html" ? "" : file.path.endsWith("/index.html") ? file.path.slice(0, -10) : file.path;
-      const data = await dependencies.file(new URL(pathname, observed.url), file.size + 1);
+      const data = await readFile(new URL(pathname, observed.url), file.size + 1);
       if (data.length !== file.size || createHash("sha256").update(data).digest("hex") !== file.hash) return fail(`Le fichier publié ${file.path} ne correspond pas à la sortie statique validée. Le résultat n’est pas confirmé.`);
     }
     } catch (error) { failure = error; }
@@ -193,11 +194,11 @@ export async function verifyStaticDeployment(target: UpdateTarget, reference: { 
   if (failure) throw failure;
   if (build.profile.routing === "spa") {
     const index = build.files.find(file => file.path === "index.html")!;
-    const data = await dependencies.file(new URL("vigie-static-route-check/" + build.hash.slice(0, 16), observed.url), index.size + 1);
+    const data = await readFile(new URL("vigie-static-route-check/" + build.hash.slice(0, 16), observed.url), index.size + 1);
     if (data.length !== index.size || createHash("sha256").update(data).digest("hex") !== index.hash) return fail("La route profonde SPA ne restitue pas le document HTML validé.");
   }
   // Bind the public domain to the same active deployment again after all reads.
   // Vercel may protect its immutable URLs even for public production sites.
-  await staticPreflight(target, reference, dependencies.read);
+  await staticPreflight(target, reference, read);
   return { tool: "Static", phase: "after", scope: target.root || "racine", checkedAt: new Date().toISOString(), status: "passed", findings: [], staticEvidence: { projectId: target.remoteId, deploymentId: reference.deploymentId, commit: reference.commit || observed.commit || null, artifactHash: build.hash, fileCount: build.files.length, buildNodeVersion: build.nodeVersion }, message: `${build.files.length} fichiers statiques publiés conformes aux empreintes du build validé sous Node ${build.nodeVersion}. Déploiement, domaine public${build.profile.routing === "spa" ? ", route profonde SPA" : ""} et absence de fonctions confirmés. Aucun runtime Node serveur n’est revendiqué.` };
 }

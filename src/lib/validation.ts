@@ -101,8 +101,3 @@ export const manualInventorySchema = z.object({
     .min(1)
     .max(500),
 });
-export const transferSchema = z.object({
-  format: z.literal("vigie.inventory"),
-  version: z.literal(1),
-  projects: z.array(createProjectSchema).max(1000),
-});

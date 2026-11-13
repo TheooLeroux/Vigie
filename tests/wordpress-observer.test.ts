@@ -142,14 +142,25 @@ test("observateur : HTTPS public, IP privées et redirections bloquées ; répon
     "192.168.1.1",
     "169.254.169.254",
     "100.64.0.1",
+    "192.0.2.1",
+    "192.88.99.1",
+    "198.51.100.1",
     "::1",
     "::ffff:127.0.0.1",
     "fc00::1",
     "fe80::1",
     "2001:db8::1",
+    "2001:0db8::1",
+    "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+    "2001:1ff::1",
+    "2001:2::1",
+    "2002:a9fe:a9fe::1",
+    "3fff:0fff::1",
   ])
     assert.equal(publicAddress(address), false, address);
   assert.equal(publicAddress("109.234.161.69"), true);
+  assert.equal(publicAddress("198.51.99.1"), true);
+  assert.equal(publicAddress("2606:4700::1111"), true);
   const dns = (async () => [{ address: "109.234.161.69", family: 4 }]) as any;
   const privateDns = (async () => [{ address: "127.0.0.1", family: 4 }]) as any;
   for (const url of [

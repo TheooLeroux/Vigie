@@ -31,7 +31,7 @@ import {
   railwayServiceState,
   railwayAttention,
 } from "../src/lib/railway-status";
-import type { RailwayProject, RailwayService } from "../src/lib/railway-types";
+import type { RailwayProject } from "../src/lib/railway-types";
 import type { Access, Service } from "../src/lib/types";
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 const token = "railway-unit-test-private";

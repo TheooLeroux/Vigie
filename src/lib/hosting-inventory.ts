@@ -5,7 +5,6 @@ import { join, posix } from "node:path";
 import { claimHostingObservation, hostingStorage } from "./hosting-storage";
 import {
   withHostingCredentials,
-  hostingConnections,
 } from "./hosting-connections";
 import { hostingDiscovery, hostingInstallation } from "./hosting-discovery";
 import { transaction, log, get } from "./db";

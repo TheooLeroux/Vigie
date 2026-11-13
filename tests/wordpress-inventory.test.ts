@@ -23,9 +23,8 @@ import {
   applyDiscoverySnapshot,
   hostingDiscovery,
 } from "../src/lib/hosting-discovery";
-import { transaction, createProject } from "../src/lib/db";
+import { transaction } from "../src/lib/db";
 import { activityPage } from "../src/lib/activity";
-import { createProjectSchema } from "../src/lib/validation";
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
 const credentials = {
   name: "Files",

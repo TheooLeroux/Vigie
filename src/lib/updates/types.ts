@@ -135,7 +135,5 @@ export type SourceSettings = {
   archive?: string;
   filename?: string;
   deploymentId?: string | null;
-  sshKey?: string;
-  hostKey?: string;
 };
 export const activeUpdateStages: UpdateStage[] = ["queued", "checking", "updating", "publishing", "verifying"];
