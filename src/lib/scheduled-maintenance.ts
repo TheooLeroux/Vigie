@@ -8,3 +8,46 @@ const fallbackGraceMs = 6 * 60_000;
 export function claimScheduledMaintenance(source: "primary" | "fallback") {
   return claimHostingObservation("scheduled-maintenance", leaseMs, source === "fallback" ? fallbackGraceMs : 0);
 }
+
+const cycleJobs = [
+  "agents", "wordpress-observations", "wordpress-security",
+  "observations (o2switch)", "observations (railway)", "observations (vercel)",
+  "providers (railway)", "providers (vercel)",
+];
+
+export async function recentSuccessfulPrimaryCycle(repository: string, branch: string, transport: typeof fetch = fetch) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repository) || !branch) return false;
+  const windowMs = leaseMs + fallbackGraceMs - 60_000;
+  const query = new URLSearchParams({
+    branch, event: "workflow_dispatch", per_page: "30",
+    created: `>=${new Date(Date.now() - windowMs).toISOString()}`,
+  });
+  const api = `https://api.github.com/repos/${repository}/actions`;
+  const options: RequestInit = {
+    headers: { Accept: "application/vnd.github+json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  };
+  try {
+    const response = await transport(`${api}/workflows/vigie-wordpress-agents.yml/runs?${query}`, options);
+    if (!response.ok) return false;
+    const { workflow_runs: runs, total_count: total } = await response.json();
+    if (!Array.isArray(runs) || total !== runs.length) return false;
+    const primary = runs.filter(run =>
+      run?.event === "workflow_dispatch" && run.head_branch === branch && run.display_title === "security-watch");
+    if (primary.some(run => !Number.isFinite(Date.parse(run.created_at)))) return false;
+    const latest = primary.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+    if (latest?.status !== "completed" || latest.conclusion !== "success" ||
+      !Number.isSafeInteger(latest.id) || !Number.isSafeInteger(latest.run_attempt)) return false;
+    const details = await transport(`${api}/runs/${latest.id}/attempts/${latest.run_attempt}/jobs?per_page=30`, options);
+    if (!details.ok) return false;
+    const { jobs } = await details.json();
+    const age = Date.now() - Date.parse(latest.created_at);
+    // A project-scoped or installation-scoped dispatch can share the title.
+    // Only a run that actually covered the fleet is sufficient evidence.
+    return age >= 0 && age < windowMs && Array.isArray(jobs) &&
+      cycleJobs.every(name => jobs.some(job => job?.name === name && job.conclusion === "success"));
+  } catch {
+    return false;
+  }
+}
