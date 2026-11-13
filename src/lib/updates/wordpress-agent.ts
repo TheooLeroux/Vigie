@@ -40,7 +40,7 @@ export interface AgentFiles {
   write(file: string, content: string): Promise<void>;
 }
 // A caller supplies a trusted installation; neither HTTP clients nor jobs choose API paths.
-export function cpanelAgentFiles(connection: HostingConnection & { secret: string }, directory: string, transport: typeof fetch = fetch) {
+export function cpanelAgentFiles(connection: Pick<HostingConnection, "id" | "endpoint" | "username" | "authMode"> & { secret: string }, directory: string, transport: typeof fetch = fetch) {
   const allowedDirectory = `/home/${connection.username}/.vigie-agent/`;
   if (!directory.startsWith(allowedDirectory) || !/^[a-f0-9]{16}$/.test(directory.slice(allowedDirectory.length))) throw new ApiError("Dossier d’agent invalide.");
   const authorization = connection.authMode === "token" ? `cpanel ${connection.username}:${connection.secret}` : `Basic ${Buffer.from(`${connection.username}:${connection.secret}`).toString("base64")}`;

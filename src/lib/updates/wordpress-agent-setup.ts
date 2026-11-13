@@ -24,7 +24,7 @@ async function lockSource(targetId: string, projectId: string) {
     await db.prepare("SELECT target_id FROM update_sources WHERE target_id=? FOR UPDATE").get(targetId);
   }
 }
-function eligible(site: HostingInstallationView) {
+export function eligible(site: HostingInstallationView) {
   return site.kind === "wordpress" && !!site.project && site.project.lifecycle === "active" && !site.ignored && !site.missingSince;
 }
 async function claimAgentFailureAlerts(failures: AgentFailure[], requestId?: string) {
@@ -164,7 +164,7 @@ export async function requestLinkedAgents(connectionId: string, dispatch = dispa
   return { queued };
 }
 // Both proofs are signed: a ticking cron alone does not prove WordPress still loads.
-export async function agentControlHealthy(site: HostingInstallationView, settings: LocalAgentSettings, files: Pick<AgentFiles, "read">) {
+export async function agentControlHealthy(site: Pick<HostingInstallationView, "suggestedEnvironment" | "inventory" | "documentRoot" | "domains" | "aliases">, settings: Pick<LocalAgentSettings, "environment" | "secret">, files: Pick<AgentFiles, "read">) {
   try {
     if (settings.environment !== site.suggestedEnvironment || !site.inventory?.php || site.inventory.error || site.inventory.collectionMode === "early") return false;
     const heartbeat = await files.read("heartbeat.json"), readiness = await files.read("readiness.json");

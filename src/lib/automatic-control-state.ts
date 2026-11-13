@@ -19,6 +19,7 @@ export type SecurityCoverageDetails = {
   observations?: string[];
 };
 export type AutomaticControl = {
+  sourceDigest?: string;
   securityCoverage?: SecurityCoverageDetails;
   sourceQualification?: import("./updates/capabilities").SourceQualification;
   targetId: string;

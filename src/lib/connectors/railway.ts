@@ -145,11 +145,19 @@ export async function collectRailway(
   token: string,
   transport: typeof fetch = fetch,
 ): Promise<RailwayProject[]> {
+  return enrichRailwayReleases(await readRailwayInventory(workspaceId, token, transport), transport);
+}
+
+export async function readRailwayInventory(
+  workspaceId: string,
+  token: string,
+  transport: typeof fetch = fetch,
+  signal = AbortSignal.timeout(90_000),
+): Promise<RailwayProject[]> {
   id.parse(workspaceId);
   const results: RailwayProject[] = [],
     seen = new Set<string>();
   let after: string | null = null;
-  const signal = AbortSignal.timeout(90_000);
   try {
     for (let page = 0; page < 10; page++) {
       const response = await transport(
@@ -269,7 +277,7 @@ export async function collectRailway(
         });
       }
       if (!projects.pageInfo.hasNextPage)
-        return enrichRailwayReleases(results, transport);
+        return results;
       const cursor = projects.pageInfo.endCursor;
       if (!cursor || cursor === after)
         throw new ApiError("Pagination Railway incohérente.", 502);

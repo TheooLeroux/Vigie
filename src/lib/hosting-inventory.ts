@@ -70,6 +70,15 @@ export async function inventoryUrl(item: HostingInstallationView) {
     throw new ApiError("Aucun domaine n’est associé à ce site.");
   return `https://${item.domains[0]}/`;
 }
+
+export async function withWordPressObserver<T>(
+  item: HostingInstallationView,
+  read: (url: string, secret: string) => Promise<T> | T,
+) {
+  const observer = await observerRow(item.id);
+  if (!item.observerConfigured || !observer || JSON.parse(observer.data).status !== "installed") return null;
+  return read(await inventoryUrl(item), openConnectorSecret(observer.secret_cipher, observerContext(item)));
+}
 export async function collectHostingInventories(
   connectionId: string,
   transport: typeof fetch = fetch,
