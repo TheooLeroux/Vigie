@@ -1,66 +1,108 @@
 import { getCache } from "@vercel/functions";
-import { scheduledControlsCurrent } from "./automatic-controls";
+import { randomUUID } from "node:crypto";
+import { scheduledControlDeadlines } from "./automatic-controls";
 import { openConnectorSecret, sealConnectorSecret } from "./connector-secrets";
-import { successfulPrimaryCycle } from "./scheduled-maintenance";
-import { maintenanceProbesUnchanged, readMaintenanceProbes, type MaintenanceProbes } from "./scheduled-maintenance-probes";
+import { fullMaintenancePlan, maintenancePlanSchema, type MaintenancePlan } from "./maintenance-plan";
+import { probeMaintenance, readMaintenanceProbes, type MaintenanceProbes } from "./scheduled-maintenance-probes";
 import type { updateRunner } from "./updates/github";
 
 type Runner = NonNullable<ReturnType<typeof updateRunner>>;
-type MaintenanceCache = Pick<ReturnType<typeof getCache>, "get" | "set">;
-type Evidence = { requestedAt: number; probes: MaintenanceProbes };
-const evidenceLifetime = 7 * 60_000;
-const schedulingHorizon = 10 * 60_000;
-
-const dependencies = {
-  recentCycle: successfulPrimaryCycle,
-  controlsCurrent: scheduledControlsCurrent,
-  readProbes: readMaintenanceProbes,
-  unchanged: maintenanceProbesUnchanged,
+type RuntimeCache = Pick<ReturnType<typeof getCache>, "get" | "set">;
+type Snapshot = {
+  capturedAt: number;
+  generation: string | null;
+  deadlines: Awaited<ReturnType<typeof scheduledControlDeadlines>>;
+  probes: MaintenanceProbes;
 };
+type MaintenanceDecision = { plan: MaintenancePlan; generation: string | null; capturedAt: number };
+
+const snapshotLifetime = 11 * 60_000;
+const planLifetime = 4 * 60_000;
+const generationKey = "vigie:scheduled-maintenance:2:generation";
+const dependencies = { deadlines: scheduledControlDeadlines, readProbes: readMaintenanceProbes, probe: probeMaintenance };
+const isProduction = () => process.env.VERCEL === "1" && process.env.VERCEL_ENV === "production";
 
 export function productionMaintenanceCache(runner: Runner) {
   const revision = process.env.VERCEL_GIT_COMMIT_SHA;
-  if (process.env.VERCEL === "1" && process.env.VERCEL_ENV === "production" && revision && /^[a-f0-9]{40}$/i.test(revision)) {
-    return maintenanceCache(runner, revision, getCache());
+  if (isProduction() && revision && /^[a-f0-9]{40}$/i.test(revision)) {
+    try { return maintenanceCache(runner, revision, getCache()); }
+    catch { /* The cron and workers can still run the full cycle. */ }
   }
 }
 
-export function maintenanceCache(runner: Runner, revision: string, cache: MaintenanceCache, checks = dependencies) {
-  const key = `vigie:scheduled-maintenance:1:${runner.repository}:${runner.ref}:${revision}`;
-  function fresh(requestedAt: number) {
-    const age = Date.now() - requestedAt;
-    return age >= 0 && age < evidenceLifetime;
+export async function invalidateMaintenanceCache() {
+  if (!isProduction()) return;
+  try { await getCache().set(generationKey, randomUUID()); }
+  catch { console.warn("Vigie : invalidation du cache des contrôles indisponible."); }
+}
+
+export function maintenanceCache(runner: Runner, revision: string, cache: RuntimeCache, checks = dependencies) {
+  const key = `vigie:scheduled-maintenance:2:${runner.repository}:${runner.ref}:${revision}`;
+  const planKey = (id: string) => `${key}:plan:${id}`;
+  const idleKey = `${key}:last-idle`;
+  const generation = () => cache.get(generationKey) as Promise<string | null>;
+  function fresh(at: number, lifetime: number) {
+    const age = Date.now() - at;
+    return age >= 0 && age < lifetime;
   }
   return {
-    async prepare(requestedAt: number) {
+    async refresh() {
+      const capturedAt = Date.now();
       try {
-        const until = requestedAt + schedulingHorizon;
-        if (!await checks.controlsCurrent(until)) return null;
-        const probes = await checks.readProbes(until);
-        if (!probes || !fresh(requestedAt)) return null;
-        return sealConnectorSecret(JSON.stringify({ requestedAt, probes } satisfies Evidence), key);
+        const capturedGeneration = await generation();
+        const [deadlines, probes] = await Promise.all([checks.deadlines(), checks.readProbes()]);
+        if (!deadlines || !fresh(capturedAt, snapshotLifetime) || capturedGeneration !== await generation()) return false;
+        const value = sealConnectorSecret(JSON.stringify({ capturedAt, generation: capturedGeneration, deadlines, probes } satisfies Snapshot), key);
+        await cache.set(key, value, { ttl: snapshotLifetime / 1000, name: "Vigie · état des contrôles" });
+        return true;
       } catch {
-        return null;
+        console.warn("Vigie : état des contrôles non mis en cache.");
+        return false;
       }
     },
-    async publish(evidence: string) {
-      await cache.set(key, evidence, { ttl: evidenceLifetime / 1000, name: "Vigie · dernier cycle automatique" });
-    },
-    async decision() {
+    async plan(): Promise<MaintenanceDecision | null> {
       try {
         const encrypted = await cache.get(key);
-        if (typeof encrypted !== "string") return "cache-miss";
-        const evidence: Evidence = JSON.parse(openConnectorSecret(encrypted, key));
-        if (!fresh(evidence.requestedAt)) return "cache-expired";
-        const cycle = await checks.recentCycle(runner.repository, runner.ref, fetch, { revision, token: runner.token });
-        // GitHub timestamps runs at second resolution. Never accept a cycle that
-        // was already running before this request was made.
-        if (!cycle || cycle.startedAt < Math.floor(evidence.requestedAt / 1000) * 1000) return "cycle-unconfirmed";
-        if (!await checks.unchanged(evidence.probes)) return "observations-changed-or-unavailable";
-        return fresh(evidence.requestedAt) ? "skip" : "cache-expired";
-      } catch {
-        return "cache-unavailable";
-      }
+        if (typeof encrypted !== "string") return null;
+        const snapshot: Snapshot = JSON.parse(openConnectorSecret(encrypted, key));
+        if (!snapshot.deadlines || !fresh(snapshot.capturedAt, snapshotLifetime) || snapshot.generation !== await generation()) return null;
+        const plan: MaintenancePlan = {
+          observations: { vercel: false, railway: false, o2switch: false },
+          security: { vercel: [], railway: [], o2switch: [] },
+          wordpress: [], agents: [],
+        };
+        await checks.probe(snapshot.probes, plan);
+        const now = Date.now();
+        if (!fresh(snapshot.capturedAt, snapshotLifetime)) return null;
+        for (const { provider, projectId, dueAt } of snapshot.deadlines) {
+          const scope = plan.security[provider];
+          if (dueAt <= now && scope !== "all" && !scope.includes(projectId)) scope.push(projectId);
+        }
+        if (snapshot.generation !== await generation()) return null;
+        return { plan: maintenancePlanSchema.parse(plan), generation: snapshot.generation, capturedAt: snapshot.capturedAt };
+      } catch { return null; }
+    },
+    async publishPlan(id: string, decision: MaintenanceDecision) {
+      await cache.set(planKey(id), { at: Date.now(), ...decision }, { ttl: planLifetime / 1000, name: "Vigie · plan GitHub" });
+    },
+    async readPlan(id: string) {
+      try {
+        const entry = await cache.get(planKey(id)) as ({ at: number } & MaintenanceDecision) | null;
+        return entry && fresh(entry.at, planLifetime) && fresh(entry.capturedAt, snapshotLifetime) && entry.generation === await generation()
+          ? maintenancePlanSchema.parse(entry.plan) : fullMaintenancePlan;
+      } catch { return fullMaintenancePlan; }
+    },
+    async recordIdle(decision: MaintenanceDecision) {
+      await cache.set(idleKey, { at: Date.now(), generation: decision.generation }, { ttl: 5 * 60, name: "Vigie · dernier cycle sans travail" });
+    },
+    async clearIdle() {
+      await cache.set(idleKey, null, { ttl: 1 });
+    },
+    async recentlyIdle() {
+      try {
+        const entry = await cache.get(idleKey) as { at: number; generation: string | null } | null;
+        return !!entry && fresh(entry.at, 5 * 60_000) && entry.generation === await generation();
+      } catch { return false; }
     },
   };
 }

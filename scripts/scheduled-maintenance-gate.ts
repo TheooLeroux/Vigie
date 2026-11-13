@@ -11,6 +11,11 @@ async function main() {
     console.log("Cycle complet récent confirmé par GitHub : secours ignoré.");
     return;
   }
+  if (await recentIdleCycle()) {
+    await appendFile(process.env.GITHUB_OUTPUT, "run=false\n");
+    console.log("Vigie : le dernier relevé ne demande aucun contrôle, secours sans Neon.");
+    return;
+  }
   try {
     const lease = await claimScheduledMaintenance("fallback");
     await appendFile(process.env.GITHUB_OUTPUT, `run=${Boolean(lease)}\n`);
@@ -18,6 +23,15 @@ async function main() {
   } finally {
     await postgresPool().end();
   }
+}
+
+async function recentIdleCycle() {
+  try {
+    const response = await fetch("https://vigie-azure.vercel.app/api/maintenance/plan?fallback=1", {
+      cache: "no-store", redirect: "error", signal: AbortSignal.timeout(5_000),
+    });
+    return response.ok && (await response.json())?.recent === true;
+  } catch { return false; }
 }
 
 void main().catch(() => {

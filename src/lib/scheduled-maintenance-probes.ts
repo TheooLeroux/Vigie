@@ -8,7 +8,6 @@ import { collectObserver } from "./connectors/wordpress-observer";
 import { hostingConnections, withHostingCredentials } from "./hosting-connections";
 import { hostingDiscovery } from "./hosting-discovery";
 import { withWordPressObserver } from "./hosting-inventory";
-import { wordpressObservationNeedsRefresh } from "./observation-freshness";
 import { railwayState, withRailwayCredentials } from "./railway";
 import type { RailwayDeployment, RailwayProject } from "./railway-types";
 import type { HostingConnection, HostingInstallationView } from "./types";
@@ -20,25 +19,34 @@ import { cpanelAgentFiles, type LocalAgentSettings } from "./updates/wordpress-a
 import { agentControlHealthy, eligible } from "./updates/wordpress-agent-setup";
 import { wordpressAgentPackageVersion } from "./updates/wordpress-agent-package";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
+import { deploymentObservationLifetime, observationIsFresh, wordpressObservationLifetime } from "./observation-freshness";
+import type { MaintenancePlan } from "./maintenance-plan";
+import { vercelExcluded } from "./vercel-client-mapping";
 
 type WordPressProbe = {
+  id: string;
+  projectId: string;
   site: Pick<HostingInstallationView, "documentRoot" | "suggestedEnvironment" | "domains" | "aliases">;
   url: string;
   secret: string;
   agent: Pick<LocalAgentSettings, "directory" | "environment" | "secret"> | null;
   versions: string;
+  inventoryAt: string;
+  agentDueAt: number;
 };
 type HostingCredentials = Pick<HostingConnection, "id" | "name" | "endpoint" | "username" | "authMode"> & { secret: string };
+type WordPressScope = Pick<WordPressProbe, "id" | "projectId">;
 
 export type MaintenanceProbes = {
-  vercel: { teamId: string; token: string; digest: string }[];
-  railway: { workspaceId: string; token: string; digest: string }[];
-  hosting: {
+  vercel: ({ teamId: string; token: string; digest: string; observedAt: string | null; error: boolean } | null)[];
+  railway: ({ workspaceId: string; token: string; digest: string; observedAt: string | null; error: boolean } | null)[];
+  hosting: ({
     credentials: HostingCredentials;
     digest: string;
-    wordpress: WordPressProbe[];
-    sources: { root: string; digest: string }[];
-  }[];
+    observedAt: string | null;
+    wordpress: (WordPressProbe | WordPressScope)[];
+    sources: { projectId: string; root: string; digest: string | null }[];
+  } | null)[];
 };
 
 function digest(rows: unknown[][]) {
@@ -66,106 +74,141 @@ function hostingDigest(installations: DiscoveredInstallation[]) {
     site.domains.slice().sort(), site.aliases.slice().sort(), site.inspectionError, site.suggestedEnvironment]));
 }
 
-async function wordpressProbe(site: HostingInstallationView, until: number): Promise<WordPressProbe | null> {
+async function wordpressProbe(site: HostingInstallationView): Promise<WordPressProbe | WordPressScope> {
+  const scope = { id: site.id, projectId: site.project!.id };
   const current = site.inventory;
-  if (!current || current.source !== "wordpress-observer" || current.collectionMode === "early" || current.error ||
-      wordpressObservationNeedsRefresh(site, until)) return null;
+  if (!current?.observedAt || current.source !== "wordpress-observer" || current.collectionMode === "early" || current.error) return scope;
   const state = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
   const agent = state?.localAgent;
   const verifiedAt = Date.parse(agent?.lastVerifiedAt ?? "");
   const setup = state?.agentInstallation;
   // A failed installation is already waiting for its persisted retry time.
   // Keep checking WordPress versions while respecting that backoff.
-  const waitingForRetry = setup?.state === "failed" && !agent?.ready && Date.parse(setup.nextAttemptAt ?? "") > until;
-  if (!waitingForRetry && (!agent?.ready || agent.bundleVersion !== wordpressAgentPackageVersion || state?.agentReportedFailure ||
-      (state?.agentInstallation && state.agentInstallation.state !== "ready") ||
-      !Number.isFinite(verifiedAt) || verifiedAt > Date.now() || until - verifiedAt >= 15 * 60_000)) return null;
-  return withWordPressObserver(site, (url, secret) => ({
+  const retryAt = setup?.state === "failed" && !agent?.ready ? Date.parse(setup.nextAttemptAt ?? "") : NaN;
+  const healthy = agent?.ready && agent.bundleVersion === wordpressAgentPackageVersion && !state?.agentReportedFailure &&
+      (!setup || setup.state === "ready") && Number.isFinite(verifiedAt) && verifiedAt <= Date.now();
+  return await withWordPressObserver(site, (url, secret) => ({
+    ...scope,
     site: { documentRoot: site.documentRoot, suggestedEnvironment: site.suggestedEnvironment, domains: site.domains, aliases: site.aliases },
-    url, secret, agent: waitingForRetry || !agent ? null : { directory: agent.directory, environment: agent.environment, secret: agent.secret },
+    url, secret, agent: healthy ? { directory: agent.directory, environment: agent.environment, secret: agent.secret } : null,
+    agentDueAt: healthy ? verifiedAt + 10 * 60_000 : Number.isFinite(retryAt) ? retryAt : 0,
+    inventoryAt: current.observedAt!,
     versions: wordpressSecurityVersions(current),
-  }));
+  })) ?? scope;
 }
 
-export async function readMaintenanceProbes(until: number): Promise<MaintenanceProbes | null> {
+export async function readMaintenanceProbes(): Promise<MaintenanceProbes> {
   const [vercel, railway, hosting] = await Promise.all([
     vercelState({ includeDisplayLabels: false }),
     railwayState({ includeDisplayLabels: false }),
     hostingConnections(),
   ]);
-  if (vercel.connections.some(item => item.error) || railway.connections.some(item => item.error) ||
-      hosting.some(item => item.configured && item.status !== "connected")) return null;
   const [vercelProbes, railwayProbes, hostingProbes] = await Promise.all([
     Promise.all(vercel.connections.filter(item => item.configured).map(item =>
       withVercelCredentials(item.id, async (token, teamId) => ({
-        teamId, token, digest: digest(vercel.projects.filter(project => project.connectionId === item.id && !project.missingSince)
+        teamId, token, observedAt: item.lastSuccessAt, error: !!item.error,
+        digest: digest(vercel.projects.filter(project => project.connectionId === item.id && !project.missingSince && !project.excluded)
           .map(project => [project.id, project.name, project.production?.id ?? null])),
-      })))),
+      })).catch(() => null))),
     Promise.all(railway.connections.filter(item => item.configured).map(item =>
       withRailwayCredentials(item.id, async (token, workspaceId) => ({
-        workspaceId, token, digest: railwayDigest(railway.projects.filter(project => project.connectionId === item.id && !project.missingSince)),
-      })))),
+        workspaceId, token, observedAt: item.lastSuccessAt, error: !!item.error,
+        digest: railwayDigest(railway.projects.filter(project => project.connectionId === item.id && !project.missingSince)),
+      })).catch(() => null))),
     Promise.all(hosting.filter(item => item.configured).map(async item => {
       const discovery = await hostingDiscovery(item.id);
-      if (discovery.error || !discovery.lastSuccessAt) return null;
+      if (discovery.error || item.status !== "connected") return null;
       const sites = discovery.installations.filter(site => !site.missingSince);
       const linked = sites.filter(site => !site.ignored && site.project?.lifecycle === "active");
       const [wordpress, sources] = await Promise.all([
-        mapConcurrent(linked.filter(eligible), 4, site => wordpressProbe(site, until)),
+        mapConcurrent(linked.filter(eligible), 4, site => wordpressProbe(site).catch(() => ({ id: site.id, projectId: site.project!.id }))),
         mapConcurrent(linked.filter(site => site.kind !== "wordpress"), 4, async site => {
           const report = await readAutomaticControl(`hosting:${site.id}`);
-          return report?.sourceDigest ? { root: site.documentRoot, digest: report.sourceDigest } : null;
+          return { projectId: site.project!.id, root: site.documentRoot, digest: report?.sourceDigest ?? null };
         }),
       ]);
-      if (wordpress.some(item => !item) || sources.some(item => !item)) return null;
       return withHostingCredentials(item.id, async ({ id, name, endpoint, username, authMode, secret }) => ({
         credentials: { id, name, endpoint, username, authMode, secret },
-        digest: hostingDigest(sites), wordpress: wordpress.filter(item => item !== null),
-        sources: sources.filter(item => item !== null),
+        digest: hostingDigest(sites), observedAt: discovery.lastSuccessAt, wordpress, sources,
       }));
-    })),
+    }).map(probe => probe.catch(() => null))),
   ]);
-  if (hostingProbes.some(item => !item)) return null;
-  return { vercel: vercelProbes, railway: railwayProbes, hosting: hostingProbes.filter(item => item !== null) };
+  return { vercel: vercelProbes, railway: railwayProbes, hosting: hostingProbes };
 }
 
-export async function maintenanceProbesUnchanged(probes: MaintenanceProbes) {
-  const controller = new AbortController();
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(40_000)]);
+export async function probeMaintenance(probes: MaintenanceProbes, plan: MaintenancePlan) {
+  const now = Date.now();
+  const signal = AbortSignal.timeout(40_000);
   const transport: typeof fetch = (url, options) => fetch(url, {
-    ...options, signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal,
+    ...options, signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal, cache: "no-store",
   });
-  const compare = (unchanged: boolean) => {
-    if (!unchanged) controller.abort();
-    return unchanged;
+  // Start the full collection one tick before persisted observations expire.
+  const refreshAfter = deploymentObservationLifetime - 5 * 60_000;
+  const current = (at: string | null) => observationIsFresh(at, refreshAfter, now);
+  const add = (scope: MaintenancePlan["agents"], id: string) => {
+    if (scope !== "all" && !scope.includes(id)) scope.push(id);
   };
-  try {
-    const checks = await Promise.all([
-      ...probes.vercel.map(async item => compare(digest((await readVercelProductionPointers(item.teamId, item.token, transport))
-        .map(project => [project.projectId, project.name, project.deploymentId])) === item.digest)),
-      ...probes.railway.map(async item => compare(railwayDigest(await readRailwayInventory(item.workspaceId, item.token, transport, signal)) === item.digest)),
-      ...probes.hosting.map(async item => {
-        const current = await collectO2switchInstallations(item.credentials, transport);
-        if (!compare(hostingDigest(current.installations) === item.digest)) return false;
+  const [vercel, railway, hosting] = await Promise.all([
+    Promise.all(probes.vercel.map(async item => {
+      if (!item || item.error) return { unchanged: false, fresh: false };
+      const pointers = (await readVercelProductionPointers(item.teamId, item.token, transport))
+        .filter(project => !vercelExcluded(item.teamId, project.name));
+      return {
+        unchanged: digest(pointers.map(project => [project.projectId, project.name, project.deploymentId])) === item.digest,
+        fresh: current(item.observedAt),
+      };
+    })).catch(() => [{ unchanged: false, fresh: false }]),
+    Promise.all(probes.railway.map(async item => {
+      if (!item || item.error) return { unchanged: false, fresh: false };
+      const projects = await readRailwayInventory(item.workspaceId, item.token, transport, signal);
+      return { unchanged: railwayDigest(projects) === item.digest, fresh: current(item.observedAt) };
+    })).catch(() => [{ unchanged: false, fresh: false }]),
+    Promise.all(probes.hosting.map(async item => {
+      if (!item) return { unchanged: false, unknown: true };
+      try {
+        const discovery = await collectO2switchInstallations(item.credentials, transport);
+        if (hostingDigest(discovery.installations) !== item.digest) return { unchanged: false, unknown: true };
         const client = cpanelReadClient(item.credentials, transport);
-        const [wordpress, sources] = await Promise.all([
+        await Promise.all([
           mapConcurrent(item.wordpress, 4, async proof => {
-            const inventory = await collectObserver(proof.url, proof.site.documentRoot, proof.secret, undefined, undefined, false, { refresh: false, signal });
-            if (!compare(inventory.collectionMode === "normal" && wordpressSecurityVersions(inventory) === proof.versions)) return false;
-            if (!proof.agent) return true;
-            return compare(await agentControlHealthy({ ...proof.site, inventory }, proof.agent, cpanelAgentFiles(item.credentials, proof.agent.directory, transport)));
+            if (!("url" in proof)) {
+              add(plan.wordpress, proof.id);
+              add(plan.agents, proof.id);
+              add(plan.security.o2switch, proof.projectId);
+              return;
+            }
+            const inventory = await collectObserver(proof.url, proof.site.documentRoot, proof.secret, undefined, undefined, false, { refresh: false, signal }).catch(() => null);
+            const changed = !inventory || inventory.collectionMode !== "normal" || wordpressSecurityVersions(inventory) !== proof.versions;
+            if (changed || !observationIsFresh(proof.inventoryAt, wordpressObservationLifetime - 10 * 60_000, now)) add(plan.wordpress, proof.id);
+            if (changed) add(plan.security.o2switch, proof.projectId);
+            if (now >= proof.agentDueAt || (proof.agent && (changed || !inventory ||
+                !await agentControlHealthy({ ...proof.site, inventory }, proof.agent, cpanelAgentFiles(item.credentials, proof.agent.directory, transport))))) {
+              add(plan.agents, proof.id);
+            }
           }),
           mapConcurrent(item.sources, 2, async source => {
-            const current = await readHostingSources(source.root, client, signal);
-            return compare(!current.limitations.length && hostingSourcesDigest(current.files) === source.digest);
+            const files = source.digest && await readHostingSources(source.root, client, signal).catch(() => null);
+            if (!current(item.observedAt) || !files || files.limitations.length || hostingSourcesDigest(files.files) !== source.digest) {
+              add(plan.security.o2switch, source.projectId);
+              return false;
+            }
+            return true;
           }),
         ]);
-        return wordpress.every(Boolean) && sources.every(Boolean);
-      }),
-    ]);
-    return !signal.aborted && checks.every(Boolean);
-  } catch {
-    controller.abort();
-    return false;
+        return { unchanged: current(item.observedAt), unknown: false };
+      } catch { return { unchanged: false, unknown: true }; }
+    })),
+  ]);
+  plan.observations.vercel = vercel.some(item => !item.unchanged || !item.fresh);
+  plan.observations.railway = railway.some(item => !item.unchanged || !item.fresh);
+  plan.observations.o2switch = hosting.some(item => !item.unchanged);
+  // A provider inventory can reveal a new project or a relinking. Check its
+  // complete scope once the collector has persisted the new observation.
+  if (vercel.some(item => !item.unchanged)) plan.security.vercel = "all";
+  if (railway.some(item => !item.unchanged)) plan.security.railway = "all";
+  if (hosting.some(item => item.unknown)) {
+    plan.security.o2switch = "all";
+    plan.wordpress = "all";
+    plan.agents = "all";
   }
 }

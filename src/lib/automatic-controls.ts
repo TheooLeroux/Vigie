@@ -25,8 +25,12 @@ import { minimalStaticWitnessId } from "./updates/minimal-static-migration";
 import { railpackScanDue, readRailpackScans, refreshRailpackImage } from "./updates/railpack-image-control";
 export { readAutomaticControl, writeAutomaticControl, claimAutomaticControl } from "./automatic-control-storage";
 
-async function activeProjects(projectId?: string) {
-  if (!projectId) return (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active");
+async function activeProjects(projectId?: string, projectIds?: readonly string[]) {
+  if (!projectId) {
+    if (projectIds) return (await mapConcurrent([...new Set(projectIds)], 4, id => get<Project>("projects", id, "live")))
+      .filter((project): project is Project => project?.lifecycle === "active");
+    return (await list<Project>("projects", "live")).filter(project => project.lifecycle === "active");
+  }
   const project = await get<Project>("projects", projectId, "live");
   return project?.lifecycle === "active" ? [project] : [];
 }
@@ -90,19 +94,25 @@ async function readControlSchedules(batch: Awaited<ReturnType<typeof readControl
   };
 }
 
-export async function scheduledControlsCurrent(until: number) {
+export async function scheduledControlDeadlines() {
   const batch = await readControlProjects(await activeProjects());
   const due = await readControlSchedules(batch);
-  const observedAt = Date.now();
-  // The preceding cycle refreshes the observations. Compare the captured identity
-  // now and evaluate the scan deadlines at the next scheduled tick.
-  // A failed result is retried on the original five-minute cadence.
-  return batch.every(project => project && project.targets.targets.every(target =>
-    !due(project.detail, target, until, false, undefined, observedAt)));
+  if (batch.some(project => !project)) return null;
+  const now = Date.now();
+  return batch.flatMap(project => project!.targets.targets.map(target => {
+    // Search the monotonic deadline using the same rules as the worker.
+    let earliest = now, latest = now + 60 * 60_000;
+    while (earliest < latest) {
+      const middle = Math.floor((earliest + latest) / 2);
+      if (due(project!.detail, target, middle, false, undefined, now)) latest = middle;
+      else earliest = middle + 1;
+    }
+    return { provider: target.provider, projectId: target.projectId, dueAt: earliest };
+  }));
 }
 
-export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string) {
-  const plan = await planAutomaticControls(await activeProjects(projectId), provider, force, forceRevision);
+export async function automaticControlsNeeded(provider: UpdateTarget["provider"], force = false, projectId?: string, forceRevision?: string, projectIds?: readonly string[]) {
+  const plan = await planAutomaticControls(await activeProjects(projectId, projectIds), provider, force, forceRevision);
   // A failed preparation should reach the worker instead of being treated as up to date.
   return plan.some(project => !project || project.targets.length > 0);
 }
@@ -133,13 +143,14 @@ const defaultControls = { projects: () => list<Project>("projects", "live"), det
 
 type ControlDependencies = Omit<typeof defaultControls, "scanRailpack"> & { scanRailpack?: typeof refreshRailpackImage };
 
-export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string } = {}, dependencies?: ControlDependencies) {
+export async function reconcileAutomaticControls(options: { force?: boolean; forceRevision?: string; provider?: UpdateTarget["provider"]; projectId?: string; projectIds?: readonly string[] } = {}, dependencies?: ControlDependencies) {
   const controls = dependencies ?? defaultControls;
   const result = { checked: 0, failed: 0, deferred: 0, limited: 0 };
   const attemptRevision = options.forceRevision || (/^[a-f0-9]{40}$/i.test(process.env.GITHUB_SHA || "") ? process.env.GITHUB_SHA : undefined);
   const projects = dependencies
-    ? (await dependencies.projects()).filter(project => project.lifecycle === "active" && (!options.projectId || project.id === options.projectId))
-    : await activeProjects(options.projectId);
+    ? (await dependencies.projects()).filter(project => project.lifecycle === "active" &&
+      (!options.projectId || project.id === options.projectId) && (!options.projectIds || options.projectIds.includes(project.id)))
+    : await activeProjects(options.projectId, options.projectIds);
   const plan = dependencies ? null : await planAutomaticControls(projects, options.provider, options.force, options.forceRevision);
   await mapConcurrent(projects, 3, async (project, index) => {
     try {
