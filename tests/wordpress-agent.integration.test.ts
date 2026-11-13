@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID, createHash } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { agentBundle, agentDirectory, localAgentOperation, signAgentPayload, agentPlan, type AgentFiles, type AgentOperation } from "../src/lib/updates/wordpress-agent";
 import { closedWordPressPlugin, freeWordPressScanner } from "../src/lib/updates/wordpress-free-security";
 import { requireSecurityPass } from "../src/lib/updates/security";

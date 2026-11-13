@@ -155,8 +155,6 @@ const settingsSchema = z.object({
   targetId: z.string().min(1).max(300),
   archive: z.string().max(2_800_000).regex(/^[A-Za-z0-9+/]*={0,2}$/).optional(),
   filename: z.string().max(120).optional(),
-  sshKey: z.string().trim().min(50).max(20000).optional(),
-  hostKey: z.string().trim().regex(/^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/]+={0,2}$/).max(2000).optional(),
   localAgent: z.boolean().optional(),
 });
 export async function configureUpdateSource(projectId: string, raw: unknown, readDeployment = currentSourceDeployment) {
@@ -166,13 +164,15 @@ export async function configureUpdateSource(projectId: string, raw: unknown, rea
   if (target.provider === "o2switch" && target.mode !== "wordpress") throw new ApiError("Cette application demande un parcours de maintenance dédié ; ses sources ne sont pas traitées comme une archive Node.", 422);
   if (target.mode === "git") throw new ApiError("Les sources de ce service sont gérées par GitHub.");
   if (target.mode === "image") throw new ApiError("L’image et ses accès sont gérés par le connecteur Railway ; aucune archive source n’est nécessaire.", 422);
-  if (target.mode === "wordpress" && input.localAgent) return { configured: false, ...(await requestAgentInstallation(target.remoteId, undefined, true)) };
-  if (target.mode === "archive" && (!input.archive || Buffer.from(input.archive, "base64").length > 2_000_000 || !Buffer.from(input.archive, "base64").subarray(0, 2).equals(Buffer.from("PK")))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
+  if (target.mode === "wordpress") {
+    if (!input.localAgent) throw new ApiError("Utilisez l’agent local pour configurer la maintenance WordPress.", 422);
+    return { configured: false, ...(await requestAgentInstallation(target.remoteId, undefined, true)) };
+  }
+  const archive = Buffer.from(input.archive || "", "base64");
+  if (archive.length > 2_000_000 || !archive.subarray(0, 2).equals(Buffer.from("PK"))) throw new ApiError("Fournissez une archive ZIP des sources, limitée à 2 Mo, sans node_modules ni secrets.");
   const scope = updateScope(target), db = await updateStorage();
   const previous = await readUpdateSource(target.id);
-  const settings: SourceSettings = target.mode === "archive" ? { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) } : { wordpressAutoRemoval: previous?.settings.wordpressAutoRemoval, sshKey: input.sshKey || previous?.settings.sshKey, hostKey: input.hostKey || previous?.settings.hostKey };
-  if (previous?.settings.agentInstallation?.state === "installing") throw new ApiError("L’installation automatique de l’agent est en cours.", 409);
-  if (target.mode === "wordpress" && !settings.localAgent && (!settings.sshKey || !settings.hostKey || !/^-----BEGIN (OPENSSH |RSA |EC |)PRIVATE KEY-----/.test(settings.sshKey))) throw new ApiError("Renseignez une clé SSH privée et l’empreinte publique du serveur obtenue auprès de l’hébergeur.");
+  const settings: SourceSettings = { archive: input.archive, filename: input.filename || "sources.zip", deploymentId: await readDeployment(target) };
   await transaction(async () => {
     if (isPostgres()) {
       await db.prepare("SELECT id FROM projects WHERE id=? FOR UPDATE").get(projectId);

@@ -34,7 +34,7 @@ import {
 } from "@/lib/hosting-connections";
 import {
   hostingDiscovery,
-  projectHostingInstallations,
+  hostingInstallation,
   linkHostingInstallation,
   createProjectFromInstallation,
   resolveHostingInstallation,
@@ -48,7 +48,6 @@ import {
   provisionLinkedObserver,
   provisionLinkedObservers,
 } from "@/lib/hosting-inventory";
-import { hostingInstallation } from "@/lib/hosting-discovery";
 import { z } from "zod";
 import {
   database,
@@ -86,8 +85,6 @@ import type {
   Environment,
   Access,
   Resource,
-  Inventory,
-  Component,
 } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -144,7 +141,6 @@ function parseImport(data: { filename: string; content: string }) {
 }
 async function handleRequest(request: Request, context: Context) {
   try {
-    assertLocal(request);
     const url = new URL(request.url);
     const workspace = z
       .literal("live")
@@ -758,10 +754,12 @@ async function handler(request: Request, context: Context) {
   try {
     assertLocal(request);
     const session = await requireSession(request.headers);
-    return withAuditActor(
+    const response = await withAuditActor(
       { name: session.user.name, email: session.user.email },
-      async () => (await handleRequest(request, context)),
+      () => handleRequest(request, context),
     );
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
   } catch (error) {
     return errorResponse(error);
   }

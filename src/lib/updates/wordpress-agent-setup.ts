@@ -88,7 +88,7 @@ export async function requestAgentInstallation(id: string, dispatch = dispatchAg
 async function prepareSite(id: string) {
   let site = await hostingInstallation(id);
   if (!site.observerConfigured || !site.inventory?.observedAt || Date.now() - Date.parse(site.inventory.observedAt) > 5 * 60_000 || site.inventory.error) {
-    await refreshWordPressWeb({ remoteId: id, connectionId: site.connectionId, url: null }, "inventory");
+    await refreshWordPressWeb({ remoteId: id }, "inventory");
     site = await hostingInstallation(id);
   }
   if (site.inventory?.collectionMode === "early") throw new ApiError(`${site.inventory.loadFailure ? wordpressLoadFailureMessage(site.inventory.loadFailure) : "Le chargement complet de WordPress échoue après le chargement des extensions."} L’inventaire partiel ne permet pas de préparer l’agent.`);

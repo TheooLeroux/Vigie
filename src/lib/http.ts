@@ -59,16 +59,6 @@ export function errorResponse(error: unknown) {
     );
   if (error instanceof ApiError)
     return Response.json({ error: error.message }, { status: error.status });
-  if (
-    error instanceof Error &&
-    /introuvable|Format|format|fichier|JSON|composant|lockfile|inventaire|CSV|colonne|ligne|Import|Imbrication/.test(
-      error.message,
-    )
-  )
-    return Response.json(
-      { error: error.message },
-      { status: error.message.includes("introuvable") ? 404 : 400 },
-    );
   console.error(
     "Vigie: erreur interne",
     error instanceof Error ? error.name : "unknown",

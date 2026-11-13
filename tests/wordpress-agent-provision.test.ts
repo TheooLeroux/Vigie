@@ -37,6 +37,13 @@ test("Agent local : installation de production mise en attente automatiquement s
     await assert.rejects(withLocalWordPressAgent(target, async () => { throw new Error("Must not execute"); }), /n’est pas configuré/);
     const pending = (await readUpdateSource(target.id))!.settings;
     await writeUpdateSource(target.id, project.id, { ...pending, localAgent: { ...pending.localAgent!, ready: true } });
+    const configured = await readUpdateSource(target.id);
+    await assert.rejects(configureUpdateSource(project.id, {
+      targetId: target.id,
+      sshKey: "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "fixture".repeat(10),
+      hostKey: "ssh-ed25519 Zml4dHVyZQ==",
+    }), /Utilisez l’agent local/);
+    assert.deepEqual(await readUpdateSource(target.id), configured);
     await assert.rejects(withLocalWordPressAgent(target, async () => { throw new Error("Must not execute"); }), /production.*pas encore activées/);
     assert.equal(networkCalls, 0);
   } finally {

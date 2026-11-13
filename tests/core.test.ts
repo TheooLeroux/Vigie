@@ -1,10 +1,10 @@
 import { authFixture } from "./auth-fixture";
-import { createProject, list, transaction, workspaceData } from "../src/lib/db";
+import { createProject, transaction, workspaceData } from "../src/lib/db";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseLockfile, parseCsv, escapeCsv } from "../src/lib/inventory";
 import { safeUrl } from "../src/lib/validation";
-import { assertLocal } from "../src/lib/http";
+import { assertLocal, errorResponse } from "../src/lib/http";
 import { GET, POST, PATCH } from "../src/app/api/[...path]/route";
 
 process.env.VIGIE_DB_PATH = ":memory:";
@@ -105,6 +105,19 @@ test("CSV: erreurs de colonnes et formules Excel", () => {
     escapeCsv('=HYPERLINK("https://x")'),
     '"\'=HYPERLINK(""https://x"")"',
   );
+  for (const value of ["\nTexte", "  ＝1+2", "＋1", "－1", "＠SOMME(A1)"]) {
+    assert.equal(escapeCsv(value), '"' + "'" + value + '"');
+  }
+  assert.equal(parseCsv("name\r" + "Projet\r".repeat(1000)).length, 1000);
+  assert.throws(() => parseCsv("name\n" + "Projet\n".repeat(1001)), /1 000 projets/);
+  assert.deepEqual(parseCsv("name;constructor\nProjet;Valeur"), [{ name: "Projet", constructor: "Valeur" }]);
+});
+
+test("API : un message interne contenant un chemin ou du JSON reste privé", async t => {
+  t.mock.method(console, "error", () => {});
+  const response = errorResponse(new SyntaxError("Format JSON invalide dans C:/private/credentials.json"));
+  assert.equal(response.status, 500);
+  assert.equal((await response.json()).error, "L’opération n’a pas pu être enregistrée. Réessayez.");
 });
 test("URL: javascript, identifiants et chaînes de connexion refusés", () => {
   assert.equal(safeUrl.safeParse("javascript:alert(1)").success, false);
@@ -149,6 +162,7 @@ test("garde locale: origines externes, proxy et DNS rebinding refusés", () => {
 
 test("API: contrôle du périmètre, relations, historique, imports atomiques et archivage", async () => {
   let response = await call("GET", "workspace");
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
   let data = await response.json();
   assert.equal(data.projects.length, 0);
   response = await call("GET", "workspace", undefined, "demo");
@@ -214,6 +228,9 @@ test("API: contrôle du périmètre, relations, historique, imports atomiques et
   };
   response = await call("POST", "inventories", payload);
   assert.equal(response.status, 201);
+  const malformedInventory = await call("POST", "inventories", { ...payload, content: "{" });
+  assert.equal(malformedInventory.status, 400);
+  assert.match((await malformedInventory.json()).error, /JSON valide/);
   response = await call("POST", "inventories", {
     ...payload,
     content: JSON.stringify({ dependencies: { next: { version: "16.4.3" } } }),

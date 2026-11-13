@@ -121,8 +121,8 @@ export async function waitForDeployment(target: UpdateTarget, reference: { commi
   throw new ApiError("Le déploiement n’est pas confirmé dans le délai prévu. Vérifiez son état chez l’hébergeur avant de relancer.", 504);
 }
 export async function checkPublicSite(value: string, depth = 0): Promise<void> {
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || depth > 3) throw new ApiError("Le contrôle du site exige une URL HTTPS publique.");
+  const url = URL.parse(value);
+  if (!url || url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash || depth > 3) throw new ApiError("Le contrôle du site exige une URL HTTPS publique.");
   const addresses = await lookup(url.hostname, { all: true });
   if (!addresses.length || addresses.some(item => !publicAddress(item.address))) throw new ApiError("Le contrôle du site refuse les adresses privées.");
   const result = await new Promise<{ status: number; location?: string; content: string }>((resolveResult, reject) => {
@@ -136,7 +136,11 @@ export async function checkPublicSite(value: string, depth = 0): Promise<void> {
     request.on("error", () => reject(new ApiError("Le site ne répond pas correctement au contrôle HTTPS.", 502)));
     request.end();
   });
-  if ([301, 302, 303, 307, 308].includes(result.status) && result.location) return checkPublicSite(new URL(result.location, url).href, depth + 1);
+  if ([301, 302, 303, 307, 308].includes(result.status) && result.location) {
+    const next = URL.parse(result.location, url);
+    if (!next) throw new ApiError("Le site a renvoyé une redirection invalide.", 502);
+    return checkPublicSite(next.href, depth + 1);
+  }
   if ([401, 403].includes(result.status)) throw new ApiError("Le contrôle vise une page protégée. Configurez une URL de santé publique chez l’hébergeur (par exemple /healthz), sans désactiver l’authentification.", 502);
   if (result.status !== 200 || /There has been a critical error|Il y a eu une erreur critique|Fatal error:/.test(result.content)) throw new ApiError(`Le contrôle du site échoue (HTTP ${result.status}). Une vérification est nécessaire.`, 502);
 }

@@ -6,7 +6,6 @@ export const vercelRuntimePath = "/api/maintenance/runtime";
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 export const runtimeChallengeSchema = z.object({ projectId: z.string().regex(/^prj_[\w]+$/), deploymentId: z.string().regex(/^dpl_[\w]+$/), nonce: fingerprint, database: z.literal(true).optional() }).strict();
 export const runtimeProofSchema = runtimeChallengeSchema.extend({ protocol: z.literal("vigie-vercel-runtime-v1"), node: z.string().regex(/^\d+\.\d+\.\d+$/), commit: z.string().regex(/^[a-f0-9]{40}$/).nullable(), repository: z.string().max(200).nullable(), branch: z.string().max(200).nullable(), environment: z.literal("production"), region: z.string().min(1).max(50), time: z.number().int(), databaseFingerprint: fingerprint.optional() }).strict();
-export type VercelRuntimeProof = z.infer<typeof runtimeProofSchema>;
 
 function key(projectId: string) {
   // Other applications may receive only their derived project key, never the

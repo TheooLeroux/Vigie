@@ -5,6 +5,10 @@ import { mkdtemp, mkdir, writeFile, rm, symlink, access, readFile } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import dns from "node:dns/promises";
+import https from "node:https";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { maintenanceCapability, qualifySources } from "../src/lib/updates/capabilities";
 import { nodeValidationPlan } from "../src/lib/updates/managed-node";
 import { assertStaticDeployment, buildStaticCandidate, inspectStaticOutput, qualifyStaticSources, staticProfile, verifyStaticDeployment, type StaticBuild } from "../src/lib/updates/vercel-static";
@@ -118,6 +122,41 @@ test("Publication statique : un domaine personnalisé absent du détail doit êt
   };
   assert.equal((await verifyStaticDeployment(target, reference, build(), { ...dependencies, read: read(null) })).status, "passed");
   await assert.rejects(verifyStaticDeployment(target, reference, build(), { ...dependencies, read: read("other.example") }), /domaine public/);
+});
+
+test("Publication statique : seules les redirections valides sur le même domaine sont suivies", async t => {
+  const requests: string[] = [];
+  let location = "https://[";
+  const response = (path: string | null | undefined) => Object.assign(new PassThrough(), path === "/index.html"
+    ? { statusCode: 200, headers: {} }
+    : { statusCode: 302, headers: { location } });
+  const request = t.mock.method(https, "request", ((options: https.RequestOptions, onResponse: (message: ReturnType<typeof response>) => void) => {
+    requests.push(options.path || "");
+    const incoming = response(options.path);
+    const outgoing = new PassThrough();
+    outgoing.once("finish", () => {
+      onResponse(incoming);
+      if (incoming.statusCode === 200) incoming.end(content.get("index.html"));
+    });
+    return outgoing;
+  }) as unknown as typeof https.request);
+  const lookup = t.mock.method(dns, "lookup", (async () => [{ address: "8.8.8.8", family: 4 }]) as unknown as typeof dns.lookup);
+  syncBuiltinESMExports();
+  try {
+    const candidate = build();
+    candidate.files = candidate.files.filter(file => file.path === "index.html");
+    const verify = () => verifyStaticDeployment(target, { deploymentId: "dpl_static", commit }, candidate, { read: readers().read });
+    await assert.rejects(verify(), /Redirection statique non qualifiée/);
+    location = "https://foreign.example/index.html";
+    await assert.rejects(verify(), /Redirection statique non qualifiée/);
+    location = "/index.html";
+    assert.equal((await verify()).status, "passed");
+    assert.deepEqual(requests, ["/", "/", "/", "/index.html"]);
+  } finally {
+    request.mock.restore();
+    lookup.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("Publication statique : un asset différent, une promotion concurrente ou une protection HTTP empêchent le succès", async () => {
