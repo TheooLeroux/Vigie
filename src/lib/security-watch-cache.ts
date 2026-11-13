@@ -4,6 +4,7 @@ import { securityWatchSnapshotKey, type SecurityWatchSnapshot } from "./security
 import { securityWatch } from "./security-watch-data";
 
 const runtimeKey = "vigie:security-watch:1:live";
+const refreshIntervalMs = 14 * 60_000;
 type WatchEntry = { snapshot: SecurityWatchSnapshot; expiresAt: string };
 type WatchCache = Pick<ReturnType<typeof getCache>, "get" | "set">;
 
@@ -39,9 +40,15 @@ export async function readSecurityWatchSnapshot() {
 
 export async function refreshSecurityWatchSnapshot(signal: AbortSignal, cache = runtimeWatchCache()) {
   if (signal.aborted) return;
+  // A recently published snapshot covers this tick without acquiring a SQL lease.
+  const cached = await cache?.get(runtimeKey).catch(() => null) as WatchEntry | null | undefined;
+  const age = Date.now() - Date.parse(cached?.snapshot?.savedAt ?? "");
+  if (cached?.snapshot?.watch?.coverage && age >= 0 && age < refreshIntervalMs &&
+    Date.parse(cached.expiresAt) > Date.now()) return;
+  if (signal.aborted) return;
   // The cron ticks every five minutes. Keep the lease across successful runs
   // to rebuild about every 15 minutes, allowing one minute of scheduling jitter.
-  const release = await claimHostingObservation("security-watch", 14 * 60_000);
+  const release = await claimHostingObservation("security-watch", refreshIntervalMs);
   if (!release) return;
   let published = false;
   try {

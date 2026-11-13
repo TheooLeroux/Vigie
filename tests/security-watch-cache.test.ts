@@ -6,7 +6,37 @@ import { GET as readWatch } from "../src/app/api/[...path]/route";
 import { GET } from "../src/app/api/maintenance/security-watch/route";
 import { loadSecurityWatchSnapshot, readSecurityWatchSnapshot, refreshSecurityWatchSnapshot } from "../src/lib/security-watch-cache";
 import { sqliteDatabase } from "../src/lib/db-sqlite";
-import { claimScheduledMaintenance } from "../src/lib/scheduled-maintenance";
+import { claimScheduledMaintenance, recentSuccessfulPrimaryCycle } from "../src/lib/scheduled-maintenance";
+
+test("Le secours GitHub passe son tour uniquement si le dernier cycle récent a couvert tout le parc", async () => {
+  const completed = {
+    event: "workflow_dispatch", head_branch: "main", display_title: "security-watch",
+    id: 123, run_attempt: 2, created_at: new Date(Date.now() - 120_000).toISOString(),
+    status: "completed", conclusion: "success",
+  };
+  const fleet = [
+    "agents", "wordpress-observations", "wordpress-security",
+    "observations (o2switch)", "observations (railway)", "observations (vercel)",
+    "providers (railway)", "providers (vercel)",
+  ].map(name => ({ name, conclusion: "success" }));
+  const check = (runs: typeof completed[], jobs = fleet) =>
+    recentSuccessfulPrimaryCycle("qa/vigie", "main", async input => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/jobs")) {
+        assert.match(url.pathname, /\/runs\/123\/attempts\/2\/jobs$/);
+        return Response.json({ jobs });
+      }
+      return Response.json({ workflow_runs: runs, total_count: runs.length });
+    });
+  assert.equal(await check([completed]), true);
+  assert.equal(await check([completed], fleet.slice(1)), false);
+  assert.equal(await check([completed], [...fleet.slice(1), { ...fleet[0], conclusion: "skipped" }]), false);
+  assert.equal(await check([{ ...completed, created_at: new Date(Date.now() - 600_000).toISOString() }]), false);
+  assert.equal(await check([completed, {
+    ...completed, id: 124, created_at: new Date().toISOString(), status: "in_progress", conclusion: "",
+  }]), false);
+  assert.equal(await recentSuccessfulPrimaryCycle("qa/vigie", "main", async () => new Response(null, { status: 429 })), false);
+});
 
 test("Surveillance planifiée : authentification, déclenchement automatique et cache privé", async t => {
   const secret = randomBytes(32).toString("hex");
@@ -81,11 +111,14 @@ test("Surveillance planifiée : authentification, déclenchement automatique et 
   const prepare = t.mock.method(database, "prepare");
   assert.deepEqual(await loadSecurityWatchSnapshot(undefined, cache), { snapshot: updated, source: "cache" });
   assert.equal(prepare.mock.callCount(), 0);
+  await refreshSecurityWatchSnapshot(new AbortController().signal, cache);
+  assert.equal(prepare.mock.callCount(), 0);
+  const unavailableCache = { ...cache, get: async () => { throw new Error("cache unavailable"); } };
+  await refreshSecurityWatchSnapshot(new AbortController().signal, unavailableCache);
+  assert.ok(prepare.mock.callCount() > 0);
   assert.deepEqual(await loadSecurityWatchSnapshot("2099-01-01T00:00:00.000Z", cache), { snapshot: updated, source: "neon" });
   assert.deepEqual(await loadSecurityWatchSnapshot(null, cache), { snapshot: updated, source: "neon" });
-  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, {
-    ...cache, get: async () => { throw new Error("cache unavailable"); },
-  }), { snapshot: updated, source: "neon" });
+  assert.deepEqual(await loadSecurityWatchSnapshot(undefined, unavailableCache), { snapshot: updated, source: "neon" });
   prepare.mock.restore();
   assert.equal(advisoryReads, 2);
   const fallback = await claimScheduledMaintenance("fallback");
