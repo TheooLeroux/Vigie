@@ -1,9 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiError, assertLocal, errorResponse } from "@/lib/http";
 import { claimScheduledMaintenance } from "@/lib/scheduled-maintenance";
 import { productionMaintenanceCache } from "@/lib/scheduled-maintenance-cache";
 import { refreshSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { githubRequest, updateRunner } from "@/lib/updates/github";
+import { maintenanceHasWork } from "@/lib/maintenance-plan";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -12,30 +13,35 @@ async function dispatchSecurityControls() {
   const runner = updateRunner();
   if (!runner) throw new ApiError("Le contrôle automatique n’est pas configuré.", 503);
   const cache = productionMaintenanceCache(runner);
-  const decision = await cache?.decision();
-  if (decision) console.info("Vigie : décision du cycle automatique", { decision });
-  if (decision === "skip") return;
-  const lease = await claimScheduledMaintenance("primary").catch(() => {
+  const decision = await cache?.plan();
+  let requestId: string | undefined;
+  if (cache) {
+    const id = `maintenance-${Date.now()}-${randomBytes(16).toString("hex")}`;
+    try {
+      if (decision) await cache.publishPlan(id, decision);
+      requestId = id;
+    }
+    catch { console.warn("Vigie : plan GitHub non mis en cache."); }
+  }
+  const noWork = !!requestId && !!decision && !maintenanceHasWork(decision.plan);
+  if (!noWork) await cache?.clearIdle().catch(() => {});
+  const lease = noWork ? undefined : await claimScheduledMaintenance("primary").catch(() => {
     console.warn("Vigie : réservation du cycle automatique indisponible.");
     return undefined;
   });
   if (lease === null) return;
-  const evidence = cache?.prepare(Date.now());
   try {
+    console.info("Vigie : cycle automatique", { mode: requestId ? noWork ? "no-work" : "scoped" : "full" });
     await githubRequest(`/repos/${runner.repository}/actions/workflows/vigie-wordpress-agents.yml/dispatches`, runner.token, "POST", {
       ref: runner.ref,
-      inputs: { security_only: true },
+      inputs: { security_only: true, ...(requestId && { request_id: requestId }) },
     });
+    if (noWork && decision) await cache?.recordIdle(decision).catch(() => console.warn("Vigie : cycle sans travail non mis en cache."));
   } catch (error) {
     await lease?.().catch(() => console.warn("Vigie : réservation du cycle non libérée."));
     throw error;
   }
-  const prepared = await evidence;
-  if (prepared && cache) {
-    await cache.publish(prepared).catch(() => console.warn("Vigie : cache du cycle automatique indisponible."));
-  } else if (cache) {
-    console.info("Vigie : état du parc insuffisant pour ignorer le prochain cycle.");
-  }
+  // The successful observation jobs publish the fresh state after writing it.
 }
 
 export async function GET(request: Request) {

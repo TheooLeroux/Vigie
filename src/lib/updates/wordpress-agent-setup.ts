@@ -183,7 +183,7 @@ async function agentHeartbeatHealthy(site: HostingInstallationView, settings: Lo
     return await withHostingCredentials(site.connectionId, connection => agentControlHealthy(site, settings, cpanelAgentFiles(connection, settings.directory)));
   } catch { return false; }
 }
-export async function reconcileAgentInstallations(dependencies: { healthy?: typeof agentHeartbeatHealthy; prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}) {
+export async function reconcileAgentInstallations(dependencies: { healthy?: typeof agentHeartbeatHealthy; prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}, installationIds?: readonly string[]) {
   let ready = 0;
   const failures: AgentFailure[] = [];
   const pending: { site: HostingInstallationView; attempts: number }[] = [];
@@ -192,7 +192,7 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
     await log("live", "hosting.agent_failed", `La préparation de l’agent sur ${site.domains[0]} sera réessayée au prochain contrôle.`, site.project!.id);
   }
   for (const connection of (await hostingConnections()).filter(connection => connection.configured)) {
-    const sites = (await hostingDiscovery(connection.id)).installations.filter(eligible);
+    const sites = (await hostingDiscovery(connection.id)).installations.filter(site => eligible(site) && (!installationIds || installationIds.includes(site.id)));
     for (const site of sites) {
       try {
         const previous = (await readUpdateSource(`wordpress:${site.id}`))?.settings;

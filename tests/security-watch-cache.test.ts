@@ -8,8 +8,15 @@ import { loadSecurityWatchSnapshot, readSecurityWatchSnapshot, refreshSecurityWa
 import { sqliteDatabase } from "../src/lib/db-sqlite";
 import { claimScheduledMaintenance, recentSuccessfulPrimaryCycle } from "../src/lib/scheduled-maintenance";
 import { maintenanceCache } from "../src/lib/scheduled-maintenance-cache";
+import { fullMaintenancePlan, maintenanceHasWork, maintenanceSignature } from "../src/lib/maintenance-plan";
+import { securityWatchSnapshotKey } from "../src/lib/security-watch";
+import { GET as readPlan, POST as publishWorkerSnapshot } from "../src/app/api/maintenance/plan/route";
+import { readWorkerMaintenancePlan } from "../scripts/maintenance-plan";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-test("Vigie peut éviter un seul cycle lorsque le parc est inchangé et le dernier lancement confirmé", async t => {
+test("Le cache donne aux workers un plan sans Neon et conserve la reprise par projet", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-13T13:00:00Z") });
   t.mock.method(console, "warn", () => {});
   const previousKey = process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY;
@@ -18,56 +25,102 @@ test("Vigie peut éviter un seul cycle lorsque le parc est inchangé et le derni
     if (previousKey === undefined) delete process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY;
     else process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = previousKey;
   });
-  let saved: unknown;
+  const saved = new Map<string, unknown>();
   let probesRead = 0;
-  let due = false;
-  let changed = false;
-  let runStartedAt = Date.now();
-  let githubAvailable = true;
+  const projectId = "a1234567-1111-4111-8111-123456789012";
+  const dueAt = Date.now() + 6 * 60_000;
   const credentials = "existing-connector-credential";
   const store = {
-    get: async () => saved,
-    set: async (_key: string, value: unknown) => { saved = value; },
+    get: async (key: string) => saved.get(key) ?? null,
+    set: async (key: string, value: unknown) => { saved.set(key, value); },
   };
   const checks = {
-    controlsCurrent: async (until: number) => {
-      assert.equal(until, Date.now() + 600_000);
-      return !due;
-    },
+    deadlines: async () => [{ provider: "railway" as const, projectId, dueAt }],
     readProbes: async () => {
       probesRead++;
-      return { vercel: [{ teamId: "team_example", token: credentials, digest: "example" }], railway: [], hosting: [] };
+      return { vercel: [{ teamId: "team_example", token: credentials, digest: "example", observedAt: null, error: false }], railway: [], hosting: [] };
     },
-    recentCycle: async () => githubAvailable ? { id: 1, attempt: 1, startedAt: runStartedAt } : null,
-    unchanged: async (probes: { vercel: { token: string }[] }) => {
-      assert.equal(probes.vercel[0].token, credentials);
-      return !changed;
+    probe: async (probes: { vercel: ({ token: string } | null)[] }) => {
+      assert.equal(probes.vercel[0]?.token, credentials);
     },
   };
   const runner = { repository: "qa/vigie", ref: "main", token: "existing-github-credential" };
   const cache = maintenanceCache(runner, "a".repeat(40), store, checks);
-  assert.equal(await cache.decision(), "cache-miss");
-  due = true;
-  assert.equal(await cache.prepare(Date.now()), null);
-  assert.equal(probesRead, 0);
-  due = false;
-  const evidence = await cache.prepare(Date.now());
-  assert.ok(evidence && !evidence.includes(credentials));
-  await cache.publish(evidence);
+  assert.equal(await cache.plan(), null);
+  await cache.refresh();
+  assert.ok(!JSON.stringify([...saved]).includes(credentials));
   t.mock.timers.tick(5 * 60_000);
-  assert.equal(await cache.decision(), "skip");
+  const idle = await cache.plan();
+  assert.ok(idle && !maintenanceHasWork(idle.plan));
+  await cache.publishPlan("idle", idle);
+  assert.deepEqual(await cache.readPlan("idle"), idle.plan);
   assert.equal(probesRead, 1);
-  changed = true;
-  assert.equal(await cache.decision(), "observations-changed-or-unavailable");
-  changed = false;
-  githubAvailable = false;
-  assert.equal(await cache.decision(), "cycle-unconfirmed");
-  githubAvailable = true;
-  runStartedAt -= 1000;
-  assert.equal(await cache.decision(), "cycle-unconfirmed");
-  assert.equal(await maintenanceCache(runner, "c".repeat(40), store, checks).decision(), "cache-unavailable");
+  t.mock.timers.tick(60_000);
+  const scheduled = await cache.plan();
+  assert.deepEqual(scheduled?.plan.security, { vercel: [], railway: [projectId], o2switch: [] });
+  t.mock.timers.tick(4 * 60_000);
+  assert.deepEqual(await cache.readPlan("idle"), fullMaintenancePlan);
+  await store.set("vigie:scheduled-maintenance:2:generation", "updated");
+  assert.equal(await cache.plan(), null);
+});
+
+test("Un cycle planifié sans travail traverse le cron et le worker sans réservation SQL", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "vigie-maintenance-"));
+  const eventPath = join(directory, "event.json");
+  const environment = {
+    CRON_SECRET: "cron-test",
+    VERCEL: "1", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_SHA: "d".repeat(40),
+    VERCEL_URL: "vigie-deployment.vercel.app", BETTER_AUTH_URL: "https://vigie-azure.vercel.app",
+    VIGIE_CONNECTOR_ENCRYPTION_KEY: "e".repeat(64), VIGIE_UPDATES_RUNNER_REPOSITORY: "qa/vigie",
+    VIGIE_UPDATES_GITHUB_TOKENS: '{"qa":"unit-test"}', GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_EVENT_PATH: eventPath,
+  };
+  const previous = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  t.after(async () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    sqliteDatabase().prepare("DELETE FROM wordpress_catalog WHERE cache_key IN (?,?,?)")
+      .run(securityWatchSnapshotKey, "hosting:observation:lease:security-watch", "hosting:observation:lease:scheduled-maintenance");
+    await rm(directory, { recursive: true, force: true });
+  });
+  const sent: { request_id?: string }[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string, options?: RequestInit) => {
+    const url = new URL(input);
+    if (url.pathname === "/advisories") return Response.json([]);
+    assert.match(url.pathname, /\/dispatches$/);
+    sent.push(JSON.parse(options!.body as string).inputs);
+    return new Response(null, { status: 204 });
+  });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() - 30 * 60_000 });
+  const run = () => GET(new Request("https://vigie-deployment.vercel.app/api/maintenance/security-watch", {
+    headers: { Authorization: "Bearer cron-test" },
+  }));
+  assert.equal((await run()).status, 204);
+  const initialId = sent[0]?.request_id;
+  assert.ok(initialId);
+  assert.equal((await publishWorkerSnapshot(new Request(`https://vigie-azure.vercel.app/api/maintenance/plan?id=${initialId}`, {
+    method: "POST", headers: { Authorization: `Bearer ${maintenanceSignature(initialId)}` },
+  }))).status, 204);
   t.mock.timers.tick(5 * 60_000);
-  assert.equal(await cache.decision(), "cache-expired");
+  const database = sqliteDatabase();
+  const prepare = t.mock.method(database, "prepare");
+  assert.equal((await run()).status, 204);
+  assert.equal(prepare.mock.callCount(), 0);
+  assert.equal(sent.length, 2);
+  const id = sent[1].request_id;
+  assert.ok(id && maintenanceSignature(id));
+  await writeFile(eventPath, JSON.stringify({ inputs: { security_only: true, request_id: id } }));
+  const transport: typeof fetch = async (input, options) => readPlan(new Request(input, options));
+  const plan = await readWorkerMaintenancePlan(transport);
+  assert.equal(maintenanceHasWork(plan), false);
+  assert.equal(prepare.mock.callCount(), 0);
+  assert.deepEqual(await (await readPlan(new Request("https://vigie-azure.vercel.app/api/maintenance/plan?fallback=1"))).json(), { recent: true });
+  assert.equal((await readPlan(new Request(`https://vigie-azure.vercel.app/api/maintenance/plan?id=${id}`))).status, 401);
+  assert.deepEqual(await readWorkerMaintenancePlan(async () => new Response(null, { status: 503 })), fullMaintenancePlan);
+  t.mock.timers.tick(4 * 60_000);
+  assert.deepEqual(await readWorkerMaintenancePlan(transport), fullMaintenancePlan);
 });
 
 test("Le secours GitHub passe son tour uniquement si le dernier cycle récent a couvert tout le parc", async () => {

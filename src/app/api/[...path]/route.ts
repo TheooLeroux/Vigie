@@ -22,6 +22,7 @@ import { readUpdateSource } from "@/lib/updates/storage";
 import { updateTargets } from "@/lib/updates/targets";
 import { refreshProjectHosting } from "@/lib/updates/refresh-hosting";
 import { projectSummaries } from "@/lib/project-summaries";
+import { invalidateMaintenanceCache } from "@/lib/scheduled-maintenance-cache";
 import { loadSecurityWatchSnapshot } from "@/lib/security-watch-cache";
 import { activityPage } from "@/lib/activity";
 import { downloadBackup, listBackups } from "@/lib/backups";
@@ -758,6 +759,12 @@ async function handler(request: Request, context: Context) {
       { name: session.user.name, email: session.user.email },
       () => handleRequest(request, context),
     );
+    if (response.ok && ["POST", "PATCH", "DELETE"].includes(request.method)) {
+      const { path: [root] } = await context.params;
+      if (["projects", "connections", "installations", "vercel", "railway", "updates", "services", "environments", "accesses", "import"].includes(root)) {
+        await invalidateMaintenanceCache();
+      }
+    }
     response.headers.set("Cache-Control", "private, no-store");
     return response;
   } catch (error) {
