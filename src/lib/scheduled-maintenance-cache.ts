@@ -1,5 +1,5 @@
 import { getCache } from "@vercel/functions";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { scheduledControlDeadlines } from "./automatic-controls";
 import { openConnectorSecret, sealConnectorSecret } from "./connector-secrets";
 import { fullMaintenancePlan, maintenancePlanSchema, type MaintenancePlan } from "./maintenance-plan";
@@ -21,18 +21,22 @@ const planLifetime = 4 * 60_000;
 const generationKey = "vigie:scheduled-maintenance:2:generation";
 const dependencies = { deadlines: scheduledControlDeadlines, readProbes: readMaintenanceProbes, probe: probeMaintenance };
 const isProduction = () => process.env.VERCEL === "1" && process.env.VERCEL_ENV === "production";
+const runtimeCache = () => getCache({
+  namespace: "vigie-maintenance",
+  keyHashFunction: key => createHash("sha256").update(key).digest("hex"),
+});
 
 export function productionMaintenanceCache(runner: Runner) {
   const revision = process.env.VERCEL_GIT_COMMIT_SHA;
   if (isProduction() && revision && /^[a-f0-9]{40}$/i.test(revision)) {
-    try { return maintenanceCache(runner, revision, getCache()); }
+    try { return maintenanceCache(runner, revision, runtimeCache()); }
     catch { /* The cron and workers can still run the full cycle. */ }
   }
 }
 
 export async function invalidateMaintenanceCache() {
   if (!isProduction()) return;
-  try { await getCache().set(generationKey, randomUUID()); }
+  try { await runtimeCache().set(generationKey, randomUUID()); }
   catch { console.warn("Vigie : invalidation du cache des contrôles indisponible."); }
 }
 
