@@ -12,6 +12,7 @@ import { maintenanceCapability } from "./capabilities";
 import { readAutomaticControls } from "../automatic-control-storage";
 import type { AutomaticControl } from "../automatic-control-state";
 import type { ProjectObservationDetail } from "../types";
+import { agentHealthCurrent } from "./wordpress-agent-health";
 
 export function sourceRoot(value: string | null) {
   const root = (value || "").replace(/^\/+|\/+$/g, "");
@@ -24,11 +25,11 @@ export function updateScope(target: UpdateTarget) {
 export async function updateTargets(projectId: string, railwaySnapshot?: ReturnType<typeof railwayState>): Promise<UpdateTarget[]> {
   const project = await requireProject(projectId, "live");
   const [vercel, railway, hosting] = await Promise.all([vercelState(), railwaySnapshot ?? railwayState(), projectHostingInstallations(projectId)]);
-  const prepared = await prepareUpdateTargets({ project, vercel: vercel.projects.filter(item => item.projectId === projectId), railway: railway.projects.filter(item => item.projectId === projectId), hosting });
+  const prepared = await prepareUpdateTargets({ project, vercel: vercel.projects.filter(item => item.projectId === projectId), railway: railway.projects.filter(item => item.projectId === projectId), hosting }, undefined, { verifyAgentOnCacheMiss: true });
   return prepared.qualify(await readAutomaticControls(prepared.ids));
 }
 
-export async function prepareUpdateTargets({ project, vercel = [], railway = [], hosting = [] }: ProjectObservationDetail, configuredTargets?: ReadonlySet<string>) {
+export async function prepareUpdateTargets({ project, vercel = [], railway = [], hosting = [] }: ProjectObservationDetail, configuredTargets?: ReadonlySet<string>, { verifyAgentOnCacheMiss = false } = {}) {
   const projectId = project.id;
   const configured = configuredTargets ?? (await readConfiguredUpdateTargets([projectId])).get(projectId)!;
   const targets: UpdateTarget[] = [];
@@ -49,8 +50,11 @@ export async function prepareUpdateTargets({ project, vercel = [], railway = [],
     const source = await readUpdateSource(`wordpress:${item.id}`);
     const agent = source?.settings.localAgent;
     const setup = source?.settings.agentInstallation;
-    const verifiedAt = agent?.lastVerifiedAt || setup?.requestedAt;
-    const controlExpired = !!agent?.ready && (!verifiedAt || !Number.isFinite(Date.parse(verifiedAt)) || Math.abs(Date.now() - Date.parse(verifiedAt)) > 15 * 60_000);
+    const controlExpired = !!agent?.ready && agent.bundleVersion === wordpressAgentPackageVersion && (!setup || setup.state === "ready") &&
+      !item.ignored && !item.missingSince && (!!source?.settings.agentReportedFailure || !await agentHealthCurrent(item, agent, {
+        stateChangedAt: source?.settings.agentStateChangedAt, requestId: setup?.requestId,
+        installedAt: setup?.requestedAt, verifyOnMiss: verifyAgentOnCacheMiss,
+      }));
     const setupMessage = setup?.state === "queued" ? setup.error || "L’installation automatique de l’agent est en attente." : setup?.state === "installing" ? "L’agent local s’installe automatiquement. Son démarrage est en cours de vérification." : setup?.state === "failed" ? setup.error || "L’installation automatique de l’agent sera réessayée." : controlExpired ? "Le contrôle de l’agent a expiré. La vérification et la réparation automatiques sont attendues." : agent && agent.bundleVersion !== wordpressAgentPackageVersion ? "L’agent est en attente de mise à niveau automatique." : null;
     let url = item.domains[0] ? `https://${item.domains[0]}/` : null;
     try {

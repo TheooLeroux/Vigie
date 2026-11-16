@@ -118,6 +118,7 @@ export type UpdateState = {
 };
 export type SourceSettings = {
   agentReportedFailure?: string;
+  agentStateChangedAt?: string;
   wordpressAutoRemoval?: { projectId: string; root: string; slugs: string[] };
   agentInstallation?: {
     requestId: string;

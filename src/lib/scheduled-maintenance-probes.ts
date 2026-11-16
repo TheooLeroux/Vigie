@@ -16,7 +16,8 @@ import { hostingSourcesDigest, readHostingSources } from "./updates/hosting-sour
 import { mapConcurrent } from "./updates/planning";
 import { readUpdateSource } from "./updates/storage";
 import { cpanelAgentFiles, type LocalAgentSettings } from "./updates/wordpress-agent";
-import { agentControlHealthy, eligible } from "./updates/wordpress-agent-setup";
+import { eligible } from "./updates/wordpress-agent-setup";
+import { agentControlHealthy, agentHealthKey, recordAgentHealth } from "./updates/wordpress-agent-health";
 import { wordpressAgentPackageVersion } from "./updates/wordpress-agent-package";
 import { wordpressSecurityVersions } from "./updates/wordpress-security-key";
 import { deploymentObservationLifetime, observationIsFresh, wordpressObservationLifetime } from "./observation-freshness";
@@ -29,10 +30,10 @@ type WordPressProbe = {
   site: Pick<HostingInstallationView, "documentRoot" | "suggestedEnvironment" | "domains" | "aliases">;
   url: string;
   secret: string;
-  agent: Pick<LocalAgentSettings, "directory" | "environment" | "secret"> | null;
+  agent: (Pick<LocalAgentSettings, "directory" | "environment" | "secret"> & { healthKey: string }) | null;
   versions: string;
   inventoryAt: string;
-  agentDueAt: number;
+  agentRetryAt: number;
 };
 type HostingCredentials = Pick<HostingConnection, "id" | "name" | "endpoint" | "username" | "authMode"> & { secret: string };
 type WordPressScope = Pick<WordPressProbe, "id" | "projectId">;
@@ -80,18 +81,20 @@ async function wordpressProbe(site: HostingInstallationView): Promise<WordPressP
   if (!current?.observedAt || current.source !== "wordpress-observer" || current.collectionMode === "early" || current.error) return scope;
   const state = (await readUpdateSource(`wordpress:${site.id}`))?.settings;
   const agent = state?.localAgent;
-  const verifiedAt = Date.parse(agent?.lastVerifiedAt ?? "");
   const setup = state?.agentInstallation;
   // A failed installation is already waiting for its persisted retry time.
   // Keep checking WordPress versions while respecting that backoff.
   const retryAt = setup?.state === "failed" && !agent?.ready ? Date.parse(setup.nextAttemptAt ?? "") : NaN;
-  const healthy = agent?.ready && agent.bundleVersion === wordpressAgentPackageVersion && !state?.agentReportedFailure &&
-      (!setup || setup.state === "ready") && Number.isFinite(verifiedAt) && verifiedAt <= Date.now();
+  const ready = agent?.ready && agent.bundleVersion === wordpressAgentPackageVersion && !state?.agentReportedFailure &&
+      (!setup || setup.state === "ready");
   return await withWordPressObserver(site, (url, secret) => ({
     ...scope,
     site: { documentRoot: site.documentRoot, suggestedEnvironment: site.suggestedEnvironment, domains: site.domains, aliases: site.aliases },
-    url, secret, agent: healthy ? { directory: agent.directory, environment: agent.environment, secret: agent.secret } : null,
-    agentDueAt: healthy ? verifiedAt + 10 * 60_000 : Number.isFinite(retryAt) ? retryAt : 0,
+    url, secret, agent: ready ? {
+      directory: agent.directory, environment: agent.environment, secret: agent.secret,
+      healthKey: agentHealthKey(site, agent, state?.agentStateChangedAt, setup?.requestId),
+    } : null,
+    agentRetryAt: Number.isFinite(retryAt) ? retryAt : 0,
     inventoryAt: current.observedAt!,
     versions: wordpressSecurityVersions(current),
   })) ?? scope;
@@ -181,10 +184,15 @@ export async function probeMaintenance(probes: MaintenanceProbes, plan: Maintena
             const changed = !inventory || inventory.collectionMode !== "normal" || wordpressSecurityVersions(inventory) !== proof.versions;
             if (changed || !observationIsFresh(proof.inventoryAt, wordpressObservationLifetime - 10 * 60_000, now)) add(plan.wordpress, proof.id);
             if (changed) add(plan.security.o2switch, proof.projectId);
-            if (now >= proof.agentDueAt || (proof.agent && (changed || !inventory ||
-                !await agentControlHealthy({ ...proof.site, inventory }, proof.agent, cpanelAgentFiles(item.credentials, proof.agent.directory, transport))))) {
-              add(plan.agents, proof.id);
+            if (!proof.agent) {
+              if (now >= proof.agentRetryAt) add(plan.agents, proof.id);
+              return;
             }
+            const healthy = !changed && !!inventory && await agentControlHealthy(
+              { ...proof.site, inventory }, proof.agent, cpanelAgentFiles(item.credentials, proof.agent.directory, transport),
+            );
+            await recordAgentHealth(proof.agent.healthKey, healthy);
+            if (!healthy) add(plan.agents, proof.id);
           }),
           mapConcurrent(item.sources, 2, async source => {
             const files = source.digest && await readHostingSources(source.root, client, signal).catch(() => null);

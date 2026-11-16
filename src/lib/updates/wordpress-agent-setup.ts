@@ -5,7 +5,8 @@ import { log, transaction } from "../db";
 import { isPostgres } from "../storage";
 import { hostingDiscovery, hostingInstallation } from "../hosting-discovery";
 import { hostingConnections, withHostingCredentials } from "../hosting-connections";
-import { agentBundle, provisionLocalAgent, cpanelAgentFiles, openAgentPayload, type LocalAgentSettings, type AgentFiles } from "./wordpress-agent";
+import { agentBundle, provisionLocalAgent } from "./wordpress-agent";
+import { agentHeartbeatHealthy, agentHealthKey, recordAgentHealth } from "./wordpress-agent-health";
 import { githubRequest, updateRunner } from "./github";
 import { readUpdateSource, updateStorage, writeUpdateSource } from "./storage";
 import type { SourceSettings, UpdateTarget } from "./types";
@@ -38,7 +39,7 @@ async function claimAgentFailureAlerts(failures: AgentFailure[], requestId?: str
       if (requestId && setup?.requestId !== requestId) continue;
       const reason = preparationError ?? (setup?.state === "failed" ? setup.error || "Installation à vérifier." : undefined);
       if (!reason || current?.settings.agentReportedFailure === reason) continue;
-      await writeUpdateSource(targetId, projectId, { ...current?.settings, agentReportedFailure: reason });
+      await writeUpdateSource(targetId, projectId, { ...current?.settings, agentReportedFailure: reason, agentStateChangedAt: new Date().toISOString() });
       newFailures++;
     }
     return newFailures;
@@ -67,7 +68,7 @@ export async function requestAgentInstallation(id: string, dispatch = dispatchAg
     if (!retry && setup?.state === "queued" && setup.dispatchedAt && Date.now() - Date.parse(setup.dispatchedAt) < 5 * 60_000) return null;
     const now = new Date().toISOString();
     const job: Installation = { requestId: setup?.state === "queued" ? setup.requestId : randomUUID(), root: site.documentRoot, connectionId: site.connectionId, state: "queued", attempts: setup?.attempts || 0, requestedAt: setup?.requestedAt || now, dispatchedAt: now };
-    await writeUpdateSource(targetId, site.project!.id, { ...current?.settings, ...(current?.settings.localAgent ? { localAgent: { ...current.settings.localAgent, ready: false } } : {}), agentInstallation: job });
+    await writeUpdateSource(targetId, site.project!.id, { ...current?.settings, ...(setup?.state !== "queued" && { agentStateChangedAt: now }), ...(current?.settings.localAgent ? { localAgent: { ...current.settings.localAgent, ready: false } } : {}), agentInstallation: job });
     await log("live", "hosting.agent_queued", `Installation automatique de l’agent demandée sur ${site.domains[0]}.`, site.project!.id);
     return job;
   });
@@ -108,7 +109,7 @@ export async function processAgentInstallation(id: string, requestId?: string, d
     const scope = `o2switch:${site.connectionId}:${site.id}:`;
     if (await (await updateStorage()).prepare("SELECT scope FROM update_locks WHERE scope=?").get(scope)) return null;
     const job: Installation = { ...setup, state: "installing", attempts: setup.attempts + 1, leaseUntil: new Date(Date.now() + 20 * 60_000).toISOString(), error: undefined, nextAttemptAt: undefined };
-    await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentInstallation: job });
+    await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentStateChangedAt: new Date().toISOString(), agentInstallation: job });
     return job;
   });
   if (!claimed) return false;
@@ -135,7 +136,7 @@ export async function processAgentInstallation(id: string, requestId?: string, d
       await lockSource(targetId, site.project!.id);
       const current = await readUpdateSource(targetId);
       if (current?.settings.agentInstallation?.requestId !== claimed.requestId || current.settings.localAgent?.secret !== bundle.settings.secret) throw new ApiError("La configuration de l’agent vient de changer.", 409);
-      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentReportedFailure: undefined, localAgent: { ...bundle.settings, ready: true, lastVerifiedAt: new Date().toISOString(), previousFileHashes: undefined, previousPhpBinary: undefined }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
+      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentStateChangedAt: new Date().toISOString(), agentReportedFailure: undefined, localAgent: { ...bundle.settings, ready: true, lastVerifiedAt: undefined, previousFileHashes: undefined, previousPhpBinary: undefined }, agentInstallation: { ...claimed, state: "ready", leaseUntil: undefined } });
       await log("live", "hosting.agent_installed", `Agent local installé et vérifié sur ${site.domains[0]}, sans mise à jour du site.`, site.project!.id);
     });
     return true;
@@ -145,7 +146,7 @@ export async function processAgentInstallation(id: string, requestId?: string, d
       await lockSource(targetId, site.project!.id);
       const current = await readUpdateSource(targetId);
       if (current?.settings.agentInstallation?.requestId !== claimed.requestId) return;
-      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, ...(current.settings.localAgent ? { localAgent: { ...current.settings.localAgent, ready: false } } : {}), agentInstallation: { ...claimed, state: "failed", leaseUntil: undefined, nextAttemptAt: new Date(Date.now() + Math.min(60, 5 * 2 ** Math.min(claimed.attempts - 1, 4)) * 60_000).toISOString(), error: message } });
+      await writeUpdateSource(targetId, site.project!.id, { ...current.settings, agentStateChangedAt: new Date().toISOString(), ...(current.settings.localAgent ? { localAgent: { ...current.settings.localAgent, ready: false } } : {}), agentInstallation: { ...claimed, state: "failed", leaseUntil: undefined, nextAttemptAt: new Date(Date.now() + Math.min(60, 5 * 2 ** Math.min(claimed.attempts - 1, 4)) * 60_000).toISOString(), error: message } });
       await log("live", "hosting.agent_failed", `Agent sur ${site.domains[0]} : ${message}`, site.project!.id);
     });
     return false;
@@ -162,26 +163,6 @@ export async function requestLinkedAgents(connectionId: string, dispatch = dispa
   let queued = 0;
   for (const site of sites) if ((await requestAgentInstallation(site.id, dispatch)).queued) queued++;
   return { queued };
-}
-// Both proofs are signed: a ticking cron alone does not prove WordPress still loads.
-export async function agentControlHealthy(site: Pick<HostingInstallationView, "suggestedEnvironment" | "inventory" | "documentRoot" | "domains" | "aliases">, settings: Pick<LocalAgentSettings, "environment" | "secret">, files: Pick<AgentFiles, "read">) {
-  try {
-    if (settings.environment !== site.suggestedEnvironment || !site.inventory?.php || site.inventory.error || site.inventory.collectionMode === "early") return false;
-    const heartbeat = await files.read("heartbeat.json"), readiness = await files.read("readiness.json");
-    if (!heartbeat || !readiness) return false;
-    const proof = z.object({ protocol: z.literal("vigie-local-v1"), root: z.string(), php: z.string(), time: z.number().int() });
-    const tick = proof.parse(openAgentPayload(JSON.parse(heartbeat), settings.secret));
-    const probe = proof.extend({ ready: z.boolean(), eligibility: z.object({ multisite: z.boolean(), fileModsDisabled: z.boolean(), home: z.string().url() }).optional() }).parse(openAgentPayload(JSON.parse(readiness), settings.secret));
-    const valid = (value: z.infer<typeof proof>, maxAge: number) => value.root === site.documentRoot && value.php === site.inventory!.php!.version && Date.now() / 1000 - value.time >= -30 && Date.now() / 1000 - value.time <= maxAge;
-    const expected = new URL(site.inventory.site?.home || `https://${site.domains[0]}`).hostname.replace(/^www\./, "");
-    if (![...site.domains, ...site.aliases].some(domain => domain.replace(/^www\./, "") === expected)) return false;
-    return valid(tick, 180) && valid(probe, 600) && probe.ready && !!probe.eligibility && !probe.eligibility.multisite && !probe.eligibility.fileModsDisabled && new URL(probe.eligibility.home).hostname.replace(/^www\./, "") === expected;
-  } catch { return false; }
-}
-async function agentHeartbeatHealthy(site: HostingInstallationView, settings: LocalAgentSettings) {
-  try {
-    return await withHostingCredentials(site.connectionId, connection => agentControlHealthy(site, settings, cpanelAgentFiles(connection, settings.directory)));
-  } catch { return false; }
 }
 export async function reconcileAgentInstallations(dependencies: { healthy?: typeof agentHeartbeatHealthy; prepare?: typeof prepareSite; provision?: typeof provisionLocalAgent } = {}, installationIds?: readonly string[]) {
   let ready = 0;
@@ -203,15 +184,22 @@ export async function reconcileAgentInstallations(dependencies: { healthy?: type
             healthy = eligible(fresh) && fresh.documentRoot === site.documentRoot && fresh.project?.id === site.project?.id && previous.localAgent.bundleVersion === wordpressAgentPackageVersion && await (dependencies.healthy || agentHeartbeatHealthy)(fresh, previous.localAgent);
           } catch { /* Requeue with the existing key; provisioning will record any persistent failure. */ }
           if (healthy) {
-            await transaction(async () => {
+            if (previous.agentReportedFailure) await transaction(async () => {
               await lockSource(`wordpress:${site.id}`, site.project!.id);
               const current = await readUpdateSource(`wordpress:${site.id}`);
-              if (current?.settings.localAgent?.ready && current.settings.localAgent.secret === previous.localAgent!.secret && (!current.settings.agentInstallation || current.settings.agentInstallation.state === "ready")) {
-                await writeUpdateSource(`wordpress:${site.id}`, site.project!.id, { ...current.settings, agentReportedFailure: undefined, localAgent: { ...current.settings.localAgent, lastVerifiedAt: new Date().toISOString() } });
+              if (current?.settings.localAgent?.ready && current.settings.localAgent.secret === previous.localAgent!.secret &&
+                  current.settings.agentStateChangedAt === previous.agentStateChangedAt &&
+                  current.settings.agentReportedFailure === previous.agentReportedFailure &&
+                  (!current.settings.agentInstallation || current.settings.agentInstallation.state === "ready")) {
+                await writeUpdateSource(`wordpress:${site.id}`, site.project!.id, {
+                  ...current.settings, agentReportedFailure: undefined, agentStateChangedAt: new Date().toISOString(),
+                  localAgent: { ...current.settings.localAgent, lastVerifiedAt: undefined },
+                });
               }
             });
             ready++; continue;
           }
+          await recordAgentHealth(agentHealthKey(site, previous.localAgent, previous.agentStateChangedAt, previous.agentInstallation?.requestId), false);
           await requestAgentInstallation(site.id, async () => {}, true);
         }
         await requestAgentInstallation(site.id, async () => {});
