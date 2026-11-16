@@ -8,9 +8,10 @@ import { createProjectSchema } from "../src/lib/validation";
 import { saveHostingConnection } from "../src/lib/hosting-connections";
 import { applyDiscoverySnapshot, hostingDiscovery, hostingInstallation } from "../src/lib/hosting-discovery";
 import { hostingStorage } from "../src/lib/hosting-storage";
-import { checkRequestedAgentInstallation, processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations, agentControlHealthy } from "../src/lib/updates/wordpress-agent-setup";
+import { checkRequestedAgentInstallation, processAgentInstallation, requestAgentInstallation, requestLinkedAgents, reconcileAgentInstallations } from "../src/lib/updates/wordpress-agent-setup";
+import { agentControlHealthy, agentHealthKey, readAgentHealth, recordAgentHealth } from "../src/lib/updates/wordpress-agent-health";
 import { signAgentPayload } from "../src/lib/updates/wordpress-agent";
-import { updateTargets } from "../src/lib/updates/targets";
+import { prepareUpdateTargets, updateTargets } from "../src/lib/updates/targets";
 import { readUpdateSource, writeUpdateSource, updateStorage } from "../src/lib/updates/storage";
 
 process.env.VIGIE_CONNECTOR_ENCRYPTION_KEY = randomBytes(32).toString("hex");
@@ -164,8 +165,9 @@ test("Contrôle agent : état prêt expiré bloqué, réparation invalide imméd
   const f = await fixture(); await requestAgentInstallation(f.site.id, async () => {});
   await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
   const source = (await readUpdateSource(f.targetId))!;
-  await writeUpdateSource(f.targetId, f.project.id, { ...source.settings, localAgent: { ...source.settings.localAgent!, lastVerifiedAt: new Date(Date.now() - 16 * 60_000).toISOString() } });
-  assert.match((await updateTargets(f.project.id))[0].unavailable || "", /expiré/);
+  await writeUpdateSource(f.targetId, f.project.id, { ...source.settings, agentStateChangedAt: new Date(Date.now() - 16 * 60_000).toISOString() });
+  const prepared = await prepareUpdateTargets({ project: f.project, hosting: [{ ...f.site, connectionName: f.host.name }] }, new Set());
+  assert.match(prepared.targets[0].unavailable || "", /expiré/);
   await requestAgentInstallation(f.site.id, async () => {}, true);
   const queued = (await readUpdateSource(f.targetId))!.settings;
   assert.equal(queued.localAgent!.ready, false);
@@ -180,6 +182,10 @@ test("Contrôle du parc : les agents sains sont vérifiés avant d’attendre un
     await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
   }
   const events: string[] = [];
+  const source = (await readUpdateSource(healthy.targetId))!;
+  assert.ok(source.settings.agentStateChangedAt);
+  await writeUpdateSource(healthy.targetId, healthy.project.id, { ...source.settings, agentStateChangedAt: new Date(Date.now() - 86_400_000).toISOString() });
+  const before = await readUpdateSource(healthy.targetId);
   await reconcileAgentInstallations({
     prepare: hostingInstallation,
     healthy: async site => {
@@ -189,7 +195,30 @@ test("Contrôle du parc : les agents sains sont vérifiés avant d’attendre un
     provision: async target => { if (target.remoteId === broken.site.id) events.push("broken repaired"); },
   });
   assert.deepEqual(events, ["healthy checked", "broken repaired"]);
-  assert.ok((await readUpdateSource(healthy.targetId))!.settings.localAgent!.lastVerifiedAt);
+  assert.deepEqual(await readUpdateSource(healthy.targetId), before);
+});
+
+test("Preuve de santé WordPress : expiration et changement d’état indépendants de la date du dernier contrôle", async t => {
+  const f = await fixture();
+  await requestAgentInstallation(f.site.id, async () => {});
+  await processAgentInstallation(f.site.id, undefined, { prepare: hostingInstallation, provision: async () => {} });
+  const { settings } = (await readUpdateSource(f.targetId))!;
+  const key = agentHealthKey(f.site, settings.localAgent!, settings.agentStateChangedAt, settings.agentInstallation!.requestId);
+  const records = new Map<string, unknown>();
+  const cache = {
+    get: async (key: string) => records.get(key) ?? null,
+    set: async (key: string, value: unknown) => { records.set(key, value); },
+  };
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  await recordAgentHealth(key, true, cache);
+  assert.equal(await readAgentHealth(key, cache), true);
+  t.mock.timers.tick(60_000);
+  const repaired = agentHealthKey(f.site, settings.localAgent!, new Date().toISOString(), settings.agentInstallation!.requestId);
+  assert.equal(await readAgentHealth(repaired, cache), null);
+  await recordAgentHealth(key, false, cache);
+  assert.equal(await readAgentHealth(key, cache), false);
+  t.mock.timers.tick(15 * 60_000);
+  assert.equal(await readAgentHealth(key, cache), null);
 });
 
 test("Alertes agent : un échec répété reste visible, une autre cause ou une rechute déclenche une alerte", async () => {
